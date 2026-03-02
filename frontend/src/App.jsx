@@ -153,13 +153,13 @@ function App() {
             )}
             <form onSubmit={handleSubmit}>
               <label className="field">
-                <span>Language</span>
+                <span>Language / 语言</span>
                 <select
                   value={language}
                   onChange={(e) => setLanguage(e.target.value)}
                 >
-                  <option value="EN">English</option>
-                  <option value="ZH">Chinese</option>
+                  <option value="EN">English / 英文</option>
+                  <option value="ZH">Chinese / 中文</option>
                 </select>
               </label>
               <label className="field">
@@ -168,8 +168,8 @@ function App() {
                   value={genre}
                   onChange={(e) => setGenre(e.target.value)}
                 >
-                  <option value="NON_WEREWOLF">Normal</option>
-                  <option value="WEREWOLF">Werewolf</option>
+                  <option value="NON_WEREWOLF">Normal / 普通</option>
+                  <option value="WEREWOLF">Werewolf / 狼人</option>
                 </select>
               </label>
               <label className="field">
@@ -186,7 +186,7 @@ function App() {
                 </select>
               </label>
               <label className="field">
-                <span>Summary (optional) / 摘要（可选）</span>
+                <span>Summary / 摘要</span>
                 <textarea
                   value={logline}
                   onChange={(e) => setLogline(e.target.value)}
