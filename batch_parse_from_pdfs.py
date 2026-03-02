@@ -432,7 +432,8 @@ def parse_script_lines(lines):
 def process_show(show_dir: Path, pdf_path: Path):
     show_id = show_dir.name
     title = pdf_path.stem
-    print(f"Processing show '{show_id}' from '{pdf_path.name}'")
+    # Avoid UnicodeEncodeError on Windows consoles by not printing non-ASCII filenames
+    print(f"Processing show '{show_id}'")
 
     reader = PdfReader(str(pdf_path))
     text_by_page = []

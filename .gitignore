@@ -1,0 +1,27 @@
+# Environment and secrets (never commit API keys)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Training artifacts (large, derived)
+train.jsonl
+train_openai.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+venv/
+.venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Optional: uncomment if you want to ignore script samples
+# script_samples/

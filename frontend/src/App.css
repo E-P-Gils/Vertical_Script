@@ -1,0 +1,250 @@
+/* Blood red & steel black theme */
+:root {
+  --steel-black: #1a1a1d;
+  --steel-dark: #252529;
+  --steel: #2d2d33;
+  --steel-light: #3d3d45;
+  --blood-dark: #4a1515;
+  --blood: #8b2020;
+  --blood-light: #b82828;
+  --blood-pale: #d44;
+  --cream: #e8e4e0;
+  --metal: #6b6b73;
+}
+
+.page {
+  min-height: 100vh;
+  background: linear-gradient(180deg, var(--steel-black) 0%, var(--steel-dark) 30%, var(--blood-dark) 60%, var(--steel) 100%);
+  color: var(--cream);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.title {
+  font-size: clamp(1.5rem, 4vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--blood-pale);
+  text-shadow: 0 0 8px var(--blood), 0 1px 2px var(--steel-black);
+  margin: 0;
+}
+
+/* Logo: Gnoll spritesheet – first 4 frames, discrete (videogame-style) */
+.logo-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  margin: 1rem 0;
+}
+
+.logo-sprite {
+  width: 120px;
+  height: 120px;
+  background-image: url("/Gnoll3_Idle_with_shadow.png");
+  background-size: 400% 100%;
+  background-position: 0% 0%;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  animation: sprite-idle 0.6s steps(4) infinite;
+}
+
+.logo-sprite.sprite-running {
+  background-image: url("/Gnoll3_Run_with_shadow.png");
+  animation: sprite-run 0.4s steps(4) infinite;
+}
+
+@keyframes sprite-idle {
+  0%   { background-position: 0% 0%; }
+  25%  { background-position: 33.33% 0%; }
+  50%  { background-position: 66.66% 0%; }
+  75%  { background-position: 100% 0%; }
+  100% { background-position: 0% 0%; }
+}
+
+@keyframes sprite-run {
+  0%   { background-position: 0% 0%; }
+  25%  { background-position: 33.33% 0%; }
+  50%  { background-position: 66.66% 0%; }
+  75%  { background-position: 100% 0%; }
+  100% { background-position: 0% 0%; }
+}
+
+.btn-open {
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--cream);
+  background: var(--blood);
+  border: 2px solid var(--blood-pale);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+.btn-open:hover {
+  background: var(--blood-light);
+}
+.btn-open:active {
+  transform: scale(0.98);
+}
+
+.script-output {
+  width: 100%;
+  max-width: 720px;
+  margin-top: 2rem;
+  padding: 1rem;
+  background: rgba(26, 26, 29, 0.85);
+  border: 1px solid var(--blood-dark);
+  border-radius: 8px;
+}
+.script-output h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+  color: var(--blood-pale);
+}
+.script-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.script-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--cream);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+/* Modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+.modal {
+  background: var(--steel-dark);
+  border: 2px solid var(--blood);
+  border-radius: 12px;
+  padding: 1.5rem;
+  width: 100%;
+  max-width: 420px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.modal-title {
+  margin: 0 0 1rem;
+  font-size: 1.25rem;
+  color: var(--blood-pale);
+}
+.loading-bar-wrap {
+  width: 100%;
+  margin-bottom: 1rem;
+  background: var(--steel-black);
+  border-radius: 999px;
+  overflow: hidden;
+  height: 6px;
+}
+.loading-bar {
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--blood), var(--blood-light));
+  animation: loading-stripe 1s linear infinite;
+}
+@keyframes loading-stripe {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+.field {
+  display: block;
+  margin-bottom: 1rem;
+}
+.field span {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 0.9rem;
+  color: var(--blood-pale);
+}
+.field select,
+.field textarea {
+  width: 100%;
+  padding: 0.5rem;
+  font-size: 1rem;
+  background: var(--steel-black);
+  border: 1px solid var(--steel-light);
+  border-radius: 6px;
+  color: var(--cream);
+}
+.field textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+.field textarea.invalid {
+  border-color: #a44;
+}
+.word-count {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--blood-pale);
+}
+.field textarea.invalid + .word-count {
+  color: #e88;
+}
+.error {
+  color: #e88;
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem;
+}
+.modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+.btn {
+  padding: 0.5rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  border: none;
+  transition: opacity 0.2s;
+}
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.btn-secondary {
+  background: var(--steel-light);
+  color: var(--cream);
+}
+.btn-primary {
+  background: var(--blood);
+  color: var(--cream);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--blood-light);
+}
