@@ -27,7 +27,12 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: OPENAI_API_KEY,
+  // Allow slower responses on free Render / high latency routes
+  timeout: 600_000, // 10 minutes in milliseconds
+  maxRetries: 2,
+});
 
 /**
  * Build control prompt for the fine-tuned model.
@@ -62,12 +67,14 @@ app.post("/generate", async (req, res) => {
         {
           role: "system",
           content:
-            "You are a vertical script generator. Given control tags (language, genre, episode count, optional logline), output a complete vertical/short-form script in the exact format used for episodic vertical video: scene headings (INT./EXT. LOCATION - DAY/NIGHT), action blocks, and dialogue (CHARACTER then lines). Output only the script text, no commentary.",
+            "You are a vertical script generator. Given control tags (language, genre, episode count, optional logline), output a complete vertical/short-form script with a coherent beginning, middle, and end. Use scene headings (INT./EXT. LOCATION - DAY/NIGHT), vivid action blocks, and natural dialogue (CHARACTER then lines). Avoid meta text like 'End of Free Preview'. Avoid looping or repeating the same sentence many times. Output only the script text, no commentary.",
         },
         { role: "user", content: prompt },
       ],
-      max_tokens: 16000,
-      temperature: 0.8,
+      max_tokens: 8000,
+      temperature: 0.5,
+      frequency_penalty: 1.0,
+      presence_penalty: 0.2,
     });
 
     const text =

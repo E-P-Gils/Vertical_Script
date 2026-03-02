@@ -2,7 +2,7 @@ import { useState } from "react";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import "./App.css";
 
-const API_BASE = import.meta.env.DEV ? "/api" : "http://localhost:3001";
+const API_BASE = "https://vertical-script.onrender.com";
 
 function App() {
   const [modalOpen, setModalOpen] = useState(false);
