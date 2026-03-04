@@ -29,7 +29,7 @@ function App() {
         body: JSON.stringify({
           genre,
           language: "EN",
-          episodeCount: 60,
+          episodeCount: 3,
           title: "Generated Script",
           logline: logline.trim().slice(0, 1500),
         }),
