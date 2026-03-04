@@ -59,34 +59,113 @@ function App() {
       let { width, height } = page.getSize();
       let y = height - pageMargin;
 
-      const wrapLine = (text, maxChars = 100) => {
+      // Very simple screenplay-aware layout.
+      const wrapLine = (text, maxChars) => {
         const result = [];
         let remaining = text;
-        while (remaining.length > maxChars) {
-          result.push(remaining.slice(0, maxChars));
-          remaining = remaining.slice(maxChars);
+        const limit = maxChars || 90;
+        while (remaining.length > limit) {
+          result.push(remaining.slice(0, limit));
+          remaining = remaining.slice(limit);
         }
         if (remaining.length) result.push(remaining);
         return result;
       };
 
+      const isSceneHeading = (t) =>
+        /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(t.trim());
+
+      const isCharacterLine = (t) => {
+        const s = t.trim();
+        if (!s) return false;
+        if (s.length < 2 || s.length > 40) return false;
+        if (/[.!?]/.test(s)) return false;
+        // Allow spaces and parentheses, but mostly caps.
+        const letters = s.replace(/[^A-Z]/g, "");
+        return letters.length >= Math.max(3, Math.floor(s.replace(/\s+/g, "").length * 0.6));
+      };
+
+      const isParenthetical = (t) =>
+        /^\(.+\)$/.test(t.trim());
+
       const lines = script.split(/\r?\n/);
-      for (const rawLine of lines) {
-        const segments = rawLine === "" ? [""] : wrapLine(rawLine);
-        for (const line of segments) {
+      let prevType = "blank";
+
+      for (const raw of lines) {
+        const text = raw.replace(/\s+$/g, "");
+        const trimmed = text.trim();
+
+        if (!trimmed) {
+          // Blank line = vertical gap.
+          y -= lineHeight;
+          prevType = "blank";
+          continue;
+        }
+
+        let lineType;
+        if (isSceneHeading(trimmed)) {
+          lineType = "scene";
+        } else if (isCharacterLine(trimmed)) {
+          lineType = "character";
+        } else if (isParenthetical(trimmed)) {
+          lineType = "parenthetical";
+        } else if (
+          prevType === "character" ||
+          prevType === "parenthetical" ||
+          prevType === "dialogue"
+        ) {
+          lineType = "dialogue";
+        } else {
+          lineType = "action";
+        }
+
+        // Choose indent and wrap width by type.
+        let x;
+        let maxChars;
+        switch (lineType) {
+          case "scene":
+            x = pageMargin;
+            maxChars = 80;
+            // Extra space before a new scene heading.
+            if (prevType !== "blank") y -= lineHeight;
+            break;
+          case "character":
+            x = pageMargin + 170;
+            maxChars = 40;
+            if (prevType !== "blank" && prevType !== "scene") y -= lineHeight / 2;
+            break;
+          case "parenthetical":
+            x = pageMargin + 150;
+            maxChars = 45;
+            break;
+          case "dialogue":
+            x = pageMargin + 130;
+            maxChars = 55;
+            break;
+          case "action":
+          default:
+            x = pageMargin;
+            maxChars = 90;
+            break;
+        }
+
+        const segments = wrapLine(trimmed, maxChars);
+        for (const seg of segments) {
           if (y < pageMargin) {
             page = pdfDoc.addPage();
             ({ width, height } = page.getSize());
             y = height - pageMargin;
           }
-          page.drawText(line, {
-            x: pageMargin,
+          page.drawText(seg, {
+            x,
             y,
             size: fontSize,
             font: courier,
           });
           y -= lineHeight;
         }
+
+        prevType = lineType;
       }
 
       const pdfBytes = await pdfDoc.save();
