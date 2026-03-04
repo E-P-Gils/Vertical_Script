@@ -34,57 +34,117 @@ const openai = new OpenAI({
   maxRetries: 2,
 });
 
-/**
- * Build control prompt for the fine-tuned model.
- * Matches the format used in training: [LANG=...] [GENRE=...] [EPISODES=...] [TITLE] [LOGLINE] [START_SCRIPT]
- */
-function buildPrompt(body) {
-  const lang = (body.language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
-  const genre =
-    (body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF"
-      ? "WEREWOLF"
-      : "NON_WEREWOLF";
-  const episodes = Math.max(1, parseInt(body.episodeCount, 10) || 10);
-  const title = body.title ? body.title.trim() : "Generated Script";
-  const logline = (body.logline || "").trim().slice(0, 1500);
+const V2_SYSTEM_PROMPT = `You are a vertical episode writer for short-form / vertical dramas.
 
-  const lines = [
-    `[LANG=${lang}] [GENRE=${genre}] [EPISODES=${episodes}]`,
-    `[TITLE] ${title}`,
-    logline ? `[LOGLINE] ${logline}` : "[LOGLINE] ",
-    "[START_SCRIPT]",
-  ];
+The user sends you a JSON object that describes one episode:
+- episode number, total_episodes_for_show, arc_phase (hook / escalation / lock_in / spin_out)
+- protagonist_type, core_theme, content_rating
+- logline (season summary)
+- scenes: list of scene_id, location, beat_type, characters
+
+You MUST respond with ONLY a JSON array of blocks. Each block: block_id, episode, scene_id, type ("action" or "dialogue"), speaker (ALL CAPS for dialogue, null for action), text.
+
+Follow the plan, write vivid action and natural dialogue. Strong hook in the first blocks, end on a cliffhanger or question. No commentary—only the JSON array.`;
+
+function arcPhase(ep, total) {
+  if (ep <= 0) return "unknown";
+  if (ep <= 3) return "hook";
+  if (ep <= 7) return "escalation";
+  if (ep <= 21) return "lock_in";
+  return "spin_out";
+}
+
+function buildEpisodeInput(ep, total, logline, genre) {
+  const isWerewolf = (genre || "").toUpperCase() === "WEREWOLF";
+  const phase = arcPhase(ep, total);
+  return {
+    show_id: "generated",
+    episode: ep,
+    total_episodes_for_show: total,
+    arc_phase: phase,
+    cliffhanger_flag: true,
+    hook_profile: { visual_3s: true, theme_7s: true, emotion_21s: true },
+    protagonist_type: "underdog_female",
+    core_theme: isWerewolf ? "werewolf_curse" : "forbidden_romance",
+    content_rating: "PG-13",
+    logline: (logline || "").trim().slice(0, 1500),
+    scenes: [
+      { scene_id: `E${ep}_S1`, location: "INT. LOCATION - DAY", beat_type: "generic_drama", arc_phase: phase, characters: null },
+      { scene_id: `E${ep}_S2`, location: "INT. / EXT. - DAY OR NIGHT", beat_type: "generic_drama", arc_phase: phase, characters: null },
+    ],
+  };
+}
+
+function blocksToScriptText(blocks) {
+  if (!Array.isArray(blocks) || blocks.length === 0) return "";
+  const lines = [];
+  let lastScene = null;
+  for (const b of blocks) {
+    const sceneId = b.scene_id || "";
+    if (sceneId && sceneId !== lastScene) {
+      const loc = (b.location || "INT. SCENE - DAY").trim();
+      lines.push(loc.startsWith("INT") || loc.startsWith("EXT") ? loc : `INT. ${loc} - DAY`);
+      lastScene = sceneId;
+    }
+    const type = (b.type || b.block_type || "action").toLowerCase();
+    const text = (b.text || "").trim();
+    if (!text) continue;
+    if (type === "dialogue" && b.speaker) {
+      lines.push(String(b.speaker).toUpperCase());
+      lines.push(text);
+    } else {
+      lines.push(text);
+    }
+  }
   return lines.join("\n");
+}
+
+function parseBlocksFromContent(content) {
+  const raw = (content || "").trim();
+  const jsonMatch = raw.match(/\s*(\[[\s\S]*\])\s*$/);
+  const str = jsonMatch ? jsonMatch[1] : raw;
+  try {
+    return JSON.parse(str);
+  } catch (_) {
+    return null;
+  }
 }
 
 app.post("/generate", async (req, res) => {
   try {
-    const prompt = buildPrompt(req.body);
+    const episodeCount = Math.max(1, Math.min(120, parseInt(req.body.episodeCount, 10) || 60));
+    const logline = (req.body.logline || "").trim().slice(0, 1500);
+    const genre = (req.body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
 
-    const completion = await openai.chat.completions.create({
-      model: FINETUNED_MODEL,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a vertical script generator. Given control tags (language, genre, episode count, optional logline), output a complete vertical/short-form script with a coherent beginning, middle, and end. Use scene headings (INT./EXT. LOCATION - DAY/NIGHT), vivid action blocks, and natural dialogue (CHARACTER then lines). Avoid meta text like 'End of Free Preview'. Avoid looping or repeating the same sentence many times. Output only the script text, no commentary.",
-        },
-        { role: "user", content: prompt },
-      ],
-      max_tokens: 8000,
-      temperature: 0.5,
-      frequency_penalty: 1.0,
-      presence_penalty: 0.2,
-    });
+    const fullScriptParts = [];
 
-    const text =
-      completion.choices?.[0]?.message?.content?.trim() || "";
-    res.json({ script: text, model: FINETUNED_MODEL });
+    for (let ep = 1; ep <= episodeCount; ep++) {
+      const input = buildEpisodeInput(ep, episodeCount, logline, genre);
+      const userContent = JSON.stringify(input);
+
+      const completion = await openai.chat.completions.create({
+        model: FINETUNED_MODEL,
+        messages: [
+          { role: "system", content: V2_SYSTEM_PROMPT },
+          { role: "user", content: userContent },
+        ],
+        max_tokens: 4096,
+        temperature: 0.6,
+        frequency_penalty: 0.8,
+        presence_penalty: 0.15,
+      });
+
+      const content = completion.choices?.[0]?.message?.content?.trim() || "";
+      const blocks = parseBlocksFromContent(content);
+      const episodeText = blocks ? blocksToScriptText(blocks) : content;
+      fullScriptParts.push(`EPISODE ${ep}\n\n${episodeText}`);
+    }
+
+    const script = fullScriptParts.join("\n\n");
+    res.json({ script, model: FINETUNED_MODEL });
   } catch (err) {
     console.error(err);
-    res
-      .status(500)
-      .json({ error: err.message || "Generation failed" });
+    res.status(500).json({ error: err.message || "Generation failed" });
   }
 });
 
