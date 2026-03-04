@@ -75,22 +75,28 @@ function buildEpisodeInput(ep, total, logline, genre) {
   };
 }
 
+function safeStr(val) {
+  if (val == null) return "";
+  if (typeof val === "string") return val.trim();
+  return String(val).trim();
+}
+
 function blocksToScriptText(blocks) {
   if (!Array.isArray(blocks) || blocks.length === 0) return "";
   const lines = [];
   let lastScene = null;
   for (const b of blocks) {
-    const sceneId = b.scene_id || "";
+    const sceneId = safeStr(b.scene_id);
     if (sceneId && sceneId !== lastScene) {
-      const loc = (b.location || "INT. SCENE - DAY").trim();
+      const loc = safeStr(b.location) || "INT. SCENE - DAY";
       lines.push(loc.startsWith("INT") || loc.startsWith("EXT") ? loc : `INT. ${loc} - DAY`);
       lastScene = sceneId;
     }
-    const type = (b.type || b.block_type || "action").toLowerCase();
-    const text = (b.text || "").trim();
+    const type = safeStr(b.type || b.block_type || "action").toLowerCase();
+    const text = safeStr(b.text);
     if (!text) continue;
-    if (type === "dialogue" && b.speaker) {
-      lines.push(String(b.speaker).toUpperCase());
+    if (type === "dialogue" && (b.speaker != null && b.speaker !== "")) {
+      lines.push(safeStr(b.speaker).toUpperCase() || "CHARACTER");
       lines.push(text);
     } else {
       lines.push(text);
@@ -112,32 +118,45 @@ function parseBlocksFromContent(content) {
 
 app.post("/generate", async (req, res) => {
   try {
-    const episodeCount = Math.max(1, Math.min(120, parseInt(req.body.episodeCount, 10) || 60));
-    const logline = (req.body.logline || "").trim().slice(0, 1500);
-    const genre = (req.body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
+    const body = req.body || {};
+    const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
+    const logline = safeStr(body.logline).slice(0, 1500);
+    const genre = String(body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
 
     const fullScriptParts = [];
 
     for (let ep = 1; ep <= episodeCount; ep++) {
-      const input = buildEpisodeInput(ep, episodeCount, logline, genre);
-      const userContent = JSON.stringify(input);
+      try {
+        const input = buildEpisodeInput(ep, episodeCount, logline, genre);
+        const userContent = JSON.stringify(input);
 
-      const completion = await openai.chat.completions.create({
-        model: FINETUNED_MODEL,
-        messages: [
-          { role: "system", content: V2_SYSTEM_PROMPT },
-          { role: "user", content: userContent },
-        ],
-        max_tokens: 4096,
-        temperature: 0.6,
-        frequency_penalty: 0.8,
-        presence_penalty: 0.15,
-      });
+        const completion = await openai.chat.completions.create({
+          model: FINETUNED_MODEL,
+          messages: [
+            { role: "system", content: V2_SYSTEM_PROMPT },
+            { role: "user", content: userContent },
+          ],
+          max_tokens: 4096,
+          temperature: 0.6,
+          frequency_penalty: 0.8,
+          presence_penalty: 0.15,
+        });
 
-      const content = completion.choices?.[0]?.message?.content?.trim() || "";
-      const blocks = parseBlocksFromContent(content);
-      const episodeText = blocks ? blocksToScriptText(blocks) : content;
-      fullScriptParts.push(`EPISODE ${ep}\n\n${episodeText}`);
+        const rawContent = completion.choices?.[0]?.message?.content;
+        const content = typeof rawContent === "string" ? rawContent.trim() : "";
+        const blocks = parseBlocksFromContent(content || "");
+        let episodeText = "";
+        if (blocks && Array.isArray(blocks)) {
+          episodeText = blocksToScriptText(blocks);
+        }
+        if (!episodeText) {
+          episodeText = content || `[Episode ${ep} — no content]`;
+        }
+        fullScriptParts.push(`EPISODE ${ep}\n\n${episodeText}`);
+      } catch (epErr) {
+        console.error(`Episode ${ep} error:`, epErr);
+        fullScriptParts.push(`EPISODE ${ep}\n\n[Episode ${ep} failed to generate.]`);
+      }
     }
 
     const script = fullScriptParts.join("\n\n");
