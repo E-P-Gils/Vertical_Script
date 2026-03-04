@@ -118,15 +118,20 @@ function parseBlocksFromContent(content) {
 
 // Plain-text episode generation (no JSON parsing) ---------------------------
 
-const EPISODE_TEXT_SYSTEM_PROMPT = `You are a vertical drama scriptwriter.
+const EPISODE_TEXT_SYSTEM_PROMPT = `You are a vertical drama scriptwriter focused on female-led romance dramas.
 
 The user will give you control tags (language, genre, total episode count, episode index) and a short series summary.
 
-You must write ONE EPISODE of a short-form / vertical drama script:
-- Use screenplay style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
+You must write ONE EPISODE of a short-form / vertical drama script with these rules:
+- The clear protagonist is a young woman who starts as an underdog (socially, financially, or in status).
+- Most negative events, misunderstandings, and external pressure fall on HER shoulders; the audience experiences the story primarily through her emotions and choices.
+- There is at least one handsome, powerful man who is drawn to her; very often there are TWO male leads whose rivalry or tension revolves around her.
+- The long-term arc is that she will eventually marry into money/power (e.g., a rich or high-status man), but do NOT resolve this too quickly—keep the romantic stakes and uncertainty alive across episodes.
+- Keep the heroine active and resilient: she faces humiliation, setbacks, and schemes, but gradually gains confidence, agency, and leverage.
+- Use screenplay-style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
 - Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
 - Keep the episode focused, with 2–5 short scenes.
-- End the episode on a clear hook or cliffhanger that makes the viewer want the next episode.
+- End the episode on a clear hook or cliffhanger centred on the heroine (a shocking reveal, emotional blow, or new threat/opportunity that directly affects her).
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
