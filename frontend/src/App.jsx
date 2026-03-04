@@ -6,9 +6,7 @@ const API_BASE = "https://vertical-script.onrender.com";
 
 function App() {
   const [modalOpen, setModalOpen] = useState(false);
-  const [language, setLanguage] = useState("EN");
   const [genre, setGenre] = useState("NON_WEREWOLF");
-  const [episodeCount, setEpisodeCount] = useState(10);
   const [logline, setLogline] = useState("");
   const [loading, setLoading] = useState(false);
   const [script, setScript] = useState("");
@@ -29,9 +27,9 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          language,
           genre,
-          episodeCount: Number(episodeCount),
+          language: "EN",
+          episodeCount: 60,
           title: "Generated Script",
           logline: logline.trim().slice(0, 1500),
         }),
@@ -153,16 +151,6 @@ function App() {
             )}
             <form onSubmit={handleSubmit}>
               <label className="field">
-                <span>Language / 语言</span>
-                <select
-                  value={language}
-                  onChange={(e) => setLanguage(e.target.value)}
-                >
-                  <option value="EN">English / 英文</option>
-                  <option value="ZH">Chinese / 中文</option>
-                </select>
-              </label>
-              <label className="field">
                 <span>Genre (Normal / Werewolf) / 类型（普通 / 狼人）</span>
                 <select
                   value={genre}
@@ -170,19 +158,6 @@ function App() {
                 >
                   <option value="NON_WEREWOLF">Normal / 普通</option>
                   <option value="WEREWOLF">Werewolf / 狼人</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Episodes / 集数</span>
-                <select
-                  value={episodeCount}
-                  onChange={(e) => setEpisodeCount(Number(e.target.value))}
-                >
-                  {Array.from({ length: 120 }, (_, i) => i + 1).map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
                 </select>
               </label>
               <label className="field">

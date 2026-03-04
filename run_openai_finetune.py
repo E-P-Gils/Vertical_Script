@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Convert train.jsonl to OpenAI fine-tuning format and start a fine-tuning job.
+Convert v2 training data to OpenAI fine-tuning format and optionally start a job.
 
 Requires:
   - .env with OPENAI_API_KEY set
-  - train.jsonl in project root (run build_train_jsonl.py first if needed)
+  - train_v2.jsonl in project root (run build_train_v2_jsonl.py first)
 
 Usage:
   pip install -r requirements-train.txt
@@ -35,18 +35,38 @@ client = OpenAI(
     timeout=httpx.Timeout(300.0),
 )
 
-TRAIN_JSONL = Path("train.jsonl")
-OPENAI_TRAIN_JSONL = Path("train_openai.jsonl")
+TRAIN_JSONL = Path("train_v2.jsonl")
+OPENAI_TRAIN_JSONL = Path("train_openai_v2.jsonl")
 MODEL = "gpt-4o-mini"
 SUFFIX = "vertical-script"  # your fine-tuned model will be named like gpt-4o-mini:ft:::vertical-script:xxxx
 
-SYSTEM_PROMPT = """You are a vertical script generator. Given control tags (language, genre, episode count, optional logline), you output a complete vertical/short-form script in the exact format used for episodic vertical video: scene headings (INT./EXT. LOCATION - DAY/NIGHT), action blocks, and dialogue (CHARACTER then lines). Output only the script text, no commentary."""
+SYSTEM_PROMPT = """You are a vertical episode writer for short-form / vertical dramas.
+
+The user sends you a JSON object called `input` that describes:
+- show_id
+- episode number
+- total_episodes_for_show
+- arc_phase (hook / escalation / lock_in / spin_out)
+- a list of scenes, each with scene_id, location, beat_type, arc_phase, and characters.
+
+You MUST respond with a JSON array of blocks. Each block is an object with:
+- block_id (e.g. "E12_S1_B3")
+- episode (number)
+- scene_id (e.g. "E12_S1")
+- type: "action" or "dialogue"
+- speaker: character name in ALL CAPS for dialogue blocks, or null/omitted for action
+- text: the actual script line
+
+Follow the episode plan closely, write vivid but concise action, and natural, character-driven dialogue.
+Maintain a strong hook in the first few blocks and end on a clear cliffhanger or question.
+Do NOT include any extra commentary or metadata outside the JSON array of blocks.
+"""
 
 
 def convert_to_openai_format():
-    """Convert train.jsonl (input/output) to OpenAI messages format."""
+    """Convert train_v2.jsonl (structured input/output) to OpenAI messages format."""
     if not TRAIN_JSONL.exists():
-        print(f"Run build_train_jsonl.py first to create {TRAIN_JSONL}", file=sys.stderr)
+        print(f"Run build_train_v2_jsonl.py first to create {TRAIN_JSONL}", file=sys.stderr)
         sys.exit(1)
 
     count = 0
@@ -61,10 +81,16 @@ def convert_to_openai_format():
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            user_content = rec.get("input", "")
-            assistant_content = rec.get("output", "")
-            if not user_content or not assistant_content:
+
+            ep_input = rec.get("input")
+            ep_output = rec.get("output")
+            if not ep_input or not ep_output:
                 continue
+
+            # Serialize structured input/output as JSON strings for the chat API
+            user_content = json.dumps(ep_input, ensure_ascii=False)
+            assistant_content = json.dumps(ep_output, ensure_ascii=False)
+
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
@@ -143,9 +169,12 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Build OpenAI fine-tune data and/or start job")
     parser.add_argument("--file-id", type=str, help="Use this file ID (from manual upload) to create job only")
+    parser.add_argument("--convert-only", action="store_true", help="Only convert train_v2.jsonl to OpenAI format and exit")
     args = parser.parse_args()
 
     convert_to_openai_format()
+    if args.convert_only:
+        sys.exit(0)
     if args.file_id:
         create_job_with_file_id(args.file_id)
     else:

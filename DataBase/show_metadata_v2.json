@@ -1,0 +1,28 @@
+{
+  "_default": {
+    "protagonist_type": "underdog_female",
+    "core_theme": "forbidden_romance",
+    "content_rating": "PG-13"
+  },
+  "chasing_my_unwanted_mate": {
+    "protagonist_type": "underdog_female",
+    "core_theme": "werewolf_curse",
+    "content_rating": "PG-13"
+  },
+  "fated_to_my_bad_boy_alpha": {
+    "protagonist_type": "underdog_female",
+    "core_theme": "werewolf_curse",
+    "content_rating": "PG-13"
+  },
+  "rejected_slave_meets_her_alpha": {
+    "protagonist_type": "underdog_female",
+    "core_theme": "werewolf_curse",
+    "content_rating": "PG-13"
+  },
+  "chinese_werewolf": {
+    "protagonist_type": "underdog_female",
+    "core_theme": "werewolf_curse",
+    "content_rating": "PG-13"
+  }
+}
+

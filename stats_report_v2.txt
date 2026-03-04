@@ -1,0 +1,59 @@
+=== Vertical v2 Data Stats ===
+
+Valid shows: 31
+Valid episodes: 2005
+Average words per valid episode: 248.4
+
+Episodes per show (top 20):
+  heiress_lying_beast: 95
+  sugar_baby: 88
+  taming_my_billionaires_ruthless: 88
+  the_vanished_him: 82
+  daughters_glorious_return: 77
+  hard_shift: 73
+  angels_masterpiece: 72
+  rejected_slave_meets_her_alpha: 72
+  im_a_queen_not_a_mistress: 71
+  back_for_you: 70
+  unbreakable_bond: 70
+  desparate_wife_fight_back: 69
+  divorce_to_be_a_charming: 69
+  hurt_me_love_me: 69
+  my_unexpected_billionaire_husband: 68
+  chasing_my_unwanted_mate: 66
+  fated_to_my_bad_boy_alpha: 66
+  dont_lecture_me_love: 65
+  marry_to_top_star_at_40s: 63
+  dont_you_worry_dad: 62
+
+Arc phase distribution (scene-level):
+  spin_out: 2224 (76.7%)
+  lock_in: 405 (14.0%)
+  escalation: 144 (5.0%)
+  hook: 126 (4.3%)
+
+Beat type distribution in train_v2 (scene-level, via input.scenes):
+  generic_drama: 1480 (81.1%)
+  intimacy_escalation: 344 (18.9%)
+
+Top repeated block texts (up to 20):
+- [36x] CUT TO:
+- [31x] Blue Rev. (mm/dd/yy)
+- [25x] EXT. HOTEL, GARDEN - DAY - CONTINUOUS
+- [21x] Pink Rev. (mm/dd/yy)
+- [14x] INT. SARAH'S HOUSE, LIVING ROOM - DAY
+- [13x] INT. HOTEL, LOBBY - DAY
+- [11x] What?
+- [11x] Blue Rev. (09/24/24)
+- [11x] 杰西卡
+- [9x] What?!
+- [9x] CUT TO
+- [8x] 文森特
+- [6x] INT. WELCOME PARTY - NIGHT
+- [6x] 纽曼
+- [6x] 纳什
+- [5x] Enough!
+- [5x] Yes.
+- [5x] INT. HOTEL, HALLWAY - DAY
+- [5x] （更多）
+- [5x] 德里克

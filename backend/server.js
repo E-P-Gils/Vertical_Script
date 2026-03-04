@@ -20,7 +20,7 @@ app.use(express.json());
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FINETUNED_MODEL =
   process.env.OPENAI_FINETUNED_MODEL ||
-  "ft:gpt-4.1-mini-2025-04-14:personal:verticalinfinite:DEvFicAI";
+  "ft:gpt-4.1-mini-2025-04-14:personal:verticalinfinitev2:DFJD8T6F";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY in .env");
