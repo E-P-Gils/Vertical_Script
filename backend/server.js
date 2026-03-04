@@ -116,6 +116,50 @@ function parseBlocksFromContent(content) {
   }
 }
 
+// Plain-text episode generation (no JSON parsing) ---------------------------
+
+const EPISODE_TEXT_SYSTEM_PROMPT = `You are a vertical drama scriptwriter.
+
+The user will give you control tags (language, genre, total episode count, episode index) and a short series summary.
+
+You must write ONE EPISODE of a short-form / vertical drama script:
+- Use screenplay style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
+- Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
+- Keep the episode focused, with 2–5 short scenes.
+- End the episode on a clear hook or cliffhanger that makes the viewer want the next episode.
+
+Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
+
+function buildEpisodePromptText({
+  language,
+  genre,
+  totalEpisodes,
+  episodeNumber,
+  logline,
+}) {
+  const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
+  const genreTag =
+    String(genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF"
+      ? "WEREWOLF"
+      : "NON_WEREWOLF";
+  const total = Math.max(1, totalEpisodes || 1);
+  const ep = Math.max(1, episodeNumber || 1);
+  const cleanLogline = safeStr(logline).slice(0, 1500);
+
+  const lines = [
+    `[LANG=${langTag}] [GENRE=${genreTag}] [EPISODES=${total}] [EPISODE=${ep}]`,
+  ];
+  if (cleanLogline) {
+    lines.push(`[LOGLINE] ${cleanLogline}`);
+  }
+  lines.push(
+    `Write episode ${ep} of ${total} for this vertical drama. ` +
+      `Keep characters, tone, and premise consistent with the logline. ` +
+      `End on a strong cliffhanger or unresolved emotional beat.`
+  );
+  return lines.join("\n");
+}
+
 app.post("/generate", async (req, res) => {
   try {
     const body = req.body || {};
@@ -127,31 +171,31 @@ app.post("/generate", async (req, res) => {
 
     for (let ep = 1; ep <= episodeCount; ep++) {
       try {
-        const input = buildEpisodeInput(ep, episodeCount, logline, genre);
-        const userContent = JSON.stringify(input);
+        const userContent = buildEpisodePromptText({
+          language: body.language || "EN",
+          genre,
+          totalEpisodes: episodeCount,
+          episodeNumber: ep,
+          logline,
+        });
 
         const completion = await openai.chat.completions.create({
           model: FINETUNED_MODEL,
           messages: [
-            { role: "system", content: V2_SYSTEM_PROMPT },
+            { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
             { role: "user", content: userContent },
           ],
-          max_tokens: 4096,
+          max_tokens: 2048,
           temperature: 0.6,
           frequency_penalty: 0.8,
           presence_penalty: 0.15,
         });
 
         const rawContent = completion.choices?.[0]?.message?.content;
-        const content = typeof rawContent === "string" ? rawContent.trim() : "";
-        const blocks = parseBlocksFromContent(content || "");
-        let episodeText = "";
-        if (blocks && Array.isArray(blocks)) {
-          episodeText = blocksToScriptText(blocks);
-        }
-        if (!episodeText) {
-          episodeText = content || `[Episode ${ep} — no content]`;
-        }
+        const episodeText =
+          typeof rawContent === "string" && rawContent.trim()
+            ? rawContent.trim()
+            : `[Episode ${ep} — no content]`;
         fullScriptParts.push(`EPISODE ${ep}\n\n${episodeText}`);
       } catch (epErr) {
         console.error(`Episode ${ep} error:`, epErr);
