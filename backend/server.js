@@ -461,8 +461,9 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Use screenplay-style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
 - Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
 - Keep the episode focused, with 2–5 short scenes.
-- Every episode must have a strong HOOK at the beginning and a strong HOOK at the end (especially in the first 10 episodes). Opening hooks: an exciting intimacy moment with sexual tension, the heroine being bullied or humiliated, the male lead showing authority or physical presence (e.g. muscles, implied nudity, protective stance), or a high-stakes conflict. Closing hooks: the male lead stepping in to save or defend the heroine from bullies, a rescue or confrontation that leaves the audience wanting more, a reveal or confession, or a charged moment (intimacy, jealousy, threat). Stay within PG-13; suggest tension and attraction without explicit content.
-- End the episode on a clear hook or cliffhanger centred on the heroine (a shocking reveal, emotional blow, or new threat/opportunity that directly affects her).
+- Every episode must have a HOOK at the beginning and a HOOK at the end (especially in the first 10 episodes), but keep them emotionally driven and grounded. Opening hooks should feel like a sharp emotional moment: an awkward intimacy beat, the heroine being subtly bullied or underestimated, a charged first encounter, or a small but vivid humiliation that makes us care. Closing hooks should be light but addictive: a promise, a tease, a jealousy beat, a sudden confession or near-confession, or the hint of danger/competition around love or status.
+- Avoid graphic violence, gore, or long slapstick brawls. Do NOT ramble or list random objects, professions, or technical details; stay tightly focused on the characters, their feelings, and the immediate scene.
+- End the episode on a clear, clean hook or cliffhanger centred on the heroine (an emotional blow, surprising gesture, or new threat/opportunity that directly affects her).
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
@@ -564,7 +565,7 @@ function buildEpisodePromptText({
 
   if (ep <= 10) {
     lines.push(
-      "HOOK REQUIREMENT (critical for early episodes): Open with a strong hook (e.g. intimacy/sexual tension, heroine bullied or in danger, male lead’s presence or physical appeal). End with a strong hook (e.g. male lead steps in to save/defend her, rescue, charged moment, reveal, or cliffhanger). Keep content PG-13."
+      "HOOK REQUIREMENT (early episodes): Start with a small but sharp emotional moment (awkward intimacy, subtle bullying, jealousy, or a vivid humiliation) and end with a light but addictive hook (a tease, promise, jealousy beat, or near-confession). No graphic violence, no gore, no long slapstick fights; stay close to the characters’ feelings."
     );
   }
 

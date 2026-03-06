@@ -24,7 +24,7 @@ function App() {
     if (loglineOverLimit) return;
     setError("");
     setScript("");
-    setProgress({ episode: 0, total: 2 });
+    setProgress({ episode: 0, total: 60 });
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/generate`, {
@@ -33,7 +33,7 @@ function App() {
         body: JSON.stringify({
           genre,
           language: "EN",
-          episodeCount: 2,
+          episodeCount: 60,
           title: "Generated Script",
           logline: logline.trim().slice(0, 1500),
         }),
