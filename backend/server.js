@@ -27,6 +27,10 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FINETUNED_MODEL =
   process.env.OPENAI_FINETUNED_MODEL ||
   "ft:gpt-4.1-mini-2025-04-14:personal:verticalinfinitev2:DFJD8T6F";
+const PLANNER_MODEL =
+  process.env.OPENAI_PLANNER_MODEL || "gpt-4.1-mini";
+const RECAP_MODEL =
+  process.env.OPENAI_RECAP_MODEL || PLANNER_MODEL;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY in .env");
@@ -39,6 +43,317 @@ const openai = new OpenAI({
   timeout: 600_000, // 10 minutes in milliseconds
   maxRetries: 2,
 });
+
+// ---------------------------------------------------------------------------
+// Name pools for auto-generated series (fresh but consistent per run)
+// ---------------------------------------------------------------------------
+
+const HEROINE_NAMES = [
+  "Emma Lin",
+  "Luna Zhang",
+  "Mia Chen",
+  "Sophia Gu",
+  "Ivy Qiao",
+  "Rina Xu",
+  "Chloe Tang",
+  "Nora Yu",
+  "Elena Fang",
+  "Bella Luo",
+  "Tessa Qin",
+  "Jade Han",
+  "Aria Sun",
+  "Lily Zhao",
+  "Grace Wen",
+  "Nina He",
+  "Ada Ming",
+  "Vera Liang",
+  "Flora Meng",
+  "Yara Ding",
+  "Rhea An",
+  "June Ke",
+  "Carrie Shi",
+  "Amber Gao",
+  "Leah Rong",
+  "Daisy Peng",
+  "Iris Zeng",
+  "Mabel Hou",
+  "Serena Ji",
+];
+
+const COLD_CEO_NAMES = [
+  "Adrian Luo",
+  "Victor Shen",
+  "Damien Li",
+  "Ethan Rong",
+  "Tristan Zhou",
+  "Caleb Han",
+  "Felix Tang",
+  "Gavin Wu",
+  "Leonard Qi",
+  "Marcus Feng",
+  "Nathan Gu",
+  "Owen Kang",
+  "Patrick Yuan",
+  "Raymond Jin",
+  "Samuel Zhai",
+  "Theo Lei",
+  "Vincent Huo",
+  "Xavier Long",
+  "Zachary Du",
+  "Ryan Cheng",
+  "Julian Mo",
+  "Eric Pan",
+  "Howard Lin",
+  "Lucas Qian",
+  "Noah Luo",
+  "Jason Wei",
+  "Aiden Zhu",
+  "Brandon Shi",
+  "Connor Liang",
+];
+
+const WARM_FRIEND_NAMES = [
+  "Liam Chen",
+  "Jason Wu",
+  "Aaron Gao",
+  "Henry Xu",
+  "Ben Qiao",
+  "Elliot Zhao",
+  "Oscar Lin",
+  "Daniel Sun",
+  "Peter Yang",
+  "Simon Fang",
+  "Alex Wen",
+  "Evan Guo",
+  "Hugo Zhang",
+  "Leo Zeng",
+  "Mason Hu",
+  "Nick Pan",
+  "Owen Yu",
+  "Parker Jin",
+  "Robin Han",
+  "Sean Luo",
+  "Timmy An",
+  "Will Rong",
+  "Yuri Lei",
+  "Zane Shi",
+  "Jamie Ke",
+  "Cody Meng",
+  "Dylan Cheng",
+  "Gabriel Zhou",
+  "Ian Du",
+];
+
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function pickSeriesNames() {
+  return {
+    heroine: pickRandom(HEROINE_NAMES),
+    coldCeo: pickRandom(COLD_CEO_NAMES),
+    warmFriend: pickRandom(WARM_FRIEND_NAMES),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Season blueprint schema and prompts (used in Phase 2 for one-shot outline)
+// ---------------------------------------------------------------------------
+//
+// SeasonBlueprint = {
+//   series_title: string,
+//   heroine: string,
+//   male1: string,
+//   male2: string,
+//   genre: "WEREWOLF" | "NON_WEREWOLF",
+//   episodes: EpisodePlan[]
+// }
+//
+// EpisodePlan = {
+//   episode: number,
+//   arc_phase: "hook" | "escalation" | "turning_point" | "endgame" | "finale",
+//   title: string,
+//   setting_focus: string,
+//   emotional_focus: string,
+//   heroine_state: string,
+//   male1_state: string,
+//   male2_state: string,
+//   main_conflict: string,
+//   key_events: string[],
+//   twist_or_reveal: string,
+//   cliffhanger_type: string,
+//   cliffhanger: string
+// }
+//
+// Arc ranges for 60 episodes: hook 1-5, escalation 6-20, turning_point 21-40, endgame 41-55, finale 56-60.
+
+const BLUEPRINT_ARC_RANGES = Object.freeze({
+  hook: [1, 5],
+  escalation: [6, 20],
+  turning_point: [21, 40],
+  endgame: [41, 55],
+  finale: [56, 60],
+});
+
+function getArcPhaseForEpisode(ep, total = 60) {
+  if (ep <= 0) return "hook";
+  const n = Math.min(ep, total);
+  if (n <= 5) return "hook";
+  if (n <= 20) return "escalation";
+  if (n <= 40) return "turning_point";
+  if (n <= 55) return "endgame";
+  return "finale";
+}
+
+const BLUEPRINT_SYSTEM_PROMPT = `You are a season planner for female-led vertical romance dramas.
+
+The user will give you: language, genre (WEREWOLF or NON_WEREWOLF), total episode count (e.g. 60), the three main character names (heroine, cold male lead, warm male lead), and a short series logline.
+
+You must output a single JSON object (no other text, no markdown) with this exact structure:
+
+{
+  "series_title": "A short title for the series",
+  "heroine": "Full name as given",
+  "male1": "Full name as given",
+  "male2": "Full name as given",
+  "genre": "WEREWOLF or NON_WEREWOLF",
+  "episodes": [
+    {
+      "episode": 1,
+      "arc_phase": "hook",
+      "title": "Episode title",
+      "setting_focus": "school | office | family_mansion | hospital | banquet | werewolf_territory | other",
+      "emotional_focus": "humiliation | yearning | betrayal | revenge | redemption | reunion",
+      "heroine_state": "One sentence: where she is in life and with the men",
+      "male1_state": "One sentence: cold lead's stance",
+      "male2_state": "One sentence: warm lead's stance",
+      "main_conflict": "One sentence: core conflict this episode",
+      "key_events": ["Event 1", "Event 2", "Event 3"],
+      "twist_or_reveal": "One sentence: twist or reveal",
+      "cliffhanger_type": "emotional | plot_twist | danger | reversal",
+      "cliffhanger": "One sentence: how the episode ends to hook the next"
+    }
+  ]
+}
+
+Rules:
+- Produce exactly one object per episode in order (episode 1 through the total given).
+- arc_phase must follow the season arc: episodes 1-5 hook, 6-20 escalation, 21-40 turning_point, 41-55 endgame, 56-60 finale.
+- Same heroine and two male leads in every episode; their states evolve but names never change.
+- Story must have a clear beginning, middle, and end across the full season; no resets.
+- Output only valid JSON. No commentary before or after.`;
+
+function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
+  const total = Math.max(1, Math.min(120, episodeCount || 60));
+  const heroine = (names && names.heroine) || "EMMA LIN";
+  const male1 = (names && names.coldCeo) || "ADRIAN LUO";
+  const male2 = (names && names.warmFriend) || "LIAM CHEN";
+  const genreTag = String(genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
+  const cleanLogline = safeStr(logline).slice(0, 1500);
+
+  return [
+    `[LANG=EN] [GENRE=${genreTag}] [EPISODES=${total}]`,
+    `[HEROINE=${heroine}] [MALE1=${male1}] [MALE2=${male2}]`,
+    cleanLogline ? `[LOGLINE] ${cleanLogline}` : "",
+    `Generate a full ${total}-episode season outline in the exact JSON format described. One entry in "episodes" per episode, in order.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function parseBlueprintFromContent(content) {
+  const raw = (content || "").trim();
+  const objMatch = raw.match(/\{[\s\S]*\}/);
+  if (!objMatch) return null;
+  try {
+    return JSON.parse(objMatch[0]);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function generateSeasonBlueprint({ episodeCount, logline, genre, names }) {
+  const userContent = buildBlueprintPrompt({
+    logline,
+    names,
+    genre,
+    episodeCount,
+  });
+
+  const completion = await openai.chat.completions.create({
+    model: PLANNER_MODEL,
+    messages: [
+      { role: "system", content: BLUEPRINT_SYSTEM_PROMPT },
+      { role: "user", content: userContent },
+    ],
+    max_tokens: 4096,
+    temperature: 0.6,
+    frequency_penalty: 0.7,
+    presence_penalty: 0.1,
+  });
+
+  const rawContent = completion.choices?.[0]?.message?.content;
+  const content =
+    typeof rawContent === "string" && rawContent.trim()
+      ? rawContent.trim()
+      : "";
+  const blueprint = parseBlueprintFromContent(content);
+  if (!blueprint || !Array.isArray(blueprint.episodes)) {
+    throw new Error("Failed to parse season blueprint JSON");
+  }
+  return blueprint;
+}
+
+const RECAP_SYSTEM_PROMPT = `You are an assistant that summarizes vertical drama episodes.
+
+Given the full script text for ONE episode, write a single concise sentence (15–35 words) that describes what happens to the heroine and how the episode ends, focusing on the emotional and plot cliffhanger.
+
+Output ONLY the sentence. No bullet points, no extra commentary.`;
+
+async function summarizeEpisode({ episodeNumber, text }) {
+  const clean = safeStr(text);
+  if (!clean) return null;
+
+  const completion = await openai.chat.completions.create({
+    model: RECAP_MODEL,
+    messages: [
+      { role: "system", content: RECAP_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `Episode ${episodeNumber} script:\n\n${clean.slice(
+          0,
+          8000
+        )}`,
+      },
+    ],
+    max_tokens: 96,
+    temperature: 0.4,
+    frequency_penalty: 0.5,
+    presence_penalty: 0.0,
+  });
+
+  const rawContent = completion.choices?.[0]?.message?.content;
+  const recap =
+    typeof rawContent === "string" && rawContent.trim()
+      ? rawContent.trim()
+      : null;
+  return recap;
+}
+
+function formatRecapContext(recaps, episodeNumber) {
+  if (!Array.isArray(recaps) || !recaps.length) return "";
+  const prev = recaps
+    .filter((r) => typeof r.episode === "number" && r.episode < episodeNumber)
+    .slice(-3);
+  if (!prev.length) return "";
+  const lines = ["RECENT EPISODE RECAPS (actual story so far):"];
+  for (const r of prev) {
+    lines.push(`  Ep ${r.episode}: ${r.recap}`);
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 
 const V2_SYSTEM_PROMPT = `You are a vertical episode writer for short-form / vertical dramas.
 
@@ -126,10 +441,18 @@ function parseBlocksFromContent(content) {
 
 const EPISODE_TEXT_SYSTEM_PROMPT = `You are a vertical drama scriptwriter focused on female-led romance dramas.
 
-The user will give you control tags (language, genre, total episode count, episode index) and a short series summary.
+The user will give you control tags (language, genre, total episode count, episode index), a short series summary, and THREE MAIN CHARACTER NAMES via tags like:
+[HEROINE=...] [MALE1=...] [MALE2=...]
+
+This is always ONE SINGLE SERIES told over many episodes. All  episodes in the run must share:
+- The same heroine (female protagonist), the same two main male leads, the same supporting cast names.
+- A continuous plot line with clear beginning, middle, and end across the whole season.
+- Stable relationships and history between characters that evolve, but are never reset or forgotten.
+
+If the logline explicitly gives character names, you may align the provided HEROINE/MALE1/MALE2 tags with those names, but once the names are fixed you MUST keep them consistent in every episode.
 
 You must write ONE EPISODE of a short-form / vertical drama script with these rules:
-- The clear protagonist is a young woman who starts as an underdog (socially, financially, or in status).
+- The clear protagonist is the underdog heroine.
 - Most negative events, misunderstandings, and external pressure fall on HER shoulders; the audience experiences the story primarily through her emotions and choices.
 - There is at least one handsome, powerful man who is drawn to her; very often there are TWO male leads whose rivalry or tension revolves around her.
 - The long-term arc is that she will eventually marry into money/power (e.g., a rich or high-status man), but do NOT resolve this too quickly—keep the romantic stakes and uncertainty alive across episodes.
@@ -141,12 +464,52 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
+function formatBlueprintContext(blueprint, episodeNumber) {
+  if (!blueprint || !Array.isArray(blueprint.episodes)) return "";
+  const total = blueprint.episodes.length;
+  const ep = Math.max(1, Math.min(episodeNumber, total));
+  const lines = [];
+
+  if (ep > 1) {
+    lines.push("PREVIOUS EPISODES (already happened — continue from here):");
+    const start = Math.max(0, ep - 8);
+    for (let i = start; i < ep - 1; i++) {
+      const plan = blueprint.episodes[i];
+      if (plan && (plan.title || plan.main_conflict)) {
+        const title = plan.title || `Episode ${(plan.episode ?? i + 1)}`;
+        const oneLine = plan.main_conflict || plan.cliffhanger || "";
+        lines.push(`  Episode ${(plan.episode ?? i + 1)}: ${title}. ${oneLine}`);
+      }
+    }
+    lines.push("");
+  }
+
+  const plan = blueprint.episodes[ep - 1];
+  if (plan && typeof plan === "object") {
+    lines.push("THIS EPISODE'S PLAN (follow this beat for beat):");
+    lines.push(`  Title: ${plan.title || `Episode ${ep}`}`);
+    if (plan.heroine_state) lines.push(`  Heroine state: ${plan.heroine_state}`);
+    if (plan.male1_state) lines.push(`  Male lead 1: ${plan.male1_state}`);
+    if (plan.male2_state) lines.push(`  Male lead 2: ${plan.male2_state}`);
+    if (plan.main_conflict) lines.push(`  Main conflict: ${plan.main_conflict}`);
+    if (plan.key_events && plan.key_events.length)
+      lines.push(`  Key events: ${plan.key_events.join("; ")}`);
+    if (plan.twist_or_reveal) lines.push(`  Twist/reveal: ${plan.twist_or_reveal}`);
+    if (plan.cliffhanger) lines.push(`  End on cliffhanger: ${plan.cliffhanger}`);
+  }
+
+  return lines.length ? lines.join("\n") : "";
+}
+
 function buildEpisodePromptText({
   language,
   genre,
   totalEpisodes,
   episodeNumber,
   logline,
+  names,
+  blueprint,
+  recaps,
 }) {
   const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
   const genreTag =
@@ -160,13 +523,52 @@ function buildEpisodePromptText({
   const lines = [
     `[LANG=${langTag}] [GENRE=${genreTag}] [EPISODES=${total}] [EPISODE=${ep}]`,
   ];
+  if (names && names.heroine && names.coldCeo && names.warmFriend) {
+    lines.push(
+      `[HEROINE=${names.heroine}] [MALE1=${names.coldCeo}] [MALE2=${names.warmFriend}]`
+    );
+    lines.push(
+      `In this series, the heroine is ${names.heroine} (female underdog), ` +
+        `the cold powerful male lead is ${names.coldCeo}, and the warm supportive male lead is ${names.warmFriend}. ` +
+        `Use THESE exact names consistently in every episode unless the logline explicitly overrides them.`
+    );
+  }
   if (cleanLogline) {
     lines.push(`[LOGLINE] ${cleanLogline}`);
   }
+
+  const blueprintContext = formatBlueprintContext(blueprint, ep);
+  const recapContext = formatRecapContext(recaps, ep);
+  if (blueprintContext || recapContext) {
+    lines.push("");
+    if (blueprintContext) lines.push(blueprintContext);
+    if (recapContext) {
+      if (blueprintContext) lines.push("");
+      lines.push(recapContext);
+    }
+    lines.push("");
+  }
+
+  let phase;
+  if (ep <= Math.max(3, Math.floor(total * 0.1))) {
+    phase = "beginning (set-up: humiliation and underdog struggles)";
+  } else if (ep <= Math.max(15, Math.floor(total * 0.5))) {
+    phase = "middle (escalating love triangle, secrets, and power imbalance)";
+  } else if (ep <= Math.max(25, Math.floor(total * 0.8))) {
+    phase = "late middle (big reversals, heroine gains leverage, villains exposed)";
+  } else {
+    phase = "finale arc (resolving major conflicts, moving toward marriage/powerful ending)";
+  }
+
   lines.push(
-    `Write episode ${ep} of ${total} for this vertical drama. ` +
-      `Keep characters, tone, and premise consistent with the logline. ` +
-      `End on a strong cliffhanger or unresolved emotional beat.`
+    `This is episode ${ep} of ${total} of ONE continuous story about the same heroine and the same two male leads. ` +
+      `Previous episodes are already written; do NOT restart the story, change character names, or reset their relationships. ` +
+      (blueprintContext
+        ? `Follow the season outline and THIS EPISODE'S PLAN above. `
+        : "") +
+      `Treat this as the ${phase}, and continue the same plot line. ` +
+      `Maintain consistency with earlier implied events and keep the tone and premise aligned with the logline. ` +
+      `End on a strong cliffhanger or unresolved emotional beat for the heroine.`
   );
   return lines.join("\n");
 }
@@ -180,6 +582,7 @@ app.post("/generate", async (req, res) => {
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
   const logline = safeStr(body.logline).slice(0, 1500);
   const genre = String(body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
+  const seriesNames = pickSeriesNames();
 
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
@@ -187,6 +590,32 @@ app.post("/generate", async (req, res) => {
   res.flushHeaders?.();
 
   try {
+    let blueprint = null;
+    const episodeRecaps = [];
+    try {
+      blueprint = await generateSeasonBlueprint({
+        episodeCount,
+        logline,
+        genre,
+        names: seriesNames,
+      });
+      sendStreamLine(res, {
+        type: "blueprint",
+        ok: true,
+        episodes: Array.isArray(blueprint.episodes)
+          ? blueprint.episodes.length
+          : 0,
+      });
+    } catch (bpErr) {
+      console.error("Blueprint generation failed:", bpErr);
+      sendStreamLine(res, {
+        type: "blueprint",
+        ok: false,
+        message: bpErr.message || "Failed to generate season blueprint",
+      });
+      // We continue without a blueprint; episodes will still be generated using only the logline.
+    }
+
     for (let ep = 1; ep <= episodeCount; ep++) {
       sendStreamLine(res, { type: "progress", episode: ep, total: episodeCount });
 
@@ -197,6 +626,9 @@ app.post("/generate", async (req, res) => {
           totalEpisodes: episodeCount,
           episodeNumber: ep,
           logline,
+          names: seriesNames,
+          blueprint,
+          recaps: episodeRecaps,
         });
 
         const completion = await openai.chat.completions.create({
@@ -216,6 +648,25 @@ app.post("/generate", async (req, res) => {
           typeof rawContent === "string" && rawContent.trim()
             ? rawContent.trim()
             : `[Episode ${ep} — no content]`;
+
+        // Summarize this episode for future context (best-effort).
+        try {
+          const recap = await summarizeEpisode({
+            episodeNumber: ep,
+            text: episodeText,
+          });
+          if (recap) {
+            episodeRecaps.push({ episode: ep, recap });
+            sendStreamLine(res, {
+              type: "recap",
+              episode: ep,
+              recap,
+            });
+          }
+        } catch (recErr) {
+          console.error(`Recap generation failed for episode ${ep}:`, recErr);
+        }
+
         sendStreamLine(res, { type: "episode", episode: ep, text: episodeText });
       } catch (epErr) {
         console.error(`Episode ${ep} error:`, epErr);
