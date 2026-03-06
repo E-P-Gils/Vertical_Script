@@ -7,7 +7,9 @@ const API_BASE = "https://vertical-script.onrender.com";
 function App() {
   const [modalOpen, setModalOpen] = useState(false);
   const [genre, setGenre] = useState("NON_WEREWOLF");
-  const [logline, setLogline] = useState("");
+    const PRESET_SUMMARY =
+    "Poor, underestimated heroine, all bad luck lands on her, two handsome rich men competing for her, she's forced to grow, and will eventually marry into money/power.";
+  const [logline, setLogline] = useState(PRESET_SUMMARY);
   const [loading, setLoading] = useState(false);
   const [script, setScript] = useState("");
   const [error, setError] = useState("");
@@ -29,7 +31,7 @@ function App() {
         body: JSON.stringify({
           genre,
           language: "EN",
-          episodeCount: 3,
+          episodeCount: 60,
           title: "Generated Script",
           logline: logline.trim().slice(0, 1500),
         }),
