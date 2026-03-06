@@ -14,7 +14,13 @@ const rootDir = join(__dirname, "..");
 dotenv.config({ path: join(rootDir, ".env") });
 
 const app = express();
-app.use(cors());
+const corsOptions = {
+  origin: true,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"],
+};
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json());
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
