@@ -11,6 +11,7 @@ function App() {
     "Poor, underestimated heroine, all bad luck lands on her, two handsome rich men competing for her, she's forced to grow, and will eventually marry into money/power.";
   const [logline, setLogline] = useState(PRESET_SUMMARY);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState({ episode: 0, total: 0 });
   const [script, setScript] = useState("");
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
@@ -23,6 +24,7 @@ function App() {
     if (loglineOverLimit) return;
     setError("");
     setScript("");
+    setProgress({ episode: 0, total: 60 });
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/generate`, {
@@ -36,14 +38,59 @@ function App() {
           logline: logline.trim().slice(0, 1500),
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Generation failed");
-      setScript(data.script || "");
-      setModalOpen(false);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Generation failed");
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let fullScript = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const data = JSON.parse(trimmed);
+            if (data.type === "progress") {
+              setProgress({ episode: data.episode || 0, total: data.total || 60 });
+            } else if (data.type === "episode") {
+              const block = (data.episode != null && data.text != null)
+                ? `EPISODE ${data.episode}\n\n${data.text}`
+                : "";
+              if (block) fullScript += (fullScript ? "\n\n" : "") + block;
+              setScript(fullScript);
+            } else if (data.type === "error") {
+              setError(data.message || "Generation error");
+            } else if (data.type === "done") {
+              setModalOpen(false);
+            }
+          } catch (_) {}
+        }
+      }
+      if (buffer.trim()) {
+        try {
+          const data = JSON.parse(buffer.trim());
+          if (data.type === "progress") setProgress({ episode: data.episode || 0, total: data.total || 60 });
+          else if (data.type === "episode") {
+            const block = (data.episode != null && data.text != null)
+              ? `EPISODE ${data.episode}\n\n${data.text}`
+              : "";
+            if (block) fullScript += (fullScript ? "\n\n" : "") + block;
+            setScript(fullScript);
+          } else if (data.type === "done") setModalOpen(false);
+        } catch (_) {}
+      }
     } catch (err) {
       setError(err.message || "Something went wrong");
     } finally {
       setLoading(false);
+      setProgress({ episode: 0, total: 0 });
     }
   };
 
@@ -226,9 +273,24 @@ function App() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2 className="modal-title">New script / 新剧本</h2>
             {loading && (
-              <div className="loading-bar-wrap">
-                <div className="loading-bar" />
-              </div>
+              <>
+                <div className="loading-bar-wrap">
+                  <div className="loading-bar" />
+                </div>
+                {progress.total > 0 && (
+                  <div className="episode-progress">
+                    <div className="episode-progress-bar">
+                      <div
+                        className="episode-progress-fill"
+                        style={{ width: `${(progress.episode / progress.total) * 100}%` }}
+                      />
+                    </div>
+                    <p className="progress-text">
+                      Generating episode {progress.episode} of {progress.total}
+                    </p>
+                  </div>
+                )}
+              </>
             )}
             <form onSubmit={handleSubmit}>
               <label className="field">
@@ -270,7 +332,7 @@ function App() {
                   className="btn btn-primary"
                   disabled={loading || loglineOverLimit}
                 >
-                  {loading ? "Generating…" : "Generate"}
+                  {loading ? (progress.total > 0 ? `Episode ${progress.episode}/${progress.total}` : "Generating…") : "Generate"}
                 </button>
               </div>
             </form>

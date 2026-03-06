@@ -165,16 +165,25 @@ function buildEpisodePromptText({
   return lines.join("\n");
 }
 
+function sendStreamLine(res, obj) {
+  res.write(JSON.stringify(obj) + "\n");
+}
+
 app.post("/generate", async (req, res) => {
+  const body = req.body || {};
+  const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
+  const logline = safeStr(body.logline).slice(0, 1500);
+  const genre = String(body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
+
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
   try {
-    const body = req.body || {};
-    const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
-    const logline = safeStr(body.logline).slice(0, 1500);
-    const genre = String(body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
-
-    const fullScriptParts = [];
-
     for (let ep = 1; ep <= episodeCount; ep++) {
+      sendStreamLine(res, { type: "progress", episode: ep, total: episodeCount });
+
       try {
         const userContent = buildEpisodePromptText({
           language: body.language || "EN",
@@ -201,18 +210,19 @@ app.post("/generate", async (req, res) => {
           typeof rawContent === "string" && rawContent.trim()
             ? rawContent.trim()
             : `[Episode ${ep} — no content]`;
-        fullScriptParts.push(`EPISODE ${ep}\n\n${episodeText}`);
+        sendStreamLine(res, { type: "episode", episode: ep, text: episodeText });
       } catch (epErr) {
         console.error(`Episode ${ep} error:`, epErr);
-        fullScriptParts.push(`EPISODE ${ep}\n\n[Episode ${ep} failed to generate.]`);
+        sendStreamLine(res, { type: "episode", episode: ep, text: `[Episode ${ep} failed to generate.]` });
       }
     }
-
-    const script = fullScriptParts.join("\n\n");
-    res.json({ script, model: FINETUNED_MODEL });
+    sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message || "Generation failed" });
+    sendStreamLine(res, { type: "error", message: err.message || "Generation failed" });
+    sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });
+  } finally {
+    res.end();
   }
 });
 
