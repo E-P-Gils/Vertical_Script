@@ -241,6 +241,7 @@ Rules:
 - arc_phase must follow the season arc: episodes 1-5 hook, 6-20 escalation, 21-40 turning_point, 41-55 endgame, 56-60 finale.
 - Same heroine and two male leads in every episode; their states evolve but names never change.
 - Story must have a clear beginning, middle, and end across the full season; no resets.
+- For episodes 1-10 especially: plan a strong OPENING hook (e.g. intimacy/tension, heroine bullied or in danger, male lead’s presence/physical appeal) and a strong CLOSING hook (e.g. male lead saves/defends her, rescue, charged moment, reveal). PG-13 only.
 - Output only valid JSON. No commentary before or after.`;
 
 function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
@@ -460,6 +461,7 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Use screenplay-style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
 - Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
 - Keep the episode focused, with 2–5 short scenes.
+- Every episode must have a strong HOOK at the beginning and a strong HOOK at the end (especially in the first 10 episodes). Opening hooks: an exciting intimacy moment with sexual tension, the heroine being bullied or humiliated, the male lead showing authority or physical presence (e.g. muscles, implied nudity, protective stance), or a high-stakes conflict. Closing hooks: the male lead stepping in to save or defend the heroine from bullies, a rescue or confrontation that leaves the audience wanting more, a reveal or confession, or a charged moment (intimacy, jealousy, threat). Stay within PG-13; suggest tension and attraction without explicit content.
 - End the episode on a clear hook or cliffhanger centred on the heroine (a shocking reveal, emotional blow, or new threat/opportunity that directly affects her).
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
@@ -558,6 +560,12 @@ function buildEpisodePromptText({
     phase = "late middle (big reversals, heroine gains leverage, villains exposed)";
   } else {
     phase = "finale arc (resolving major conflicts, moving toward marriage/powerful ending)";
+  }
+
+  if (ep <= 10) {
+    lines.push(
+      "HOOK REQUIREMENT (critical for early episodes): Open with a strong hook (e.g. intimacy/sexual tension, heroine bullied or in danger, male lead’s presence or physical appeal). End with a strong hook (e.g. male lead steps in to save/defend her, rescue, charged moment, reveal, or cliffhanger). Keep content PG-13."
+    );
   }
 
   lines.push(
