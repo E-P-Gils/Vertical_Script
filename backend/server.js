@@ -8,6 +8,7 @@ import express from "express";
 import OpenAI from "openai";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { getSeriesNames } from "./nameEngine.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, "..");
@@ -45,116 +46,8 @@ const openai = new OpenAI({
 });
 
 // ---------------------------------------------------------------------------
-// Name pools for auto-generated series (fresh but consistent per run)
+// Name engine: mix-and-match first/last + family names (see nameEngine.js)
 // ---------------------------------------------------------------------------
-
-const HEROINE_NAMES = [
-  "Emma Lin",
-  "Luna Zhang",
-  "Mia Chen",
-  "Sophia Gu",
-  "Ivy Qiao",
-  "Rina Xu",
-  "Chloe Tang",
-  "Nora Yu",
-  "Elena Fang",
-  "Bella Luo",
-  "Tessa Qin",
-  "Jade Han",
-  "Aria Sun",
-  "Lily Zhao",
-  "Grace Wen",
-  "Nina He",
-  "Ada Ming",
-  "Vera Liang",
-  "Flora Meng",
-  "Yara Ding",
-  "Rhea An",
-  "June Ke",
-  "Carrie Shi",
-  "Amber Gao",
-  "Leah Rong",
-  "Daisy Peng",
-  "Iris Zeng",
-  "Mabel Hou",
-  "Serena Ji",
-];
-
-const COLD_CEO_NAMES = [
-  "Adrian Luo",
-  "Victor Shen",
-  "Damien Li",
-  "Ethan Rong",
-  "Tristan Zhou",
-  "Caleb Han",
-  "Felix Tang",
-  "Gavin Wu",
-  "Leonard Qi",
-  "Marcus Feng",
-  "Nathan Gu",
-  "Owen Kang",
-  "Patrick Yuan",
-  "Raymond Jin",
-  "Samuel Zhai",
-  "Theo Lei",
-  "Vincent Huo",
-  "Xavier Long",
-  "Zachary Du",
-  "Ryan Cheng",
-  "Julian Mo",
-  "Eric Pan",
-  "Howard Lin",
-  "Lucas Qian",
-  "Noah Luo",
-  "Jason Wei",
-  "Aiden Zhu",
-  "Brandon Shi",
-  "Connor Liang",
-];
-
-const WARM_FRIEND_NAMES = [
-  "Liam Chen",
-  "Jason Wu",
-  "Aaron Gao",
-  "Henry Xu",
-  "Ben Qiao",
-  "Elliot Zhao",
-  "Oscar Lin",
-  "Daniel Sun",
-  "Peter Yang",
-  "Simon Fang",
-  "Alex Wen",
-  "Evan Guo",
-  "Hugo Zhang",
-  "Leo Zeng",
-  "Mason Hu",
-  "Nick Pan",
-  "Owen Yu",
-  "Parker Jin",
-  "Robin Han",
-  "Sean Luo",
-  "Timmy An",
-  "Will Rong",
-  "Yuri Lei",
-  "Zane Shi",
-  "Jamie Ke",
-  "Cody Meng",
-  "Dylan Cheng",
-  "Gabriel Zhou",
-  "Ian Du",
-];
-
-function pickRandom(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function pickSeriesNames() {
-  return {
-    heroine: pickRandom(HEROINE_NAMES),
-    coldCeo: pickRandom(COLD_CEO_NAMES),
-    warmFriend: pickRandom(WARM_FRIEND_NAMES),
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Phase 1: Season blueprint schema and prompts (used in Phase 2 for one-shot outline)
@@ -249,17 +142,24 @@ function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
   const heroine = (names && names.heroine) || "EMMA LIN";
   const male1 = (names && names.coldCeo) || "ADRIAN LUO";
   const male2 = (names && names.warmFriend) || "LIAM CHEN";
+  const familyName = names && names.familyName;
+  const corporationName = names && names.corporationName;
   const genreTag = String(genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
   const cleanLogline = safeStr(logline).slice(0, 1500);
 
-  return [
+  const lines = [
     `[LANG=EN] [GENRE=${genreTag}] [EPISODES=${total}]`,
     `[HEROINE=${heroine}] [MALE1=${male1}] [MALE2=${male2}]`,
+    familyName
+      ? familyName.endsWith(" Pack")
+        ? `Optional pack for this series: the ${familyName}.`
+        : `Optional dynasty/family name for this series: the ${familyName} family.`
+      : "",
+    corporationName ? `Optional corporation for finance/boardroom storylines: ${corporationName}.` : "",
     cleanLogline ? `[LOGLINE] ${cleanLogline}` : "",
     `Generate a full ${total}-episode season outline in the exact JSON format described. One entry in "episodes" per episode, in order.`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ];
+  return lines.filter(Boolean).join("\n");
 }
 
 function parseBlueprintFromContent(content) {
@@ -504,6 +404,9 @@ function formatBlueprintContext(blueprint, episodeNumber) {
   return lines.length ? lines.join("\n") : "";
 }
 
+// How many prior episodes to include in full for continuation (token budget).
+const PREVIOUS_EPISODES_IN_CONTEXT = 1;
+
 function buildEpisodePromptText({
   language,
   genre,
@@ -513,6 +416,7 @@ function buildEpisodePromptText({
   names,
   blueprint,
   recaps,
+  previousEpisodeScripts = [],
 }) {
   const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
   const genreTag =
@@ -535,6 +439,11 @@ function buildEpisodePromptText({
         `the cold powerful male lead is ${names.coldCeo}, and the warm supportive male lead is ${names.warmFriend}. ` +
         `Use THESE exact names consistently in every episode unless the logline explicitly overrides them.`
     );
+    if (names.corporationName) {
+      lines.push(
+        `For finance/boardroom storylines use this corporation consistently: ${names.corporationName}.`
+      );
+    }
   }
   if (cleanLogline) {
     lines.push(`[LOGLINE] ${cleanLogline}`);
@@ -549,6 +458,27 @@ function buildEpisodePromptText({
       if (blueprintContext) lines.push("");
       lines.push(recapContext);
     }
+    lines.push("");
+  }
+
+  // Dynamic programming / memo: pass the actual script of the previous episode(s)
+  // so the model continues from the exact final line (critical for paid cliffhangers).
+  if (ep > 1 && Array.isArray(previousEpisodeScripts) && previousEpisodeScripts.length > 0) {
+    const toInclude = previousEpisodeScripts.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
+    const label = toInclude.length === 1 ? "PREVIOUS EPISODE" : "PREVIOUS EPISODES";
+    lines.push("");
+    lines.push(
+      `CONTINUATION REQUIREMENT (critical for this format): The audience has just paid to see what happens next. Below is the exact end of the ${label}. You MUST continue the story immediately from the next moment—same scene, same characters, same emotional beat. Do not time-skip, change location, or restart; pick up from the last line or action and continue.`
+    );
+    lines.push("");
+    toInclude.forEach((script, i) => {
+      const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
+      lines.push(`--- END OF ${which} ---`);
+      lines.push(safeStr(script).trim());
+      lines.push(`--- END OF ${which} ---`);
+      lines.push("");
+    });
+    lines.push(`Write episode ${ep} now, continuing directly from the text above.`);
     lines.push("");
   }
 
@@ -575,6 +505,9 @@ function buildEpisodePromptText({
       (blueprintContext
         ? `Follow the season outline and THIS EPISODE'S PLAN above. `
         : "") +
+      (ep > 1 && previousEpisodeScripts.length > 0
+        ? `You have been given the exact previous episode text above—continue from its last line. `
+        : "") +
       `Treat this as the ${phase}, and continue the same plot line. ` +
       `Maintain consistency with earlier implied events and keep the tone and premise aligned with the logline. ` +
       `End on a strong cliffhanger or unresolved emotional beat for the heroine.`
@@ -591,7 +524,7 @@ app.post("/generate", async (req, res) => {
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
   const logline = safeStr(body.logline).slice(0, 1500);
   const genre = String(body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
-  const seriesNames = pickSeriesNames();
+  const seriesNames = getSeriesNames(genre);
 
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
@@ -625,6 +558,8 @@ app.post("/generate", async (req, res) => {
       // We continue without a blueprint; episodes will still be generated using only the logline.
     }
 
+    const episodeScriptsMemo = [];
+
     for (let ep = 1; ep <= episodeCount; ep++) {
       sendStreamLine(res, { type: "progress", episode: ep, total: episodeCount });
 
@@ -638,6 +573,7 @@ app.post("/generate", async (req, res) => {
           names: seriesNames,
           blueprint,
           recaps: episodeRecaps,
+          previousEpisodeScripts: episodeScriptsMemo,
         });
 
         const completion = await openai.chat.completions.create({
@@ -676,10 +612,13 @@ app.post("/generate", async (req, res) => {
           console.error(`Recap generation failed for episode ${ep}:`, recErr);
         }
 
+        episodeScriptsMemo.push(episodeText);
         sendStreamLine(res, { type: "episode", episode: ep, text: episodeText });
       } catch (epErr) {
         console.error(`Episode ${ep} error:`, epErr);
-        sendStreamLine(res, { type: "episode", episode: ep, text: `[Episode ${ep} failed to generate.]` });
+        const fallback = `[Episode ${ep} failed to generate.]`;
+        episodeScriptsMemo.push(fallback);
+        sendStreamLine(res, { type: "episode", episode: ep, text: fallback });
       }
     }
     sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });

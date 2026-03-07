@@ -96,56 +96,88 @@ function App() {
 
   const handleDownloadPdf = async () => {
     if (!script) return;
+    setError("");
+    setDownloading(true);
+    const yieldToMain = () => new Promise((r) => setTimeout(r, 0));
     try {
-      setDownloading(true);
       const pdfDoc = await PDFDocument.create();
-      const pageMargin = 40;
-      const fontSize = 10;
-      const lineHeight = 12;
+      const fontSize = 12;
+      const lineHeight = 14;
       const courier = await pdfDoc.embedFont(StandardFonts.Courier);
 
-      let page = pdfDoc.addPage();
-      let { width, height } = page.getSize();
-      let y = height - pageMargin;
+      // Centered screenplay column: ~60–65% of page width, equal side margins.
+      const PAGE_WIDTH = 612;
+      const PAGE_HEIGHT = 792;
+      const CONTENT_WIDTH = 324; // ~4.5"
+      const CONTENT_LEFT = (PAGE_WIDTH - CONTENT_WIDTH) / 2; // centered
+      const TOP_BOTTOM_MARGIN = 72;
+      const DIALOGUE_INDENT = 36; // dialogue starts 0.5" right of content
+      const DIALOGUE_WIDTH = CONTENT_WIDTH - DIALOGUE_INDENT; // dialogue column narrower
+      const ACTION_INDENT = 18;
 
-      // Very simple screenplay-aware layout.
-      const wrapLine = (text, maxChars) => {
-        const result = [];
-        let remaining = text;
-        const limit = maxChars || 90;
-        while (remaining.length > limit) {
-          result.push(remaining.slice(0, limit));
-          remaining = remaining.slice(limit);
+      const wrapToWidth = (font, text, size, maxWidth) => {
+        const lines = [];
+        const words = text.split(/\s+/);
+        let line = "";
+        for (const w of words) {
+          const candidate = line ? line + " " + w : w;
+          const ww = font.widthOfTextAtSize(candidate, size);
+          if (ww <= maxWidth) {
+            line = candidate;
+          } else {
+            if (line) lines.push(line);
+            line = w;
+          }
         }
-        if (remaining.length) result.push(remaining);
-        return result;
+        if (line) lines.push(line);
+        return lines;
       };
 
       const isSceneHeading = (t) =>
-        /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(t.trim());
+        /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(t.trim()) ||
+        /^EPISODE\s+\d+/i.test(t.trim());
 
       const isCharacterLine = (t) => {
         const s = t.trim();
-        if (!s) return false;
-        if (s.length < 2 || s.length > 40) return false;
-        if (/[.!?]/.test(s)) return false;
-        // Allow spaces and parentheses, but mostly caps.
-        const letters = s.replace(/[^A-Z]/g, "");
-        return letters.length >= Math.max(3, Math.floor(s.replace(/\s+/g, "").length * 0.6));
+        if (!s || s.length > 35) return false;
+        if (/[.!?]/.test(s) && !/^[A-Z\s\-']+[.!?]?$/.test(s)) return false;
+        const letters = s.replace(/[^A-Za-z]/g, "");
+        return letters.length >= 2 && (s === s.toUpperCase() || letters.length >= Math.floor(s.length * 0.5));
       };
 
-      const isParenthetical = (t) =>
-        /^\(.+\)$/.test(t.trim());
+      const isParenthetical = (t) => /^\(.+\)$/.test(t.trim());
+
+      let page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      let y = PAGE_HEIGHT - TOP_BOTTOM_MARGIN;
+      let pageNum = 1;
+
+      const drawPageNumber = (p) => {
+        const num = String(pageNum);
+        const w = courier.widthOfTextAtSize(num, 10);
+        p.drawText(num, { x: 36, y: PAGE_HEIGHT - 36, size: 10, font: courier });
+        p.drawText(num, { x: PAGE_WIDTH - 36 - w, y: PAGE_HEIGHT - 36, size: 10, font: courier });
+      };
+
+      const ensureSpace = (neededLines) => {
+        if (y - neededLines * lineHeight < TOP_BOTTOM_MARGIN) {
+          drawPageNumber(page);
+          page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+          pageNum += 1;
+          y = PAGE_HEIGHT - TOP_BOTTOM_MARGIN;
+        }
+      };
 
       const lines = script.split(/\r?\n/);
       let prevType = "blank";
+      let lineIndex = 0;
 
       for (const raw of lines) {
+        lineIndex += 1;
+        if (lineIndex % 150 === 0) await yieldToMain(); // avoid freezing on 60-episode scripts
         const text = raw.replace(/\s+$/g, "");
         const trimmed = text.trim();
 
         if (!trimmed) {
-          // Blank line = vertical gap.
           y -= lineHeight;
           prevType = "blank";
           continue;
@@ -168,56 +200,83 @@ function App() {
           lineType = "action";
         }
 
-        // Choose indent and wrap width by type.
-        let x;
-        let maxChars;
-        switch (lineType) {
-          case "scene":
-            x = pageMargin;
-            maxChars = 80;
-            // Extra space before a new scene heading.
-            if (prevType !== "blank") y -= lineHeight;
-            break;
-          case "character":
-            x = pageMargin + 170;
-            maxChars = 40;
-            if (prevType !== "blank" && prevType !== "scene") y -= lineHeight / 2;
-            break;
-          case "parenthetical":
-            x = pageMargin + 150;
-            maxChars = 45;
-            break;
-          case "dialogue":
-            x = pageMargin + 130;
-            maxChars = 55;
-            break;
-          case "action":
-          default:
-            x = pageMargin;
-            maxChars = 90;
-            break;
-        }
+        const sceneLine = trimmed.toUpperCase();
+        const displayText = lineType === "scene" ? sceneLine : trimmed;
 
-        const segments = wrapLine(trimmed, maxChars);
-        for (const seg of segments) {
-          if (y < pageMargin) {
-            page = pdfDoc.addPage();
-            ({ width, height } = page.getSize());
-            y = height - pageMargin;
+        if (lineType === "scene" && prevType !== "blank") y -= lineHeight;
+        if (lineType === "character" && prevType !== "blank" && prevType !== "scene") y -= lineHeight * 0.5;
+
+        if (lineType === "scene") {
+          const segs = wrapToWidth(courier, displayText, fontSize, CONTENT_WIDTH);
+          ensureSpace(segs.length);
+          for (const seg of segs) {
+            page.drawText(seg, { x: CONTENT_LEFT, y, size: fontSize, font: courier });
+            y -= lineHeight;
           }
-          page.drawText(seg, {
-            x,
-            y,
-            size: fontSize,
-            font: courier,
-          });
+        } else if (lineType === "character") {
+          ensureSpace(1);
+          const w = courier.widthOfTextAtSize(displayText.toUpperCase(), fontSize);
+          const x = CONTENT_LEFT + (CONTENT_WIDTH - w) / 2;
+          page.drawText(displayText.toUpperCase(), { x, y, size: fontSize, font: courier });
           y -= lineHeight;
+        } else if (lineType === "parenthetical") {
+          const segs = wrapToWidth(courier, displayText, fontSize - 1, CONTENT_WIDTH - 80);
+          ensureSpace(segs.length);
+          const parenX = CONTENT_LEFT + 60;
+          for (const seg of segs) {
+            page.drawText(seg, { x: parenX, y, size: fontSize - 1, font: courier });
+            y -= lineHeight;
+          }
+        } else if (lineType === "dialogue") {
+          const segs = wrapToWidth(courier, displayText, fontSize, DIALOGUE_WIDTH);
+          ensureSpace(segs.length);
+          for (const seg of segs) {
+            page.drawText(seg, { x: CONTENT_LEFT + DIALOGUE_INDENT, y, size: fontSize, font: courier });
+            y -= lineHeight;
+          }
+        } else {
+          // Action: wrap to content width; split long blocks into 2–3 paragraphs
+          const actionLines = wrapToWidth(
+            courier,
+            displayText,
+            fontSize,
+            CONTENT_WIDTH - ACTION_INDENT
+          );
+          const maxParagraphLines = 3;
+          const paragraphs = [];
+          for (let i = 0; i < actionLines.length; i += maxParagraphLines) {
+            paragraphs.push(actionLines.slice(i, i + maxParagraphLines));
+          }
+          for (let p = 0; p < paragraphs.length; p++) {
+            const para = paragraphs[p];
+            ensureSpace(para.length + 1);
+            for (const seg of para) {
+              page.drawText(seg, {
+                x: CONTENT_LEFT + ACTION_INDENT,
+                y,
+                size: fontSize,
+                font: courier,
+              });
+              y -= lineHeight;
+            }
+            if (p < paragraphs.length - 1) y -= lineHeight * 0.5; // gap between paragraphs
+          }
         }
 
         prevType = lineType;
       }
 
-      const pdfBytes = await pdfDoc.save();
+      drawPageNumber(page);
+
+      let pdfBytes;
+      try {
+        pdfBytes = await pdfDoc.save();
+      } catch (saveErr) {
+        console.error(saveErr);
+        throw new Error(
+          "PDF too large or out of memory. Try a shorter script or fewer episodes."
+        );
+      }
       const blob = new Blob([pdfBytes], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
