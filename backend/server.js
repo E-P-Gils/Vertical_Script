@@ -365,6 +365,13 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Avoid graphic violence, gore, or long slapstick brawls. Do NOT ramble or list random objects, professions, or technical details; stay tightly focused on the characters, their feelings, and the immediate scene.
 - End the episode on a clear, clean hook or cliffhanger centred on the heroine (an emotional blow, surprising gesture, or new threat/opportunity that directly affects her).
 
+ANTI-REPETITION AND FORMAT (critical — vertical scripts are sparse):
+- Dialogue must dominate: each scene should be mostly character lines, not long prose.
+- Action/stage direction: maximum 1–2 sentences per block. Never write long descriptive paragraphs; break into short beats (e.g. "She turns. He steps closer.").
+- No adjective stacking: do NOT chain synonyms (e.g. incredible, extraordinary, miraculous, divine, magnificent). Use one strong word, then move on. Never repeat the same type of descriptor in a row.
+- No lists of similar words or emotional synonyms. If you need intensity, use a single clear word and then action or dialogue.
+- Each beat should be action or dialogue, not a run of descriptive adjectives.
+
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
 function formatBlueprintContext(blueprint, episodeNumber) {
@@ -510,7 +517,8 @@ function buildEpisodePromptText({
         : "") +
       `Treat this as the ${phase}, and continue the same plot line. ` +
       `Maintain consistency with earlier implied events and keep the tone and premise aligned with the logline. ` +
-      `End on a strong cliffhanger or unresolved emotional beat for the heroine.`
+      `End on a strong cliffhanger or unresolved emotional beat for the heroine. ` +
+      `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
   );
   return lines.join("\n");
 }
@@ -583,9 +591,9 @@ app.post("/generate", async (req, res) => {
             { role: "user", content: userContent },
           ],
           max_tokens: 2048,
-          temperature: 0.6,
-          frequency_penalty: 0.8,
-          presence_penalty: 0.15,
+          temperature: 0.5,
+          frequency_penalty: 1.0,
+          presence_penalty: 0.6,
         });
 
         const rawContent = completion.choices?.[0]?.message?.content;
