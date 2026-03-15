@@ -37,8 +37,11 @@ client = OpenAI(
 
 TRAIN_JSONL = Path("train_v2.jsonl")
 OPENAI_TRAIN_JSONL = Path("train_openai_v2.jsonl")
+TRAIN_GENRE_JSONL = Path("train_v2_genre_tagged.jsonl")
+OPENAI_GENRE_JSONL = Path("train_openai_genre_tagged.jsonl")
 MODEL = "gpt-4o-mini"
 SUFFIX = "vertical-script"  # your fine-tuned model will be named like gpt-4o-mini:ft:::vertical-script:xxxx
+SUFFIX_GENRE = "vertical-genre"  # second model: genre-conditioned
 
 SYSTEM_PROMPT = """You are a vertical episode writer for short-form / vertical dramas.
 
@@ -62,17 +65,26 @@ Maintain a strong hook in the first few blocks and end on a clear cliffhanger or
 Do NOT include any extra commentary or metadata outside the JSON array of blocks.
 """
 
+SYSTEM_PROMPT_GENRE = SYSTEM_PROMPT + """
 
-def convert_to_openai_format():
-    """Convert train_v2.jsonl (structured input/output) to OpenAI messages format."""
-    if not TRAIN_JSONL.exists():
-        print(f"Run build_train_v2_jsonl.py first to create {TRAIN_JSONL}", file=sys.stderr)
+The input may include genre_tag (e.g. Horror, Superhero, Adventure) and setting_hint. Use them to flavor tone, setting, and vocabulary while keeping the same vertical format, dialogue-led structure, and hooks. Output is always a JSON array of blocks.
+"""
+
+
+def convert_to_openai_format(genre_tagged: bool = False):
+    """Convert train_v2.jsonl or train_v2_genre_tagged.jsonl to OpenAI messages format.
+    Output file has one JSON object per line with key 'messages' (required by OpenAI).
+    Do NOT upload the raw *train_v2*.jsonl file; upload the converted *train_openai*.jsonl file.
+    """
+    src = TRAIN_GENRE_JSONL if genre_tagged else TRAIN_JSONL
+    out = OPENAI_GENRE_JSONL if genre_tagged else OPENAI_TRAIN_JSONL
+    system = SYSTEM_PROMPT_GENRE if genre_tagged else SYSTEM_PROMPT
+    if not src.exists():
+        print(f"Create {src} first: run build_train_v2_genre_tagged.py" if genre_tagged else f"Run build_train_v2_jsonl.py first to create {src}", file=sys.stderr)
         sys.exit(1)
 
     count = 0
-    with TRAIN_JSONL.open("r", encoding="utf-8") as f_in, OPENAI_TRAIN_JSONL.open(
-        "w", encoding="utf-8"
-    ) as f_out:
+    with src.open("r", encoding="utf-8") as f_in, out.open("w", encoding="utf-8") as f_out:
         for line in f_in:
             line = line.strip()
             if not line:
@@ -87,32 +99,43 @@ def convert_to_openai_format():
             if not ep_input or not ep_output:
                 continue
 
-            # Serialize structured input/output as JSON strings for the chat API
             user_content = json.dumps(ep_input, ensure_ascii=False)
             assistant_content = json.dumps(ep_output, ensure_ascii=False)
 
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
                 {"role": "assistant", "content": assistant_content},
             ]
-            f_out.write(json.dumps({"messages": messages}, ensure_ascii=False) + "\n")
+            openai_record = {"messages": messages}
+            f_out.write(json.dumps(openai_record, ensure_ascii=False) + "\n")
             count += 1
 
-    print(f"Converted {count} examples to {OPENAI_TRAIN_JSONL}")
+    if count == 0:
+        print("No valid records converted.", file=sys.stderr)
+        sys.exit(1)
+    # Validate first line has "messages"
+    with out.open("r", encoding="utf-8") as f:
+        first = json.loads(f.readline())
+    if "messages" not in first:
+        print("Validation failed: first line missing 'messages' key.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Converted {count} examples to {out}")
+    print(f"  -> Upload {out.name} to OpenAI (NOT {src.name})")
     return count
 
 
-def upload_and_finetune():
-    """Upload train_openai.jsonl and create fine-tuning job."""
-    if not OPENAI_TRAIN_JSONL.exists():
-        convert_to_openai_format()
+def upload_and_finetune(genre_tagged: bool = False):
+    """Upload train_openai*.jsonl and create fine-tuning job."""
+    out = OPENAI_GENRE_JSONL if genre_tagged else OPENAI_TRAIN_JSONL
+    if not out.exists():
+        convert_to_openai_format(genre_tagged=genre_tagged)
 
-    print("Uploading training file to OpenAI...")
+    print(f"Uploading {out} to OpenAI...")
     file_id = None
     for attempt in range(3):
         try:
-            with OPENAI_TRAIN_JSONL.open("rb") as f:
+            with out.open("rb") as f:
                 file_response = client.files.create(file=f, purpose="fine-tune")
             file_id = file_response.id
             break
@@ -136,11 +159,12 @@ def upload_and_finetune():
         raise RuntimeError("Upload failed after retries")
     print(f"Uploaded file_id: {file_id}")
 
-    print("Creating fine-tuning job (this may take a while)...")
+    suffix = SUFFIX_GENRE if genre_tagged else SUFFIX
+    print(f"Creating fine-tuning job (suffix={suffix}, this may take a while)...")
     job = client.fine_tuning.jobs.create(
         training_file=file_id,
         model=MODEL,
-        suffix=SUFFIX,
+        suffix=suffix,
         hyperparameters={"n_epochs": 2},
     )
 
@@ -151,13 +175,14 @@ def upload_and_finetune():
     return job.id
 
 
-def create_job_with_file_id(file_id: str):
-    """Call after uploading train_openai.jsonl manually; pass the file ID from the UI."""
-    print("Creating fine-tuning job...")
+def create_job_with_file_id(file_id: str, genre_tagged: bool = False):
+    """Call after uploading train_openai*.jsonl manually; pass the file ID from the UI."""
+    suffix = SUFFIX_GENRE if genre_tagged else SUFFIX
+    print(f"Creating fine-tuning job (suffix={suffix})...")
     job = client.fine_tuning.jobs.create(
         training_file=file_id,
         model=MODEL,
-        suffix=SUFFIX,
+        suffix=suffix,
         hyperparameters={"n_epochs": 2},
     )
     print(f"Job created: {job.id} | Status: {job.status}")
@@ -169,13 +194,16 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Build OpenAI fine-tune data and/or start job")
     parser.add_argument("--file-id", type=str, help="Use this file ID (from manual upload) to create job only")
-    parser.add_argument("--convert-only", action="store_true", help="Only convert train_v2.jsonl to OpenAI format and exit")
+    parser.add_argument("--convert-only", action="store_true", help="Only convert to OpenAI format and exit")
+    parser.add_argument("--genre-tagged", action="store_true", help="Use train_v2_genre_tagged.jsonl for genre-conditioned model (second model)")
     args = parser.parse_args()
 
-    convert_to_openai_format()
+    convert_to_openai_format(genre_tagged=args.genre_tagged)
     if args.convert_only:
+        out_name = OPENAI_GENRE_JSONL.name if args.genre_tagged else OPENAI_TRAIN_JSONL.name
+        print(f"Done. Upload {out_name} at https://platform.openai.com/fine-tuning then run with --file-id <id>" + (" --genre-tagged" if args.genre_tagged else ""))
         sys.exit(0)
     if args.file_id:
-        create_job_with_file_id(args.file_id)
+        create_job_with_file_id(args.file_id, genre_tagged=args.genre_tagged)
     else:
-        upload_and_finetune()
+        upload_and_finetune(genre_tagged=args.genre_tagged)

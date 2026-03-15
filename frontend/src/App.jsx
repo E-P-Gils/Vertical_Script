@@ -6,22 +6,49 @@ const API_BASE = "https://vertical-script.onrender.com";
 
 function App() {
   const [modalOpen, setModalOpen] = useState(false);
-  const [genre, setGenre] = useState("NON_WEREWOLF");
-    const PRESET_SUMMARY =
-    "Poor, underestimated heroine, all bad luck lands on her, two handsome rich men competing for her, she's forced to grow, and will eventually marry into money/power.";
-  const [logline, setLogline] = useState(PRESET_SUMMARY);
+  const GENRES = [
+    "Romance",
+    "Drama",
+    "Action",
+    "Adventure",
+    "Crime",
+    "Horror",
+    "Fantasy",
+    "Monster",
+    "Science Fiction",
+    "Superhero",
+    "Werewolf",
+  ];
+  const [genre, setGenre] = useState("");
+  const [logline, setLogline] = useState("");
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ episode: 0, total: 0 });
   const [script, setScript] = useState("");
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
   const wordCount = logline.trim() ? logline.trim().split(/\s+/).length : 0;
   const loglineOverLimit = wordCount > 250;
 
+  const handleSuggestRandomSummary = async () => {
+    setLoadingSuggestions(true);
+    try {
+      const r = await fetch(`${API_BASE}/summaries/random?genre=${encodeURIComponent(genre)}`);
+      if (r.ok) {
+        const data = await r.json();
+        if (data.summary) setLogline(data.summary);
+      }
+    } catch (_) {}
+    finally {
+      setLoadingSuggestions(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (loglineOverLimit) return;
+    if (!genre || loglineOverLimit) return;
+    if (!logline.trim()) return;
     setError("");
     setScript("");
     setProgress({ episode: 0, total: 60 });
@@ -353,29 +380,49 @@ function App() {
             )}
             <form onSubmit={handleSubmit}>
               <label className="field">
-                <span>Genre (Normal / Werewolf) / 类型（普通 / 狼人）</span>
+                <span>Genre / 类型</span>
                 <select
                   value={genre}
-                  onChange={(e) => setGenre(e.target.value)}
+                  onChange={(e) => {
+                    setGenre(e.target.value);
+                    if (!e.target.value) setLogline("");
+                  }}
                 >
-                  <option value="NON_WEREWOLF">Normal / 普通</option>
-                  <option value="WEREWOLF">Werewolf / 狼人</option>
+                  <option value="">— Select a genre —</option>
+                  {GENRES.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
                 </select>
               </label>
-              <label className="field">
-                <span>Summary / 摘要</span>
-                <textarea
-                  value={logline}
-                  onChange={(e) => setLogline(e.target.value)}
-                  placeholder="A short premise or summary for your vertical..."
-                  rows={4}
-                  className={loglineOverLimit ? "invalid" : ""}
-                />
-                <small className="word-count">
-                  {wordCount} / 250 words
-                  {loglineOverLimit && " — over limit"}
-                </small>
-              </label>
+              {genre && (
+                <label className="field summary-field">
+                  <span>Summary / 摘要</span>
+                  <p className="summary-hint">Write a short premise or generate one for this genre.</p>
+                  <textarea
+                    value={logline}
+                    onChange={(e) => setLogline(e.target.value)}
+                    placeholder="A short premise or summary for your vertical..."
+                    rows={4}
+                    className={loglineOverLimit ? "invalid" : ""}
+                  />
+                  <small className="word-count">
+                    {wordCount} / 250 words
+                    {loglineOverLimit && " — over limit"}
+                  </small>
+                  <div className="summary-suggestions">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-small"
+                      onClick={handleSuggestRandomSummary}
+                      disabled={loadingSuggestions}
+                    >
+                      {loadingSuggestions ? "…" : "Generate one"}
+                    </button>
+                  </div>
+                </label>
+              )}
               {error && <p className="error">{error}</p>}
               <div className="modal-actions">
                 <button
@@ -389,7 +436,7 @@ function App() {
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={loading || loglineOverLimit}
+                  disabled={loading || !genre || !logline.trim() || loglineOverLimit}
                 >
                   {loading ? (progress.total > 0 ? `Episode ${progress.episode}/${progress.total}` : "Generating…") : "Generate"}
                 </button>

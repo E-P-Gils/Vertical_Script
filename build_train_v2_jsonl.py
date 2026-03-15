@@ -2,6 +2,10 @@
 """
 Phase 4: Build structured train/eval JSONL for vertical v2.
 
+Training data must come ONLY from vertical shows. Genre reference data
+(1Genres, 1Genres_parsed, 1Genres_reference) must NEVER feed into this pipeline;
+exclusion is enforced here as a safeguard.
+
 Inputs (under DataBase/):
   - global_blocks_clean.jsonl      (from clean_blocks_v2.py)
   - global_scenes_tagged_v2.jsonl  (from tag_scenes_v2.py)
@@ -57,6 +61,14 @@ SHOW_META_PATH = DATA_DIR / "show_metadata_v2.json"
 
 TRAIN_OUT = Path("train_v2.jsonl")
 EVAL_OUT = Path("eval_v2.jsonl")
+
+# Phase 3 safeguard: never use genre reference as training output. Exclude any show_id
+# that could come from genre folders (in case of pipeline mistake).
+EXCLUDED_SHOW_IDS = {
+    "1Genres", "1Genres_parsed", "1Genres_reference",
+    "Action", "Adventure", "Crime_Mob", "Drama", "Horror",
+    "Medieval_Fantasy", "Monster", "SciFi", "Superhero", "Thriller", "Pirate",
+}
 
 
 def _episode_key(show_id: Any, episode: Any) -> Tuple[str, int]:
@@ -201,6 +213,8 @@ def build_examples():
     ) as eval_f:
         for key, meta in episodes_meta.items():
             show_id, ep = key
+            if show_id in EXCLUDED_SHOW_IDS:
+                continue
             scenes = scenes_per_ep.get(key, [])
             blocks = blocks_per_ep.get(key, [])
             if not blocks or not scenes:

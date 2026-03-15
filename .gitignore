@@ -7,6 +7,8 @@
 # Training artifacts (large, derived)
 train.jsonl
 train_openai.jsonl
+train_openai_v2.jsonl
+train_openai_genre_tagged.jsonl
 
 # Python
 __pycache__/

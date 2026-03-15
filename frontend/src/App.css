@@ -230,7 +230,38 @@
   display: block;
   margin-top: 0.25rem;
   font-size: 0.8rem;
-  color: var(--blood-pale);
+}
+.summary-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.summary-hint {
+  font-size: 0.85rem;
+  color: var(--metal);
+  margin: 0 0 0.35rem;
+}
+.summary-suggestions-label {
+  font-size: 0.85rem;
+  color: var(--metal);
+  margin-right: 0.25rem;
+}
+.btn-small {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.85rem;
+}
+.summary-dropdown {
+  flex: 1;
+  min-width: 120px;
+  max-width: 100%;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+  background: var(--steel);
+  color: var(--cream);
+  border: 1px solid var(--steel-light);
+  border-radius: 4px;
 }
 .field textarea.invalid + .word-count {
   color: #e88;

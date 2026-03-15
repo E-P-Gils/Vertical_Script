@@ -522,11 +522,11 @@ def main():
     if not DATA_DIR.exists():
         raise SystemExit(f"Data directory not found: {DATA_DIR}")
 
+    EXCLUDED = {"katherine_heres_your_husband", "1Genres", "1Genres_parsed", "1Genres_reference"}
     for show_dir in sorted(DATA_DIR.iterdir()):
         if not show_dir.is_dir():
             continue
-        if show_dir.name == "katherine_heres_your_husband":
-            # Already parsed via dedicated script
+        if show_dir.name in EXCLUDED:
             continue
         pdfs = list(show_dir.glob("*.pdf"))
         if not pdfs:

@@ -5,6 +5,7 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
+import fs from "fs";
 import OpenAI from "openai";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -27,7 +28,7 @@ app.use(express.json());
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FINETUNED_MODEL =
   process.env.OPENAI_FINETUNED_MODEL ||
-  "ft:gpt-4.1-mini-2025-04-14:personal:verticalinfinitev2:DFJD8T6F";
+  "ft:gpt-4.1-mini-2025-04-14:personal:vertical-genre:DJdSjUra";
 const PLANNER_MODEL =
   process.env.OPENAI_PLANNER_MODEL || "gpt-4.1-mini";
 const RECAP_MODEL =
@@ -135,6 +136,8 @@ Rules:
 - Same heroine and two male leads in every episode; their states evolve but names never change.
 - Story must have a clear beginning, middle, and end across the full season; no resets.
 - For episodes 1-10 especially: plan a strong OPENING hook (e.g. intimacy/tension, heroine bullied or in danger, male lead’s presence/physical appeal) and a strong CLOSING hook (e.g. male lead saves/defends her, rescue, charged moment, reveal). PG-13 only.
+- Vary the main conflict type across the season: every 3–5 episodes, rotate between family pressure, money/business/contracts, social reputation/public humiliation, secrets/reveals, rival schemes, and romantic tension. Do NOT let 4+ episodes in a row revolve around the same physical scenario (e.g. chase → corner → forced kiss).
+- Physical closeness beats (kisses, grabs, cornering) should be planned as spikes, not the only conflict: after early hook episodes, focus escalation on external stakes (family approval, deals, inheritances, pack politics, social status) and heroine leverage.
 - Output only valid JSON. No commentary before or after.`;
 
 function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
@@ -144,7 +147,7 @@ function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
   const male2 = (names && names.warmFriend) || "LIAM CHEN";
   const familyName = names && names.familyName;
   const corporationName = names && names.corporationName;
-  const genreTag = String(genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
+  const genreTag = String(genre || "Romance").trim() || "Romance";
   const cleanLogline = safeStr(logline).slice(0, 1500);
 
   const lines = [
@@ -327,6 +330,28 @@ function blocksToScriptText(blocks) {
   return lines.join("\n");
 }
 
+// Simple repetition score between two episode scripts.
+// Splits into sentences, normalises, and computes overlap ratio.
+function repetitionScore(currentText, previousText) {
+  if (!currentText || !previousText) return 0;
+  const splitSentences = (txt) =>
+    txt
+      .split(/[\.\?!\n]+/g)
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.length > 20);
+
+  const curSentences = splitSentences(currentText);
+  const prevSentences = splitSentences(previousText);
+  if (!curSentences.length || !prevSentences.length) return 0;
+
+  const prevSet = new Set(prevSentences);
+  let overlap = 0;
+  for (const s of curSentences) {
+    if (prevSet.has(s)) overlap += 1;
+  }
+  return overlap / curSentences.length;
+}
+
 function parseBlocksFromContent(content) {
   const raw = (content || "").trim();
   const jsonMatch = raw.match(/\s*(\[[\s\S]*\])\s*$/);
@@ -364,6 +389,11 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Every episode must have a HOOK at the beginning and a HOOK at the end (especially in the first 10 episodes), but keep them emotionally driven and grounded. Opening hooks should feel like a sharp emotional moment: an awkward intimacy beat, the heroine being subtly bullied or underestimated, a charged first encounter, or a small but vivid humiliation that makes us care. Closing hooks should be light but addictive: a promise, a tease, a jealousy beat, a sudden confession or near-confession, or the hint of danger/competition around love or status.
 - Avoid graphic violence, gore, or long slapstick brawls. Do NOT ramble or list random objects, professions, or technical details; stay tightly focused on the characters, their feelings, and the immediate scene.
 - End the episode on a clear, clean hook or cliffhanger centred on the heroine (an emotional blow, surprising gesture, or new threat/opportunity that directly affects her).
+
+CONFLICT AND ESCALATION REQUIREMENTS:
+- Every episode must move at least ONE external stake forward in a concrete way (family approval/disapproval, money or contracts, company/pack politics, social reputation/public humiliation, or a rival’s scheme).
+- Do NOT repeat the same "chase → corner → forced kiss" choreography in adjacent episodes. If a recent episode already used a strong physical-ownership beat, switch to a different form of conflict (verbal confrontation, public scene, business/family move, secret revealed, heroine gaining leverage).
+- Physical closeness scenes (kisses, pinning, grabs) must either be clearly interrupted or have visible consequences, OR clearly increase the heroine’s agency (she sets a boundary, wins leverage, or initiates on her own terms).
 
 ANTI-REPETITION AND FORMAT (critical — vertical scripts are sparse):
 - Dialogue must dominate: each scene should be mostly character lines, not long prose.
@@ -426,10 +456,7 @@ function buildEpisodePromptText({
   previousEpisodeScripts = [],
 }) {
   const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
-  const genreTag =
-    String(genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF"
-      ? "WEREWOLF"
-      : "NON_WEREWOLF";
+  const genreTag = String(genre || "Romance").trim() || "Romance";
   const total = Math.max(1, totalEpisodes || 1);
   const ep = Math.max(1, episodeNumber || 1);
   const cleanLogline = safeStr(logline).slice(0, 1500);
@@ -469,7 +496,8 @@ function buildEpisodePromptText({
   }
 
   // Dynamic programming / memo: pass the actual script of the previous episode(s)
-  // so the model continues from the exact final line (critical for paid cliffhangers).
+  // so the model continues from the exact final line (critical for paid cliffhangers),
+  // BUT do not allow the model to restage the exact same scene.
   if (ep > 1 && Array.isArray(previousEpisodeScripts) && previousEpisodeScripts.length > 0) {
     const toInclude = previousEpisodeScripts.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
     const label = toInclude.length === 1 ? "PREVIOUS EPISODE" : "PREVIOUS EPISODES";
@@ -477,12 +505,19 @@ function buildEpisodePromptText({
     lines.push(
       `CONTINUATION REQUIREMENT (critical for this format): The audience has just paid to see what happens next. Below is the exact end of the ${label}. You MUST continue the story immediately from the next moment—same scene, same characters, same emotional beat. Do not time-skip, change location, or restart; pick up from the last line or action and continue.`
     );
+    lines.push(
+      `DO NOT restage the same key moments from the previous episode (no replaying the same kiss, shove, or confrontation). If you need to reference them, compress them into one short recap line, then move the story FORWARD with new events and consequences.`
+    );
     lines.push("");
+    const TAIL_LINES = 30; // only keep the tail of each previous episode
     toInclude.forEach((script, i) => {
       const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
-      lines.push(`--- END OF ${which} ---`);
-      lines.push(safeStr(script).trim());
-      lines.push(`--- END OF ${which} ---`);
+      const full = safeStr(script).trim();
+      const split = full.split(/\r?\n/);
+      const tail = split.slice(-TAIL_LINES).join("\n");
+      lines.push(`--- END OF ${which} (tail) ---`);
+      lines.push(tail);
+      lines.push(`--- END OF ${which} (tail) ---`);
       lines.push("");
     });
     lines.push(`Write episode ${ep} now, continuing directly from the text above.`);
@@ -531,7 +566,7 @@ app.post("/generate", async (req, res) => {
   const body = req.body || {};
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
   const logline = safeStr(body.logline).slice(0, 1500);
-  const genre = String(body.genre || "NON_WEREWOLF").toUpperCase() === "WEREWOLF" ? "WEREWOLF" : "NON_WEREWOLF";
+  const genre = String(body.genre || "Romance").trim() || "Romance";
   const seriesNames = getSeriesNames(genre);
 
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -596,11 +631,43 @@ app.post("/generate", async (req, res) => {
           presence_penalty: 0.6,
         });
 
-        const rawContent = completion.choices?.[0]?.message?.content;
-        const episodeText =
+        let rawContent = completion.choices?.[0]?.message?.content;
+        let episodeText =
           typeof rawContent === "string" && rawContent.trim()
             ? rawContent.trim()
             : `[Episode ${ep} — no content]`;
+
+        // Phase 2: if this episode is too similar to the previous one, regenerate once with a stronger instruction.
+        if (ep > 1 && episodeScriptsMemo.length > 0) {
+          const prevScript = episodeScriptsMemo[episodeScriptsMemo.length - 1];
+          const score = repetitionScore(episodeText, prevScript);
+          const REPETITION_THRESHOLD = 0.35;
+          if (score > REPETITION_THRESHOLD) {
+            console.warn(
+              `Episode ${ep} repetition score ${score.toFixed(
+                2
+              )} > ${REPETITION_THRESHOLD}, regenerating with anti-repetition hint.`
+            );
+            const retryContent =
+              userContent +
+              "\n\nREWRITE REQUIREMENT: The previous attempt repeated scenes or sentences from the prior episode. This time you MUST move the story forward with NEW events and consequences. Do not reuse sentences or restage the same physical beats.";
+            const retry = await openai.chat.completions.create({
+              model: FINETUNED_MODEL,
+              messages: [
+                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                { role: "user", content: retryContent },
+              ],
+              max_tokens: 2048,
+              temperature: 0.5,
+              frequency_penalty: 1.0,
+              presence_penalty: 0.6,
+            });
+            const retryRaw = retry.choices?.[0]?.message?.content;
+            if (typeof retryRaw === "string" && retryRaw.trim()) {
+              episodeText = retryRaw.trim();
+            }
+          }
+        }
 
         // Summarize this episode for future context (best-effort).
         try {
@@ -641,6 +708,38 @@ app.post("/generate", async (req, res) => {
 
 app.get("/health", (_, res) => {
   res.json({ ok: true, model: FINETUNED_MODEL });
+});
+
+// ---------------------------------------------------------------------------
+// Genre-based summary suggestions (framework: add 100 summaries per genre to data/summaries_by_genre.json)
+// ---------------------------------------------------------------------------
+const SUMMARIES_PATH = join(__dirname, "data", "summaries_by_genre.json");
+
+function loadSummariesByGenre() {
+  try {
+    const raw = fs.readFileSync(SUMMARIES_PATH, "utf8");
+    const data = JSON.parse(raw);
+    return data && typeof data === "object" ? data : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+/** GET /summaries?genre=Romance — list all summaries for that genre */
+app.get("/summaries", (req, res) => {
+  const genre = String(req.query.genre || "").trim() || "Romance";
+  const data = loadSummariesByGenre();
+  const summaries = Array.isArray(data[genre]) ? data[genre] : [];
+  res.json({ genre, summaries });
+});
+
+/** GET /summaries/random?genre=Romance — one random summary for that genre */
+app.get("/summaries/random", (req, res) => {
+  const genre = String(req.query.genre || "").trim() || "Romance";
+  const data = loadSummariesByGenre();
+  const list = Array.isArray(data[genre]) ? data[genre] : [];
+  const summary = list.length > 0 ? list[Math.floor(Math.random() * list.length)] : "";
+  res.json({ genre, summary });
 });
 
 const PORT = process.env.PORT || 3001;

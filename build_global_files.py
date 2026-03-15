@@ -23,11 +23,15 @@ GLOBAL_SCENES = DATA_DIR / "global_scenes.jsonl"
 GLOBAL_EPISODES = DATA_DIR / "global_episodes.jsonl"
 
 
+# Directories that contain genre reference scripts (movie/TV). Never use for vertical training.
+EXCLUDED_SHOW_DIRS = {"1Genres", "1Genres_parsed", "1Genres_reference"}
+
+
 def iter_show_dirs():
     if not DATA_DIR.exists():
         return
     for d in sorted(DATA_DIR.iterdir()):
-        if d.is_dir():
+        if d.is_dir() and d.name not in EXCLUDED_SHOW_DIRS:
             yield d
 
 
