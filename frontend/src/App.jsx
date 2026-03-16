@@ -360,9 +360,6 @@ function App() {
             <h2 className="modal-title">New script / 新剧本</h2>
             {loading && (
               <>
-                <div className="loading-bar-wrap">
-                  <div className="loading-bar" />
-                </div>
                 {progress.total > 0 && (
                   <div className="episode-progress">
                     <div className="episode-progress-bar">
@@ -385,7 +382,7 @@ function App() {
                   value={genre}
                   onChange={(e) => {
                     setGenre(e.target.value);
-                    if (!e.target.value) setLogline("");
+                    setLogline("");
                   }}
                 >
                   <option value="">— Select a genre —</option>

@@ -535,6 +535,27 @@ function buildEpisodePromptText({
     phase = "finale arc (resolving major conflicts, moving toward marriage/powerful ending)";
   }
 
+  // If we're in the finale arc, steer toward a genre-appropriate planned ending.
+  let plannedEnding = "";
+  if (phase.startsWith("finale")) {
+    const endingsData = loadEndingsByGenre();
+    const endingsList = Array.isArray(endingsData[genreTag]) ? endingsData[genreTag] : [];
+    if (endingsList.length > 0) {
+      plannedEnding = endingsList[Math.floor(Math.random() * endingsList.length)];
+    }
+  }
+
+  if (plannedEnding) {
+    lines.push("");
+    lines.push(
+      `PLANNED ENDING FOR THE SEASON (guidance): The overall story should ultimately resolve like this: ${plannedEnding}`
+    );
+    lines.push(
+      `Because we are now in the finale arc, each late episode (including this one) must actively steer the plot and emotions toward this kind of resolution. ` +
+        `Do NOT cut the story off in the middle of major consequences—after the main climax you must include at least one beat of aftermath moving toward this ending tone.`
+    );
+  }
+
   if (ep <= 10) {
     lines.push(
       "HOOK REQUIREMENT (early episodes): Start with a small but sharp emotional moment (awkward intimacy, subtle bullying, jealousy, or a vivid humiliation) and end with a light but addictive hook (a tease, promise, jealousy beat, or near-confession). No graphic violence, no gore, no long slapstick fights; stay close to the characters’ feelings."
@@ -711,13 +732,24 @@ app.get("/health", (_, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Genre-based summary suggestions (framework: add 100 summaries per genre to data/summaries_by_genre.json)
+// Genre-based summary and ending suggestions
 // ---------------------------------------------------------------------------
 const SUMMARIES_PATH = join(__dirname, "data", "summaries_by_genre.json");
+const ENDINGS_PATH = join(__dirname, "data", "endings_by_genre.json");
 
 function loadSummariesByGenre() {
   try {
     const raw = fs.readFileSync(SUMMARIES_PATH, "utf8");
+    const data = JSON.parse(raw);
+    return data && typeof data === "object" ? data : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function loadEndingsByGenre() {
+  try {
+    const raw = fs.readFileSync(ENDINGS_PATH, "utf8");
     const data = JSON.parse(raw);
     return data && typeof data === "object" ? data : {};
   } catch (e) {
