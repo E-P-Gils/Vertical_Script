@@ -535,6 +535,9 @@ function buildEpisodePromptText({
     phase = "finale arc (resolving major conflicts, moving toward marriage/powerful ending)";
   }
 
+  const isFinalEpisode = ep === total;
+  const isLandingZone = ep >= Math.max(1, total - 2); // last 3 episodes
+
   // If we're in the finale arc, steer toward a genre-appropriate planned ending.
   let plannedEnding = "";
   if (phase.startsWith("finale")) {
@@ -550,10 +553,21 @@ function buildEpisodePromptText({
     lines.push(
       `PLANNED ENDING FOR THE SEASON (guidance): The overall story should ultimately resolve like this: ${plannedEnding}`
     );
-    lines.push(
-      `Because we are now in the finale arc, each late episode (including this one) must actively steer the plot and emotions toward this kind of resolution. ` +
-        `Do NOT cut the story off in the middle of major consequences—after the main climax you must include at least one beat of aftermath moving toward this ending tone.`
-    );
+    if (isFinalEpisode) {
+      lines.push(
+        `Because this is the FINAL episode, you MUST fully resolve the main conflicts and land on this kind of emotional resolution. ` +
+          `Do NOT cut the story off in the middle of major consequences—after the main climax include at least one clear aftermath or epilogue beat that matches this ending tone.`
+      );
+    } else if (isLandingZone) {
+      lines.push(
+        `Because we are now in the last few episodes of the finale arc, this episode must actively steer the plot and emotions toward this resolution. ` +
+          `Begin closing open threads and avoid introducing brand-new major threats; any hook at the end should feel like the last breaths before resolution, not a fresh storyline.`
+      );
+    } else {
+      lines.push(
+        `Because we are now in the finale arc, this episode should meaningfully push the story toward that resolution—even if it still ends on a hook.`
+      );
+    }
   }
 
   if (ep <= 10) {
@@ -562,7 +576,7 @@ function buildEpisodePromptText({
     );
   }
 
-  if (ep === total) {
+  if (isFinalEpisode) {
     // Final episode: land the story instead of adding a new cliffhanger.
     lines.push(
       `This is episode ${ep} of ${total}, the FINAL episode of this continuous story about the same heroine and the same two male leads. ` +
@@ -579,21 +593,39 @@ function buildEpisodePromptText({
         `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
     );
   } else {
-    // Non-final episodes still end on a hook.
-    lines.push(
-      `This is episode ${ep} of ${total} of ONE continuous story about the same heroine and the same two male leads. ` +
-        `Previous episodes are already written; do NOT restart the story, change character names, or reset their relationships. ` +
-        (blueprintContext
-          ? `Follow the season outline and THIS EPISODE'S PLAN above. `
-          : "") +
-        (ep > 1 && previousEpisodeScripts.length > 0
-          ? `You have been given the exact previous episode text above—continue from its last line. `
-          : "") +
-        `Treat this as the ${phase}, and continue the same plot line. ` +
-        `Maintain consistency with earlier implied events and keep the tone and premise aligned with the logline. ` +
-        `End on a strong cliffhanger or unresolved emotional beat for the heroine. ` +
-        `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
-    );
+    // Non-final episodes
+    if (isLandingZone) {
+      // Landing zone: start closing threads, softer hooks.
+      lines.push(
+        `This is episode ${ep} of ${total} of ONE continuous story about the same heroine and the same two male leads. ` +
+          `Previous episodes are already written; do NOT restart the story, change character names, or reset their relationships. ` +
+          (blueprintContext
+            ? `Follow the season outline and THIS EPISODE'S PLAN above. `
+            : "") +
+          (ep > 1 && previousEpisodeScripts.length > 0
+            ? `You have been given the exact previous episode text above—continue from its last line. `
+            : "") +
+          `Treat this as part of the finale arc, and begin RESOLVING major plot lines and emotional arcs rather than opening new ones. ` +
+          `You may still end on a light hook or emotional question, but it should feel like the story is converging toward the planned ending, not launching a fresh conflict. ` +
+          `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
+      );
+    } else {
+      // Regular episodes: strong hooks.
+      lines.push(
+        `This is episode ${ep} of ${total} of ONE continuous story about the same heroine and the same two male leads. ` +
+          `Previous episodes are already written; do NOT restart the story, change character names, or reset their relationships. ` +
+          (blueprintContext
+            ? `Follow the season outline and THIS EPISODE'S PLAN above. `
+            : "") +
+          (ep > 1 && previousEpisodeScripts.length > 0
+            ? `You have been given the exact previous episode text above—continue from its last line. `
+            : "") +
+          `Treat this as the ${phase}, and continue the same plot line. ` +
+          `Maintain consistency with earlier implied events and keep the tone and premise aligned with the logline. ` +
+          `End on a strong cliffhanger or unresolved emotional beat for the heroine. ` +
+          `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
+      );
+    }
   }
   return lines.join("\n");
 }

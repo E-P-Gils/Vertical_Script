@@ -127,6 +127,16 @@ function App() {
     setDownloading(true);
     const yieldToMain = () => new Promise((r) => setTimeout(r, 0));
     try {
+      // pdf-lib's standard Courier (WinAnsi) cannot encode some full-width CJK punctuation.
+      // Normalize common problematic characters so PDF generation doesn't throw.
+      const sanitizedScript = script
+        .replace(/\u3002/g, ".") // full-width period 。 -> .
+        .replace(/\uFF0C/g, ",") // full-width comma ， -> ,
+        .replace(/\uFF1A/g, ":") // full-width colon ： -> :
+        .replace(/\uFF1B/g, ";") // full-width semicolon ； -> ;
+        .replace(/\u2018|\u2019|\uFF07/g, "'") // various single quotes -> '
+        .replace(/\u201C|\u201D|\uFF02/g, '"'); // various double quotes -> "
+
       const pdfDoc = await PDFDocument.create();
       const fontSize = 12;
       const lineHeight = 14;
@@ -194,7 +204,7 @@ function App() {
         }
       };
 
-      const lines = script.split(/\r?\n/);
+      const lines = sanitizedScript.split(/\r?\n/);
       let prevType = "blank";
       let lineIndex = 0;
 
