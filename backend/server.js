@@ -562,20 +562,39 @@ function buildEpisodePromptText({
     );
   }
 
-  lines.push(
-    `This is episode ${ep} of ${total} of ONE continuous story about the same heroine and the same two male leads. ` +
-      `Previous episodes are already written; do NOT restart the story, change character names, or reset their relationships. ` +
-      (blueprintContext
-        ? `Follow the season outline and THIS EPISODE'S PLAN above. `
-        : "") +
-      (ep > 1 && previousEpisodeScripts.length > 0
-        ? `You have been given the exact previous episode text above—continue from its last line. `
-        : "") +
-      `Treat this as the ${phase}, and continue the same plot line. ` +
-      `Maintain consistency with earlier implied events and keep the tone and premise aligned with the logline. ` +
-      `End on a strong cliffhanger or unresolved emotional beat for the heroine. ` +
-      `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
-  );
+  if (ep === total) {
+    // Final episode: land the story instead of adding a new cliffhanger.
+    lines.push(
+      `This is episode ${ep} of ${total}, the FINAL episode of this continuous story about the same heroine and the same two male leads. ` +
+        `Previous episodes are already written; do NOT restart the story, change character names, or reset their relationships. ` +
+        (blueprintContext
+          ? `Follow the season outline and THIS EPISODE'S PLAN above. `
+          : "") +
+        (ep > 1 && previousEpisodeScripts.length > 0
+          ? `You have been given the exact previous episode text above—continue from its last line. `
+          : "") +
+        `Treat this as the finale and bring the main plot lines and central relationships to a clear resolution. ` +
+        `If a PLANNED ENDING is given above, you MUST shape the climax and the aftermath so the emotional tone and outcome match that planned ending. ` +
+        `Do NOT end on a brand-new cliffhanger; instead, after the main climax include at least one short aftermath or epilogue beat showing how the heroine and the leads live with the consequences. ` +
+        `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
+    );
+  } else {
+    // Non-final episodes still end on a hook.
+    lines.push(
+      `This is episode ${ep} of ${total} of ONE continuous story about the same heroine and the same two male leads. ` +
+        `Previous episodes are already written; do NOT restart the story, change character names, or reset their relationships. ` +
+        (blueprintContext
+          ? `Follow the season outline and THIS EPISODE'S PLAN above. `
+          : "") +
+        (ep > 1 && previousEpisodeScripts.length > 0
+          ? `You have been given the exact previous episode text above—continue from its last line. `
+          : "") +
+        `Treat this as the ${phase}, and continue the same plot line. ` +
+        `Maintain consistency with earlier implied events and keep the tone and premise aligned with the logline. ` +
+        `End on a strong cliffhanger or unresolved emotional beat for the heroine. ` +
+        `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
+    );
+  }
   return lines.join("\n");
 }
 
