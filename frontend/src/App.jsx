@@ -128,14 +128,19 @@ function App() {
     const yieldToMain = () => new Promise((r) => setTimeout(r, 0));
     try {
       // pdf-lib's standard Courier (WinAnsi) cannot encode some full-width CJK punctuation.
-      // Normalize common problematic characters so PDF generation doesn't throw.
-      const sanitizedScript = script
+      // First normalize common full-width punctuation, then strip any remaining non-WinAnsi chars.
+      let sanitizedScript = script
         .replace(/\u3002/g, ".") // full-width period 。 -> .
         .replace(/\uFF0C/g, ",") // full-width comma ， -> ,
         .replace(/\uFF1A/g, ":") // full-width colon ： -> :
         .replace(/\uFF1B/g, ";") // full-width semicolon ； -> ;
+        .replace(/\uFF01/g, "!") // full-width exclamation ！ -> !
+        .replace(/\uFF1F/g, "?") // full-width question mark ？ -> ?
         .replace(/\u2018|\u2019|\uFF07/g, "'") // various single quotes -> '
         .replace(/\u201C|\u201D|\uFF02/g, '"'); // various double quotes -> "
+
+      // Strip any remaining non-WinAnsi characters (e.g. CJK ideographs) to avoid encoding errors.
+      sanitizedScript = sanitizedScript.replace(/[^\x00-\xFF]/g, "");
 
       const pdfDoc = await PDFDocument.create();
       const fontSize = 12;
