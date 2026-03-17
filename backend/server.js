@@ -386,9 +386,10 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Use screenplay-style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
 - Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
 - Keep the episode focused, with 2–5 short scenes.
-- Every episode must have a HOOK at the beginning and a HOOK at the end (especially in the first 10 episodes), but keep them emotionally driven and grounded. Opening hooks should feel like a sharp emotional moment: an awkward intimacy beat, the heroine being subtly bullied or underestimated, a charged first encounter, or a small but vivid humiliation that makes us care. Closing hooks should be light but addictive: a promise, a tease, a jealousy beat, a sudden confession or near-confession, or the hint of danger/competition around love or status.
+- Every episode should have a HOOK at the beginning. For early and middle episodes (when [EPISODE] is not within the last 5 of [EPISODES]), also end on a clear hook for the next episode—but keep them emotionally driven and grounded. Opening hooks should feel like a sharp emotional moment: an awkward intimacy beat, the heroine being subtly bullied or underestimated, a charged first encounter, or a small but vivid humiliation that makes us care. Closing hooks in these episodes should be light but addictive: a promise, a tease, a jealousy beat, a sudden confession or near-confession, or the hint of danger/competition around love or status.
 - Avoid graphic violence, gore, or long slapstick brawls. Do NOT ramble or list random objects, professions, or technical details; stay tightly focused on the characters, their feelings, and the immediate scene.
-- End the episode on a clear, clean hook or cliffhanger centred on the heroine (an emotional blow, surprising gesture, or new threat/opportunity that directly affects her).
+- SPECIAL RULE FOR LATE EPISODES (when [EPISODE] is within the last 5 of [EPISODES]): progressively reduce unresolved threats and begin resolving major plot lines instead of opening new ones. Any end-of-episode hook in these late episodes should feel like the last steps toward closure (emotional decisions, consequences, or final preparations), not a brand-new danger, mystery, or villain.
+- FINAL EPISODE RULE (when [EPISODE] == [EPISODES]): you MUST treat this as a true finale. Fully resolve the main external threat and the core emotional arc. End the script on safety, acceptance, or a clearly chosen future for the heroine and her relationships. Do NOT add any new threat, twist, or unseen observer in the last scene, and do NOT tease another season—no "it’s not over", "someone watches from the shadows", or similar cliffhangers.
 
 CONFLICT AND ESCALATION REQUIREMENTS:
 - Every episode must move at least ONE external stake forward in a concrete way (family approval/disapproval, money or contracts, company/pack politics, social reputation/public humiliation, or a rival’s scheme).
@@ -536,7 +537,7 @@ function buildEpisodePromptText({
   }
 
   const isFinalEpisode = ep === total;
-  const isLandingZone = ep >= Math.max(1, total - 2); // last 3 episodes
+  const isLandingZone = ep >= Math.max(1, total - 4); // last 5 episodes
 
   // If we're in the finale arc, steer toward a genre-appropriate planned ending.
   let plannedEnding = "";
