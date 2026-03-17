@@ -45,8 +45,7 @@ function App() {
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const runGenerate = async (languageTag) => {
     if (!genre || loglineOverLimit) return;
     if (!logline.trim()) return;
     setError("");
@@ -59,7 +58,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           genre,
-          language: "EN",
+          language: languageTag,
           episodeCount: 60,
           title: "Generated Script",
           logline: logline.trim().slice(0, 1500),
@@ -119,6 +118,16 @@ function App() {
       setLoading(false);
       setProgress({ episode: 0, total: 0 });
     }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    await runGenerate("EN");
+  };
+
+  const handleSubmitChinese = async (e) => {
+    e.preventDefault();
+    await runGenerate("ZH");
   };
 
   const handleDownloadPdf = async () => {
@@ -485,7 +494,19 @@ function App() {
                     ? progress.total > 0
                       ? `Episode ${progress.episode}/${progress.total} / 生成中`
                       : "Generating… / 正在生成…"
-                    : "Generate / 生成"}
+                    : "Generate (English) / 生成英文剧本"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleSubmitChinese}
+                  disabled={loading || !genre || !logline.trim() || loglineOverLimit}
+                >
+                  {loading
+                    ? progress.total > 0
+                      ? `Episode ${progress.episode}/${progress.total} / 生成中`
+                      : "Generating… / 正在生成…"
+                    : "Generate in Chinese / 生成中文剧本"}
                 </button>
               </div>
             </form>
