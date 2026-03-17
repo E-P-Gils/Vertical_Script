@@ -102,6 +102,7 @@ function getArcPhaseForEpisode(ep, total = 60) {
 const BLUEPRINT_SYSTEM_PROMPT = `You are a season planner for female-led vertical romance dramas.
 
 The user will give you: language, genre (WEREWOLF or NON_WEREWOLF), total episode count (e.g. 60), the three main character names (heroine, cold male lead, warm male lead), and a short series logline.
+They may also give you high-level trope controls.
 
 You must output a single JSON object (no other text, no markdown) with this exact structure:
 
@@ -111,6 +112,34 @@ You must output a single JSON object (no other text, no markdown) with this exac
   "male1": "Full name as given",
   "male2": "Full name as given",
   "genre": "WEREWOLF or NON_WEREWOLF",
+  "tropes": {
+    "romantic": ["..."],
+    "conflict": ["..."],
+    "supernatural": ["..."]
+  },
+  "characters": [
+    {
+      "name": "Heroine's full name",
+      "role": "heroine_protagonist",
+      "goal": "Her long-term season goal in one sentence (e.g., expose a conspiracy, save her family, escape a toxic marriage).",
+      "traits": ["underdog", "resilient", "smart"],
+      "taboos": ["becoming a villain", "suddenly forgetting her core values"]
+    },
+    {
+      "name": "Cold male lead full name",
+      "role": "cold_male_lead",
+      "goal": "His long-term goal in one sentence.",
+      "traits": ["powerful", "proud", "controlled"],
+      "taboos": ["becoming pure comic relief", "changing profession mid-season without a planned turning point"]
+    },
+    {
+      "name": "Warm male lead full name",
+      "role": "warm_male_lead",
+      "goal": "His long-term goal in one sentence.",
+      "traits": ["protective", "patient", "loyal"],
+      "taboos": ["becoming main villain", "randomly disappearing with no payoff"]
+    }
+  ],
   "episodes": [
     {
       "episode": 1,
@@ -125,22 +154,64 @@ You must output a single JSON object (no other text, no markdown) with this exac
       "key_events": ["Event 1", "Event 2", "Event 3"],
       "twist_or_reveal": "One sentence: twist or reveal",
       "cliffhanger_type": "emotional | plot_twist | danger | reversal",
-      "cliffhanger": "One sentence: how the episode ends to hook the next"
+      "cliffhanger": "One sentence: how the episode ends to hook the next",
+      "hook_type": "meet_cute | humiliation | danger | secret_overheard | other",
+      "conflict_type": "family_pressure | money_business | social_status | secret_reveal | rival_scheme | romantic_tension | supernatural_danger | other",
+      "micro_beats": [
+        "Hook beat: 1 short sentence describing the opening emotional moment (0–5 seconds).",
+        "Conflict beat: 1–2 short sentences describing the main conflict for this episode (5–30 seconds).",
+        "Mini-twist beat: 1 short sentence describing a twist or shift in power/emotion near the end of the episode.",
+        "Cliffhanger beat: 1 short sentence describing how the final lines end on a hook that points directly into the next episode."
+      ]
     }
   ]
 }
 
-Rules:
+
+Trope control:
+- The optional "tropes" object can contain three arrays of high-level tropes:
+  - romantic: e.g. ["secret_billionaire", "contract_marriage", "childhood_sweethearts", "forbidden_love"]
+  - conflict: e.g. ["hidden_heir", "corporate_war", "family_feud", "revenge_plot"]
+  - supernatural: e.g. ["monster_awakening", "cursed_bloodline", "prophetic_dreams"]
+- If tropes are provided, you MUST weave them through the whole season:
+  - At least one romantic trope should show up clearly every 3–4 episodes.
+  - At least one conflict trope should drive external stakes in each arc_phase.
+  - Supernatural tropes (when present) should be introduced early, escalated in the middle, and paid off in the finale.
+
+Season arc rules (macro-structure):
 - Produce exactly one object per episode in order (episode 1 through the total given).
-- arc_phase must follow the season arc: episodes 1-5 hook, 6-20 escalation, 21-40 turning_point, 41-55 endgame, 56-60 finale.
+- arc_phase must follow the season arc: episodes 1–5 "hook" (setup), 6–20 "escalation", 21–40 "turning_point", 41–55 "endgame", 56–60 "finale".
 - Same heroine and two male leads in every episode; their states evolve but names never change.
 - Story must have a clear beginning, middle, and end across the full season; no resets.
-- For episodes 1-10 especially: plan a strong OPENING hook (e.g. intimacy/tension, heroine bullied or in danger, male lead’s presence/physical appeal) and a strong CLOSING hook (e.g. male lead saves/defends her, rescue, charged moment, reveal). PG-13 only.
-- Vary the main conflict type across the season: every 3–5 episodes, rotate between family pressure, money/business/contracts, social reputation/public humiliation, secrets/reveals, rival schemes, and romantic tension. Do NOT let 4+ episodes in a row revolve around the same physical scenario (e.g. chase → corner → forced kiss).
-- Physical closeness beats (kisses, grabs, cornering) should be planned as spikes, not the only conflict: after early hook episodes, focus escalation on external stakes (family approval, deals, inheritances, pack politics, social status) and heroine leverage.
-- Output only valid JSON. No commentary before or after.`;
 
-function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
+Character role locking:
+- The "characters" array must describe the heroine and the two main male leads using stable roles, goals, traits, and taboos.
+- These roles MUST remain consistent across all episodes: do NOT turn the heroine into a villain, swap the cold/warm male leads' archetypes, or radically change professions/alignments unless the arc_phase and episode plan clearly mark a turning point.
+- If a turning point changes a character’s alignment (e.g., warm lead betrays heroine), it must be foreshadowed and then stay consistent afterward; no random flip-flopping.
+
+Per-episode structure rules (micro-structure):
+- Every episode must be planned as HOOK → CONFLICT → MINI-TWIST → CLIFFHANGER.
+- The "micro_beats" array MUST always have exactly four entries in this exact order:
+  1) Hook beat (opening emotional moment).
+  2) Conflict beat (core conflict of this episode).
+  3) Mini-twist beat (shift/reveal near the end).
+  4) Cliffhanger beat (final lines that hook into the next episode).
+- The HOOK beat must be short, vivid, and emotional (intimacy, humiliation, jealousy, shock, or danger focused on the heroine).
+- The CONFLICT beat must be concrete (what exactly goes wrong, who pushes against the heroine).
+- The MINI-TWIST beat should be smaller than the episode’s cliffhanger, but still change power/emotion or information.
+- The CLIFFHANGER beat must directly grow out of this episode’s conflict and mini-twist; do NOT introduce a completely new subplot just for the last line.
+
+Variety and pacing:
+- For episodes 1–10 especially: plan a strong OPENING hook (e.g. intimacy/tension, heroine bullied or in danger, male lead’s presence/physical appeal) and a strong CLOSING hook (e.g. male lead saves/defends her, rescue, charged moment, reveal). PG-13 only.
+- Vary the main conflict_type across the season: every 3–5 episodes, rotate between family pressure, money/business/contracts, social reputation/public humiliation, secrets/reveals, rival schemes, and romantic tension. Do NOT let 4+ episodes in a row revolve around the same physical scenario (e.g. chase → corner → forced kiss).
+- Physical closeness beats (kisses, grabs, cornering) should be planned as spikes, not the only conflict: after early hook episodes, focus escalation on external stakes (family approval, deals, inheritances, pack politics, social status) and heroine leverage.
+
+Finale shaping:
+- Episodes in arc_phase "finale" (typically 56–60) must clearly move the story toward resolution: fewer new villains, more payoffs of existing secrets and conflicts.
+
+Output only valid JSON. No commentary before or after.`;
+
+function buildBlueprintPrompt({ logline, names, genre, episodeCount, tropes }) {
   const total = Math.max(1, Math.min(120, episodeCount || 60));
   const heroine = (names && names.heroine) || "EMMA LIN";
   const male1 = (names && names.coldCeo) || "ADRIAN LUO";
@@ -149,6 +220,23 @@ function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
   const corporationName = names && names.corporationName;
   const genreTag = String(genre || "Romance").trim() || "Romance";
   const cleanLogline = safeStr(logline).slice(0, 1500);
+
+  let tropesLine = "";
+  if (tropes && typeof tropes === "object") {
+    const romantic = Array.isArray(tropes.romantic) ? tropes.romantic : [];
+    const conflict = Array.isArray(tropes.conflict) ? tropes.conflict : [];
+    const supernatural = Array.isArray(tropes.supernatural) ? tropes.supernatural : [];
+    const parts = [];
+    if (romantic.length)
+      parts.push(`romantic_tropes=[${romantic.slice(0, 6).join(", ")}]`);
+    if (conflict.length)
+      parts.push(`conflict_tropes=[${conflict.slice(0, 6).join(", ")}]`);
+    if (supernatural.length)
+      parts.push(`supernatural_tropes=[${supernatural.slice(0, 6).join(", ")}]`);
+    if (parts.length) {
+      tropesLine = `TROPE CONTROLS: ${parts.join(" | ")}.`;
+    }
+  }
 
   const lines = [
     `[LANG=EN] [GENRE=${genreTag}] [EPISODES=${total}]`,
@@ -160,6 +248,7 @@ function buildBlueprintPrompt({ logline, names, genre, episodeCount }) {
       : "",
     corporationName ? `Optional corporation for finance/boardroom storylines: ${corporationName}.` : "",
     cleanLogline ? `[LOGLINE] ${cleanLogline}` : "",
+    tropesLine,
     `Generate a full ${total}-episode season outline in the exact JSON format described. One entry in "episodes" per episode, in order.`,
   ];
   return lines.filter(Boolean).join("\n");
@@ -176,12 +265,13 @@ function parseBlueprintFromContent(content) {
   }
 }
 
-async function generateSeasonBlueprint({ episodeCount, logline, genre, names }) {
+async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tropes }) {
   const userContent = buildBlueprintPrompt({
     logline,
     names,
     genre,
     episodeCount,
+    tropes,
   });
 
   const completion = await openai.chat.completions.create({
@@ -206,6 +296,84 @@ async function generateSeasonBlueprint({ episodeCount, logline, genre, names }) 
     throw new Error("Failed to parse season blueprint JSON");
   }
   return blueprint;
+}
+
+const EPISODE_SUMMARY_SYSTEM_PROMPT = `You are a story planner for female-led vertical romance dramas.
+
+You will be given:
+- A short logline for the whole series.
+- A JSON object with "episodes": an array of episode plans for ONE season, each including fields like: episode, arc_phase, title, main_conflict, key_events, twist_or_reveal, cliffhanger, hook_type, conflict_type, and micro_beats.
+
+Your task:
+- For EACH episode in order, write a short prose episode summary that the scriptwriter will follow beat-for-beat.
+- Each summary must:
+  - Be 3–6 sentences maximum.
+  - Explicitly follow the HOOK → CONFLICT → MINI-TWIST → CLIFFHANGER pattern implied by micro_beats.
+  - Mention the heroine and at least one male lead by name where relevant.
+  - Stay consistent with the "arc_phase" (hook, escalation, turning_point, endgame, finale).
+- Do NOT invent brand-new villains, conspiracies, supernatural systems, or locations that are not implied by the episode plans; focus on clarifying and stitching together what is already there.
+
+Output format:
+- Output a single JSON object (no other text, no markdown) with:
+{
+  "episode_summaries": [
+    { "episode": 1, "summary": "..." },
+    { "episode": 2, "summary": "..." }
+  ]
+}
+
+Each "summary" should be plain text (no newlines inside, no quotes beyond simple dialogue if needed).`;
+
+function parseEpisodeSummariesFromContent(content) {
+  const raw = (content || "").trim();
+  const objMatch = raw.match(/\{[\s\S]*\}/);
+  if (!objMatch) return null;
+  try {
+    const parsed = JSON.parse(objMatch[0]);
+    if (!parsed || !Array.isArray(parsed.episode_summaries)) return null;
+    const map = new Map();
+    for (const item of parsed.episode_summaries) {
+      if (
+        item &&
+        typeof item.episode === "number" &&
+        typeof item.summary === "string" &&
+        item.summary.trim()
+      ) {
+        map.set(item.episode, item.summary.trim());
+      }
+    }
+    return map;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function generateEpisodeSummaries({ blueprint, logline, genre }) {
+  if (!blueprint || !Array.isArray(blueprint.episodes) || !blueprint.episodes.length) {
+    return null;
+  }
+  const payload = {
+    logline: safeStr(logline).slice(0, 1500),
+    genre: String(genre || "Romance").trim() || "Romance",
+    episodes: blueprint.episodes,
+  };
+  const userContent = JSON.stringify(payload);
+
+  const completion = await openai.chat.completions.create({
+    model: PLANNER_MODEL,
+    messages: [
+      { role: "system", content: EPISODE_SUMMARY_SYSTEM_PROMPT },
+      { role: "user", content: userContent },
+    ],
+    max_tokens: 4096,
+    temperature: 0.5,
+  });
+
+  const rawContent = completion.choices?.[0]?.message?.content;
+  const content =
+    typeof rawContent === "string" && rawContent.trim() ? rawContent.trim() : "";
+  const map = parseEpisodeSummariesFromContent(content);
+  return map;
 }
 
 const RECAP_SYSTEM_PROMPT = `You are an assistant that summarizes vertical drama episodes.
@@ -255,6 +423,55 @@ function formatRecapContext(recaps, episodeNumber) {
     lines.push(`  Ep ${r.episode}: ${r.recap}`);
   }
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Simple event tagging: detect big repeated set-pieces to steer away from.
+// ---------------------------------------------------------------------------
+
+function tagEpisodeEvents(text) {
+  const s = safeStr(text).toLowerCase();
+  if (!s) return [];
+  const tags = new Set();
+  const add = (t) => tags.add(t);
+
+  if (/explosion|explode|blast|detonation|bomb\b/.test(s)) add("explosion");
+  if (/fire\b|flames?|burning/.test(s)) add("fire");
+  if (/elevator|lift shaft|freight elevator/.test(s)) add("elevator_scene");
+  if (/warehouse|abandoned factory|storage unit/.test(s)) add("warehouse_scene");
+  if (/kidnap|abduct|hostage|tied up|gagged/.test(s)) add("kidnapping");
+  if (/car chase|pursuit on the road|screech(es|ed) to a halt/.test(s))
+    add("car_chase");
+  if (/\bmonster\b|creature|shadow beast|werewolf/.test(s)) add("monster_attack");
+  if (/\bkiss(es|ed)?\b|their lips meet|press(es|ed) his lips/.test(s))
+    add("strong_kiss");
+  if (/gunshot|shots? fired|pulls? the trigger/.test(s)) add("gunfight");
+  if (/storm\b|thunder|lightning/.test(s)) add("storm_atmosphere");
+
+  return Array.from(tags);
+}
+
+function formatRecentEventConstraints(recaps, episodeNumber) {
+  if (!Array.isArray(recaps) || !recaps.length) return "";
+  const prev = recaps
+    .filter((r) => typeof r.episode === "number" && r.episode < episodeNumber)
+    .slice(-3);
+  if (!prev.length) return "";
+  const recentTags = new Set();
+  for (const r of prev) {
+    if (Array.isArray(r.tags)) {
+      for (const t of r.tags) {
+        if (t) recentTags.add(t);
+      }
+    }
+  }
+  if (!recentTags.size) return "";
+  const tagList = Array.from(recentTags);
+  return (
+    "RECENT BIG SET-PIECES (avoid repeating as the main device this episode): " +
+    tagList.join(", ") +
+    "."
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +547,23 @@ function blocksToScriptText(blocks) {
   return lines.join("\n");
 }
 
+// Editor prompt to gently reshape finales / endings toward resolution.
+const ENDING_EDIT_SYSTEM_PROMPT = `You are an experienced story editor for serialized vertical romance dramas.
+
+Your sole task is to lightly EDIT the episode script you are given so that the ENDING lands as a satisfying resolution instead of a cliffhanger.
+
+Rules:
+- Keep the overall episode structure, tone, and key events the same; do NOT rewrite the whole story from scratch.
+- Focus almost entirely on the FINAL SCENE and the LAST 3–6 PARAGRAPHS.
+- Remove or rewrite any lingering cliffhanger-style beats (new threats, "this has only begun", "someone watches from the shadows", surprise powerful figures introduced in the last scene, or teaser questions).
+- Do NOT introduce any brand-new villains, bosses, institutions, or mysterious figures in the final scene.
+- Make sure the last scene clearly LOWERS immediate danger and shows safety, acceptance, or a chosen future for the heroine and her relationships.
+- The LAST LINE must feel like a complete, satisfying ending for this season (quiet moment, hopeful plan, or emotionally grounded closure), not a teaser.
+
+Output:
+- Return the FULL edited episode script in the same format (scene headings, dialogue, and action lines), but with the ending adjusted to satisfy the rules above.
+- Do NOT add commentary or explanation—only the edited script.`;
+
 // Simple repetition score between two episode scripts.
 // Splits into sentences, normalises, and computes overlap ratio.
 function repetitionScore(currentText, previousText) {
@@ -402,6 +636,7 @@ ANTI-REPETITION AND FORMAT (critical — vertical scripts are sparse):
 - No adjective stacking: do NOT chain synonyms (e.g. incredible, extraordinary, miraculous, divine, magnificent). Use one strong word, then move on. Never repeat the same type of descriptor in a row.
 - No lists of similar words or emotional synonyms. If you need intensity, use a single clear word and then action or dialogue.
 - Each beat should be action or dialogue, not a run of descriptive adjectives.
+- When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Victor", "Lance", or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
@@ -425,6 +660,26 @@ function formatBlueprintContext(blueprint, episodeNumber) {
     lines.push("");
   }
 
+  if (Array.isArray(blueprint.characters) && blueprint.characters.length) {
+    lines.push("CHARACTER ROLE CONSTRAINTS (do NOT break these):");
+    for (const c of blueprint.characters) {
+      if (!c || typeof c.name !== "string") continue;
+      const name = c.name.trim();
+      if (!name) continue;
+      const role = typeof c.role === "string" ? c.role : "";
+      const goal = typeof c.goal === "string" ? c.goal : "";
+      const traits = Array.isArray(c.traits) ? c.traits.join(", ") : "";
+      const taboos = Array.isArray(c.taboos) ? c.taboos.join(", ") : "";
+      const parts = [`- ${name}`];
+      if (role) parts.push(`role: ${role}`);
+      if (goal) parts.push(`goal: ${goal}`);
+      if (traits) parts.push(`traits: ${traits}`);
+      if (taboos) parts.push(`taboos: ${taboos}`);
+      lines.push(parts.join(" | "));
+    }
+    lines.push("");
+  }
+
   const plan = blueprint.episodes[ep - 1];
   if (plan && typeof plan === "object") {
     lines.push("THIS EPISODE'S PLAN (follow this beat for beat):");
@@ -433,10 +688,19 @@ function formatBlueprintContext(blueprint, episodeNumber) {
     if (plan.male1_state) lines.push(`  Male lead 1: ${plan.male1_state}`);
     if (plan.male2_state) lines.push(`  Male lead 2: ${plan.male2_state}`);
     if (plan.main_conflict) lines.push(`  Main conflict: ${plan.main_conflict}`);
+    if (plan.hook_type) lines.push(`  Hook type: ${plan.hook_type}`);
+    if (plan.conflict_type) lines.push(`  Conflict type: ${plan.conflict_type}`);
     if (plan.key_events && plan.key_events.length)
       lines.push(`  Key events: ${plan.key_events.join("; ")}`);
     if (plan.twist_or_reveal) lines.push(`  Twist/reveal: ${plan.twist_or_reveal}`);
     if (plan.cliffhanger) lines.push(`  End on cliffhanger: ${plan.cliffhanger}`);
+    if (Array.isArray(plan.micro_beats) && plan.micro_beats.length === 4) {
+      lines.push("  MICRO-STRUCTURE (you MUST follow this order exactly):");
+      lines.push(`    1) HOOK beat: ${plan.micro_beats[0]}`);
+      lines.push(`    2) CONFLICT beat: ${plan.micro_beats[1]}`);
+      lines.push(`    3) MINI-TWIST beat: ${plan.micro_beats[2]}`);
+      lines.push(`    4) CLIFFHANGER beat: ${plan.micro_beats[3]}`);
+    }
   }
 
   return lines.length ? lines.join("\n") : "";
@@ -453,6 +717,7 @@ function buildEpisodePromptText({
   logline,
   names,
   blueprint,
+  episodeSummaries,
   recaps,
   previousEpisodeScripts = [],
 }) {
@@ -486,12 +751,27 @@ function buildEpisodePromptText({
 
   const blueprintContext = formatBlueprintContext(blueprint, ep);
   const recapContext = formatRecapContext(recaps, ep);
-  if (blueprintContext || recapContext) {
+  const summaryText =
+    episodeSummaries && episodeSummaries instanceof Map
+      ? episodeSummaries.get(ep)
+      : null;
+  const recentEvents = formatRecentEventConstraints(recaps, ep);
+
+  if (blueprintContext || recapContext || summaryText || recentEvents) {
     lines.push("");
     if (blueprintContext) lines.push(blueprintContext);
     if (recapContext) {
       if (blueprintContext) lines.push("");
       lines.push(recapContext);
+    }
+    if (recentEvents) {
+      if (blueprintContext || recapContext) lines.push("");
+      lines.push(recentEvents);
+    }
+    if (summaryText) {
+      if (blueprintContext || recapContext || recentEvents) lines.push("");
+      lines.push("THIS EPISODE'S SUMMARY (follow this beat for beat; do not invent new major subplots):");
+      lines.push(summaryText);
     }
     lines.push("");
   }
@@ -591,6 +871,8 @@ function buildEpisodePromptText({
         `Treat this as the finale and bring the main plot lines and central relationships to a clear resolution. ` +
         `If a PLANNED ENDING is given above, you MUST shape the climax and the aftermath so the emotional tone and outcome match that planned ending. ` +
         `Do NOT end on a brand-new cliffhanger; instead, after the main climax include at least one short aftermath or epilogue beat showing how the heroine and the leads live with the consequences. ` +
+        `In the FINAL SCENE and FINAL PARAGRAPHS you must NOT introduce any new villains, bosses, institutions, or mysterious figures (no surprise CEOs, no new organisations, no unknown watchers); only already-known characters may appear. ` +
+        `The last 3–5 paragraphs must LOWER the immediate danger level and show safety, acceptance, or a clearly chosen future for the heroine. The final line should read as a satisfying series ending, not as a question or teaser. ` +
         `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
     );
   } else {
@@ -607,7 +889,8 @@ function buildEpisodePromptText({
             ? `You have been given the exact previous episode text above—continue from its last line. `
             : "") +
           `Treat this as part of the finale arc, and begin RESOLVING major plot lines and emotional arcs rather than opening new ones. ` +
-          `You may still end on a light hook or emotional question, but it should feel like the story is converging toward the planned ending, not launching a fresh conflict. ` +
+          `Do NOT introduce brand-new central villains, conspiracies, or powerful organisations in these late episodes; focus on paying off what already exists. ` +
+          `Any end-of-episode hook in this landing zone should feel like the last steps toward closure (final confrontations, decisions, or consequences), not like the start of a new storyline. Each of these endings must feel more stable and closer to resolution than the previous episode. ` +
           `Keep prose sparse: short action beats, dialogue-led scenes, no adjective stacking or synonym chains.`
       );
     } else {
@@ -641,6 +924,7 @@ app.post("/generate", async (req, res) => {
   const logline = safeStr(body.logline).slice(0, 1500);
   const genre = String(body.genre || "Romance").trim() || "Romance";
   const seriesNames = getSeriesNames(genre);
+  const tropes = body.tropes && typeof body.tropes === "object" ? body.tropes : null;
 
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
@@ -649,6 +933,7 @@ app.post("/generate", async (req, res) => {
 
   try {
     let blueprint = null;
+    let episodeSummaries = null;
     const episodeRecaps = [];
     try {
       blueprint = await generateSeasonBlueprint({
@@ -656,6 +941,7 @@ app.post("/generate", async (req, res) => {
         logline,
         genre,
         names: seriesNames,
+        tropes,
       });
       sendStreamLine(res, {
         type: "blueprint",
@@ -664,6 +950,28 @@ app.post("/generate", async (req, res) => {
           ? blueprint.episodes.length
           : 0,
       });
+
+      try {
+        episodeSummaries = await generateEpisodeSummaries({
+          blueprint,
+          logline,
+          genre,
+        });
+        if (episodeSummaries && episodeSummaries instanceof Map) {
+          sendStreamLine(res, {
+            type: "episode_summaries",
+            ok: true,
+            episodes: episodeSummaries.size,
+          });
+        }
+      } catch (sumErr) {
+        console.error("Episode summary generation failed:", sumErr);
+        sendStreamLine(res, {
+          type: "episode_summaries",
+          ok: false,
+          message: sumErr.message || "Failed to generate per-episode summaries",
+        });
+      }
     } catch (bpErr) {
       console.error("Blueprint generation failed:", bpErr);
       sendStreamLine(res, {
@@ -688,6 +996,7 @@ app.post("/generate", async (req, res) => {
           logline,
           names: seriesNames,
           blueprint,
+          episodeSummaries,
           recaps: episodeRecaps,
           previousEpisodeScripts: episodeScriptsMemo,
         });
@@ -742,6 +1051,37 @@ app.post("/generate", async (req, res) => {
           }
         }
 
+        // Tag big events in this episode for future anti-repetition guidance.
+        const eventTags = tagEpisodeEvents(episodeText);
+
+        // Final-episode pass: lightly edit the ending away from cliffhangers into true resolution.
+        if (ep === episodeCount && typeof episodeText === "string" && episodeText.trim()) {
+          try {
+            const edit = await openai.chat.completions.create({
+              model: PLANNER_MODEL,
+              messages: [
+                { role: "system", content: ENDING_EDIT_SYSTEM_PROMPT },
+                {
+                  role: "user",
+                  content:
+                    "Here is the full script for the FINAL episode of the season. " +
+                    "Lightly edit ONLY as needed so that the ending is a true resolution (no new threats, no teasers), " +
+                    "and return the complete edited script:\n\n" +
+                    episodeText,
+                },
+              ],
+              max_tokens: 2048,
+              temperature: 0.3,
+            });
+            const editedRaw = edit.choices?.[0]?.message?.content;
+            if (typeof editedRaw === "string" && editedRaw.trim()) {
+              episodeText = editedRaw.trim();
+            }
+          } catch (editErr) {
+            console.error(`Ending edit failed for final episode ${ep}:`, editErr);
+          }
+        }
+
         // Summarize this episode for future context (best-effort).
         try {
           const recap = await summarizeEpisode({
@@ -749,7 +1089,7 @@ app.post("/generate", async (req, res) => {
             text: episodeText,
           });
           if (recap) {
-            episodeRecaps.push({ episode: ep, recap });
+            episodeRecaps.push({ episode: ep, recap, tags: eventTags });
             sendStreamLine(res, {
               type: "recap",
               episode: ep,
