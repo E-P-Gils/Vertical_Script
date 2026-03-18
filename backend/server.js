@@ -1030,6 +1030,19 @@ function sendStreamLine(res, obj) {
   res.write(JSON.stringify(obj) + "\n");
 }
 
+function includesWord(haystack, word) {
+  const s = safeStr(haystack);
+  if (!s) return false;
+  const re = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "i");
+  return re.test(s);
+}
+
+function pickReplacementNameForVictor() {
+  // Keep a small curated set to avoid odd/unfitting replacements.
+  const pool = ["Damien", "Tristan", "Dominic", "Sebastian", "Marcus", "Adrian", "Vincent", "Malcolm"];
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
 app.post("/generate", async (req, res) => {
   const body = req.body || {};
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
@@ -1126,6 +1139,11 @@ app.post("/generate", async (req, res) => {
     }
 
     const episodeScriptsMemo = [];
+    const victorAllowed =
+      includesWord(logline, "Victor") ||
+      includesWord(seriesNames?.heroine, "Victor") ||
+      includesWord(seriesNames?.coldCeo, "Victor") ||
+      includesWord(seriesNames?.warmFriend, "Victor");
 
     for (let ep = 1; ep <= episodeCount; ep++) {
       sendStreamLine(res, { type: "progress", episode: ep, total: episodeCount });
@@ -1195,6 +1213,41 @@ app.post("/generate", async (req, res) => {
           }
         }
 
+        // Hard safeguard: prevent the model from inventing/using "Victor" unless explicitly provided.
+        if (!victorAllowed && includesWord(episodeText, "Victor")) {
+          const replacement = pickReplacementNameForVictor();
+          console.warn(`Episode ${ep} used forbidden name Victor; regenerating with rename to ${replacement}.`);
+          const renameRetryContent =
+            userContent +
+            `\n\nREWRITE REQUIREMENT (name ban): The draft used the forbidden name "Victor". ` +
+            `Rewrite the episode and rename ANY character named "Victor" to "${replacement}" (and adjust dialogue/action accordingly). ` +
+            `Do NOT introduce any new protagonists. Keep the heroine and the two male leads as the core cast. Do not change their names.`;
+          try {
+            const retry = await openai.chat.completions.create({
+              model: FINETUNED_MODEL,
+              messages: [
+                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                { role: "user", content: renameRetryContent },
+              ],
+              max_tokens: 2048,
+              temperature: 0.5,
+              frequency_penalty: 1.0,
+              presence_penalty: 0.6,
+            });
+            const retryRaw = retry.choices?.[0]?.message?.content;
+            if (typeof retryRaw === "string" && retryRaw.trim()) {
+              episodeText = retryRaw.trim();
+            }
+          } catch (e) {
+            console.error(`Victor rename retry failed for episode ${ep}:`, e);
+          }
+          // Last resort: if still present, do a conservative replace of whole-word Victor.
+          if (includesWord(episodeText, "Victor")) {
+            const replacement2 = replacement || "Damien";
+            episodeText = episodeText.replace(/\bVictor\b/g, replacement2);
+          }
+        }
+
         // Tag big events in this episode for future anti-repetition guidance.
         const eventTags = tagEpisodeEvents(episodeText);
 
@@ -1224,6 +1277,11 @@ app.post("/generate", async (req, res) => {
           } catch (editErr) {
             console.error(`Ending edit failed for final episode ${ep}:`, editErr);
           }
+        }
+
+        // If the ending-edit step reintroduced the forbidden name, strip it (rare but possible).
+        if (!victorAllowed && includesWord(episodeText, "Victor")) {
+          episodeText = episodeText.replace(/\bVictor\b/g, pickReplacementNameForVictor());
         }
 
         // Summarize this episode for future context (best-effort).
