@@ -47,6 +47,89 @@ const openai = new OpenAI({
 });
 
 // ---------------------------------------------------------------------------
+// Genre logline normalization ("custom summary" hardening)
+// ---------------------------------------------------------------------------
+
+const GENRE_LOGLINE_NORMALIZER_SYSTEM_PROMPT = `You are a development exec for vertical, romance-forward serialized dramas.
+
+You will receive:
+- genre
+- three main character names (heroine, male1=cold lead, male2=warm lead)
+- a user-provided premise
+
+Goal: rewrite the premise into a tight vertical-series "genre bible" that makes long multi-episode generation stable:
+- Keep the SAME three main characters only as protagonists (heroine + two male leads). Never replace them.
+- Lock the story to ONE primary setting hub so the series cannot drift into unrelated locations unless the premise explicitly demands it.
+- Make stakes and the central obstacle/threat explicit.
+- Provide 2–4 simple RULES/CONSTRAINTS that remain true across episodes (these prevent narrative drift).
+- Keep romance/power dynamics central for vertical pacing.
+
+Genre guidance:
+- Horror: define a clear THREAT, rules of the threat, and escalation stakes; prioritize dread/atmosphere over action-gore.
+- Crime: define the crime/secret, the pressure source, and rules about evidence/blackmail/legal risk.
+- Fantasy/Sci-Fi/Superhero: define the power system in 1 sentence + rules/limits; avoid inventing new magic/tech every episode.
+- Drama/Romance: define the social stakes (family/company/reputation) + rules (e.g. contract marriage, hidden identity).
+- Monster/Werewolf: define the creature/pack hierarchy + rules and consequences.
+
+Output ONLY valid JSON:
+{
+  "logline": "1–2 sentences",
+  "setting_hub": "short phrase",
+  "stakes": "1 sentence",
+  "central_obstacle": "1 sentence",
+  "threat": "optional; 1 sentence (use for Horror/Monster/Werewolf if relevant)",
+  "rules": ["rule 1", "rule 2", "rule 3"]
+}`;
+
+async function normalizeGenreLogline({ rawLogline, genre, names }) {
+  const clean = safeStr(rawLogline).slice(0, 1500);
+  if (!clean) return null;
+  const payload = {
+    genre: safeStr(genre) || "Romance",
+    heroine: names?.heroine || null,
+    male1: names?.coldCeo || null,
+    male2: names?.warmFriend || null,
+    premise: clean,
+  };
+  const completion = await openai.chat.completions.create({
+    model: PLANNER_MODEL,
+    messages: [
+      { role: "system", content: GENRE_LOGLINE_NORMALIZER_SYSTEM_PROMPT },
+      { role: "user", content: JSON.stringify(payload) },
+    ],
+    max_tokens: 450,
+    temperature: 0.25,
+  });
+  const rawContent = completion.choices?.[0]?.message?.content;
+  const content = typeof rawContent === "string" ? rawContent.trim() : "";
+  const objMatch = content.match(/\{[\s\S]*\}/);
+  if (!objMatch) return null;
+  try {
+    const parsed = JSON.parse(objMatch[0]);
+    if (!parsed || typeof parsed.logline !== "string" || !parsed.logline.trim()) return null;
+    const rules = Array.isArray(parsed.rules)
+      ? parsed.rules.map((r) => safeStr(r)).filter(Boolean).slice(0, 4)
+      : [];
+    return {
+      logline: parsed.logline.trim().slice(0, 1500),
+      setting_hub:
+        typeof parsed.setting_hub === "string"
+          ? parsed.setting_hub.trim().slice(0, 140)
+          : "",
+      stakes: typeof parsed.stakes === "string" ? parsed.stakes.trim().slice(0, 350) : "",
+      central_obstacle:
+        typeof parsed.central_obstacle === "string"
+          ? parsed.central_obstacle.trim().slice(0, 350)
+          : "",
+      threat: typeof parsed.threat === "string" ? parsed.threat.trim().slice(0, 350) : "",
+      rules,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Name engine: mix-and-match first/last + family names (see nameEngine.js)
 // ---------------------------------------------------------------------------
 
@@ -608,6 +691,7 @@ This is always ONE SINGLE SERIES told over many episodes. All  episodes in the r
 - The same heroine (female protagonist), the same two main male leads, the same supporting cast names.
 - A continuous plot line with clear beginning, middle, and end across the whole season.
 - Stable relationships and history between characters that evolve, but are never reset or forgotten.
+- The protagonists NEVER get replaced: do NOT switch to a new set of main characters mid-season. You may introduce supporting characters, but every episode must include the heroine and at least one of the two male leads, and the main plot must remain about this trio.
 
 If the logline explicitly gives character names, you may align the provided HEROINE/MALE1/MALE2 tags with those names, but once the names are fixed you MUST keep them consistent in every episode.
 
@@ -637,6 +721,8 @@ ANTI-REPETITION AND FORMAT (critical — vertical scripts are sparse):
 - No lists of similar words or emotional synonyms. If you need intensity, use a single clear word and then action or dialogue.
 - Each beat should be action or dialogue, not a run of descriptive adjectives.
 - When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Victor", "Lance", or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
+ - Do NOT use the name "Victor" for ANY character unless it is explicitly provided in the [HEROINE=...] / [MALE1=...] / [MALE2=...] tags or in the user-provided logline. If you need a new name, pick something else.
+ - When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Lance" or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
@@ -716,6 +802,7 @@ function buildEpisodePromptText({
   episodeNumber,
   logline,
   names,
+  genreBible,
   blueprint,
   episodeSummaries,
   recaps,
@@ -747,6 +834,31 @@ function buildEpisodePromptText({
   }
   if (cleanLogline) {
     lines.push(`[LOGLINE] ${cleanLogline}`);
+  }
+
+  if (genreBible && typeof genreBible === "object") {
+    const threat = safeStr(genreBible.threat);
+    const stakes = safeStr(genreBible.stakes);
+    const hub = safeStr(genreBible.setting_hub);
+    const obstacle = safeStr(genreBible.central_obstacle);
+    const rules = Array.isArray(genreBible.rules)
+      ? genreBible.rules.map((r) => safeStr(r)).filter(Boolean).slice(0, 4)
+      : [];
+    if (threat || stakes || hub || rules.length) {
+      lines.push("");
+      lines.push("GENRE BIBLE (must remain true across all episodes):");
+      if (hub) lines.push(`- Setting hub (do not drift): ${hub}`);
+      if (obstacle) lines.push(`- Central obstacle: ${obstacle}`);
+      if (threat) lines.push(`- Core threat: ${threat}`);
+      if (stakes) lines.push(`- Stakes: ${stakes}`);
+      if (rules.length) {
+        lines.push(`- Rules: ${rules.join(" | ")}`);
+      }
+      lines.push(
+        "- Continuity lock: do NOT replace the protagonists. Do NOT introduce a new storyline that doesn't include the heroine and BOTH male leads."
+      );
+      lines.push("");
+    }
   }
 
   const blueprintContext = formatBlueprintContext(blueprint, ep);
@@ -921,10 +1033,13 @@ function sendStreamLine(res, obj) {
 app.post("/generate", async (req, res) => {
   const body = req.body || {};
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
-  const logline = safeStr(body.logline).slice(0, 1500);
+  let logline = safeStr(body.logline).slice(0, 1500);
   const genre = String(body.genre || "Romance").trim() || "Romance";
   const seriesNames = getSeriesNames(genre);
   const tropes = body.tropes && typeof body.tropes === "object" ? body.tropes : null;
+  const shouldNormalizeLogline = body.normalizeLogline !== false;
+  const wordCount = logline ? logline.trim().split(/\s+/).filter(Boolean).length : 0;
+  const minWords = 25;
 
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
@@ -932,6 +1047,34 @@ app.post("/generate", async (req, res) => {
   res.flushHeaders?.();
 
   try {
+    if (!logline || wordCount < minWords) {
+      res.status(400);
+      sendStreamLine(res, {
+        type: "error",
+        message: `Summary must be at least ${minWords} words (currently ${wordCount}).`,
+      });
+      sendStreamLine(res, { type: "done" });
+      return res.end();
+    }
+
+    let genreBible = null;
+    if (shouldNormalizeLogline && logline) {
+      try {
+        genreBible = await normalizeGenreLogline({
+          rawLogline: logline,
+          genre,
+          names: seriesNames,
+        });
+        if (genreBible && genreBible.logline) {
+          logline = genreBible.logline;
+          sendStreamLine(res, { type: "logline_normalized", ok: true });
+        }
+      } catch (e) {
+        console.error("Logline normalization failed:", e);
+        sendStreamLine(res, { type: "logline_normalized", ok: false });
+      }
+    }
+
     let blueprint = null;
     let episodeSummaries = null;
     const episodeRecaps = [];
@@ -995,6 +1138,7 @@ app.post("/generate", async (req, res) => {
           episodeNumber: ep,
           logline,
           names: seriesNames,
+          genreBible,
           blueprint,
           episodeSummaries,
           recaps: episodeRecaps,

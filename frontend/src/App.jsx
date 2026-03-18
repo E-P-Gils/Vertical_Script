@@ -29,6 +29,8 @@ function App() {
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
   const wordCount = logline.trim() ? logline.trim().split(/\s+/).length : 0;
+  const MIN_WORDS = 25;
+  const loglineUnderMin = wordCount > 0 && wordCount < MIN_WORDS;
   const loglineOverLimit = wordCount > 250;
 
   const handleSuggestRandomSummary = async () => {
@@ -47,7 +49,7 @@ function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!genre || loglineOverLimit) return;
+    if (!genre || loglineOverLimit || loglineUnderMin) return;
     if (!logline.trim()) return;
     setError("");
     setScript("");
@@ -446,13 +448,14 @@ function App() {
                   <textarea
                     value={logline}
                     onChange={(e) => setLogline(e.target.value)}
-                    placeholder="A short premise or summary for your vertical (English or Chinese)… / 在此输入故事梗概（可用英文或中文）"
+                    placeholder="A short premise or summary for your vertical (English only)… / 在此输入故事梗概（仅限英文）"
                     rows={4}
-                    className={loglineOverLimit ? "invalid" : ""}
+                    className={loglineOverLimit || loglineUnderMin ? "invalid" : ""}
                   />
                   <small className="word-count">
-                    {wordCount} / 250 words / 单词
+                    {wordCount} words (min {MIN_WORDS}, max 250) / 单词（至少 {MIN_WORDS}，最多 250）
                     {loglineOverLimit && " — over limit / 超出上限"}
+                    {loglineUnderMin && " — too short / 太短"}
                   </small>
                   <div className="summary-suggestions">
                     <button
@@ -479,7 +482,13 @@ function App() {
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={loading || !genre || !logline.trim() || loglineOverLimit}
+                  disabled={
+                    loading ||
+                    !genre ||
+                    !logline.trim() ||
+                    loglineUnderMin ||
+                    loglineOverLimit
+                  }
                 >
                   {loading
                     ? progress.total > 0

@@ -257,8 +257,28 @@ const CORPORATION_NAMES = [
   "Atlas Crown Holdings", "Sovereign Throne Industries", "Dominion Crown Corporation", "Apex Throne Enterprises", "Titan Crown Global",
 ];
 
+// Names that should never be auto-selected.
+// (We can still allow them if a user explicitly provides character names elsewhere.)
+const BANNED_FIRST_NAMES = new Set(["Victor"]);
+
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function pickRandomNotBanned(arr, bannedSet) {
+  if (!Array.isArray(arr) || arr.length === 0) return "";
+  // Try a handful of times to avoid banned picks without costly filtering.
+  let val = pickRandom(arr);
+  for (let i = 0; i < 50 && bannedSet && bannedSet.has(val); i++) {
+    val = pickRandom(arr);
+  }
+  // If we somehow still landed on a banned value (tiny pool), fall back to first non-banned.
+  if (bannedSet && bannedSet.has(val)) {
+    for (const v of arr) {
+      if (!bannedSet.has(v)) return v;
+    }
+  }
+  return val;
 }
 
 /**
@@ -267,7 +287,7 @@ function pickRandom(arr) {
  */
 export function getRandomFirstName(gender) {
   const pool = gender === "female" ? FIRST_FEMALE : FIRST_MALE;
-  return pickRandom(pool);
+  return gender === "female" ? pickRandom(pool) : pickRandomNotBanned(pool, BANNED_FIRST_NAMES);
 }
 
 /**
@@ -325,8 +345,13 @@ export function getSeriesNames(genre) {
   }
   function nextUniqueFirstName(gender) {
     const pool = gender === "female" ? FIRST_FEMALE : FIRST_MALE;
-    let name = pickRandom(pool);
-    for (let i = 0; i < 20 && usedFirstNames.has(name); i++) name = pickRandom(pool);
+    let name =
+      gender === "female"
+        ? pickRandom(pool)
+        : pickRandomNotBanned(pool, BANNED_FIRST_NAMES);
+    for (let i = 0; i < 50 && (usedFirstNames.has(name) || (gender !== "female" && BANNED_FIRST_NAMES.has(name))); i++) {
+      name = gender === "female" ? pickRandom(pool) : pickRandomNotBanned(pool, BANNED_FIRST_NAMES);
+    }
     usedFirstNames.add(name);
     return name;
   }
