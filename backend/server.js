@@ -824,6 +824,7 @@ Rules:
 - Preserve line breaks and blank lines: the output should have the same paragraph structure as the input.
 - Keep scene headings in standard English abbreviations (INT., EXT., DAY, NIGHT, CONTINUED, CUT TO:, FADE IN/OUT, V.O., O.S., etc.).
 - Keep CHARACTER NAMES in ALL CAPS exactly as in the source (same spelling). Translate dialogue, action lines, and parentheticals into natural Simplified Chinese.
+- Preserve emotional tone and subtext of dialogue (make it sound natural spoken Chinese drama, not stiff or overly literal).
 - Do not add or remove scenes, lines, or episode markers.`;
 
 async function translateEpisodeScriptToChinese(episodeNumber, totalEpisodes, englishText) {
@@ -839,7 +840,7 @@ async function translateEpisodeScriptToChinese(episodeNumber, totalEpisodes, eng
       },
     ],
     max_tokens: 4096,
-    temperature: 0.25,
+    temperature: 0.35,
   });
   const out = completion.choices?.[0]?.message?.content;
   return typeof out === "string" ? out.trim() : "";
@@ -1515,10 +1516,15 @@ app.post("/generate", async (req, res) => {
           sendStreamLine(res, { type: "episode_zh", episode: epNum, text });
         } catch (trErr) {
           console.error(`Chinese translation failed for episode ${epNum}:`, trErr);
+          const msg = safeStr(trErr?.message) || "translation failed";
+          const status = trErr?.status;
+          const isQuota = status === 429 || /429|quota/i.test(msg);
+          sendStreamLine(res, { type: "translation_error", episode: epNum, message: msg });
+          if (isQuota) break;
           sendStreamLine(res, {
             type: "episode_zh",
             episode: epNum,
-            text: `[Episode ${epNum} — translation failed: ${safeStr(trErr.message) || "error"}]`,
+            text: `[Episode ${epNum} — translation failed: ${msg}]`,
           });
         }
       }
@@ -1532,6 +1538,96 @@ app.post("/generate", async (req, res) => {
   } finally {
     res.end();
   }
+});
+
+function parseEpisodesFromEnglishScript(scriptText) {
+  const raw = safeStr(scriptText);
+  if (!raw) return null;
+  const re = /^EPISODE\s+(\d+)\s*$/gm;
+  const matches = [];
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    const ep = parseInt(m[1], 10);
+    if (!Number.isFinite(ep)) continue;
+    matches.push({ episode: ep, index: m.index });
+  }
+  if (!matches.length) return null;
+
+  const totalEpisodes = Math.max(...matches.map((x) => x.episode));
+  const episodes = matches
+    .map((match, i) => {
+      const start = match.index;
+      const end = i + 1 < matches.length ? matches[i + 1].index : raw.length;
+      const chunk = raw.slice(start, end).trimEnd();
+      const lines = chunk.split(/\r?\n/);
+      const body = lines.slice(1).join("\n").trim();
+      return { episode: match.episode, englishText: body };
+    })
+    .sort((a, b) => a.episode - b.episode);
+
+  return { totalEpisodes, episodes };
+}
+
+app.post("/translate-to-chinese", async (req, res) => {
+  const body = req.body || {};
+  const englishText = safeStr(body.text || body.script);
+  const parsed = parseEpisodesFromEnglishScript(englishText);
+
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  if (!parsed) {
+    sendStreamLine(res, {
+      type: "translation_error",
+      message: "Could not parse episodes. Make sure the English script includes 'EPISODE N' headings.",
+    });
+    sendStreamLine(res, { type: "done" });
+    return res.end();
+  }
+
+  const { totalEpisodes, episodes } = parsed;
+  try {
+    for (const ep of episodes) {
+      sendStreamLine(res, {
+        type: "translation_progress",
+        episode: ep.episode,
+        total: totalEpisodes,
+      });
+      try {
+        const zh = await translateEpisodeScriptToChinese(
+          ep.episode,
+          totalEpisodes,
+          ep.englishText
+        );
+        sendStreamLine(res, {
+          type: "episode_zh",
+          episode: ep.episode,
+          text: zh || `[Episode ${ep.episode} — translation produced no text.]`,
+        });
+      } catch (trErr) {
+        const msg = safeStr(trErr?.message) || "translation failed";
+        const status = trErr?.status;
+        const isQuota = status === 429 || /429|quota/i.test(msg);
+        sendStreamLine(res, {
+          type: "translation_error",
+          episode: ep.episode,
+          message: msg,
+        });
+        if (isQuota) break;
+      }
+    }
+  } catch (outerErr) {
+    console.error("Translation endpoint failed:", outerErr);
+    sendStreamLine(res, {
+      type: "translation_error",
+      message: safeStr(outerErr?.message) || "Translation failed",
+    });
+  }
+
+  sendStreamLine(res, { type: "done", model: TRANSLATION_MODEL });
+  res.end();
 });
 
 app.get("/health", (_, res) => {

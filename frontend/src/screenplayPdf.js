@@ -2,7 +2,7 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 
 /** Noto Sans SC (Simplified) — required for embedding CJK in pdf-lib. First download can be large / slow. */
 const NOTO_SC_OTF =
-  "https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf";
+  "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf";
 
 let notoFontBytesPromise = null;
 

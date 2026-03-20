@@ -2,7 +2,9 @@ import { useState } from "react";
 import { buildScreenplayPdfBytes } from "./screenplayPdf.js";
 import "./App.css";
 
-const API_BASE = "https://vertical-script.onrender.com";
+// If you run the backend locally, keep VITE_API_BASE unset and calls go to Vite's `/api` proxy.
+// If you want the hosted Render backend, set VITE_API_BASE to `https://vertical-script.onrender.com`.
+const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
 function App() {
   const [modalOpen, setModalOpen] = useState(false);
@@ -71,7 +73,7 @@ function App() {
           episodeCount: 60,
           title: "Generated Script",
           logline: logline.trim().slice(0, 1500),
-          translateToChinese: true,
+          translateToChinese: false,
         }),
       });
       if (!res.ok) {
@@ -174,11 +176,94 @@ function App() {
     }
   };
 
-  const handleDownloadPdfZh = async () => {
-    if (!scriptZh) return;
+  const handleTranslateToChinese = async () => {
+    if (!script) return false;
     setError("");
-    setDownloading("zh");
+    setScriptZh("");
+    setProgress({ episode: 0, total: 0, phase: "translating" });
+    setModalOpen(true);
+    setLoading(true);
+
     try {
+      const res = await fetch(`${API_BASE}/translate-to-chinese`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: script }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Translation failed");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let fullScriptZhLocal = "";
+
+      const applyNdjsonLine = (trimmed) => {
+        const data = JSON.parse(trimmed);
+        if (data.type === "translation_progress") {
+          setProgress({
+            episode: data.episode || 0,
+            total: data.total || 0,
+            phase: "translating",
+          });
+        } else if (data.type === "episode_zh") {
+          const block =
+            data.episode != null && data.text != null
+              ? `EPISODE ${data.episode}\n\n${data.text}`
+              : "";
+          if (block) fullScriptZhLocal += (fullScriptZhLocal ? "\n\n" : "") + block;
+          setScriptZh(fullScriptZhLocal);
+        } else if (data.type === "translation_error") {
+          setError(data.message || "Chinese translation failed (quota/API error)");
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const data = JSON.parse(trimmed);
+            if (data.type === "done") continue;
+            applyNdjsonLine(trimmed);
+          } catch (_) {}
+        }
+      }
+
+      if (buffer.trim()) {
+        try {
+          applyNdjsonLine(buffer.trim());
+        } catch (_) {}
+      }
+
+      return !!fullScriptZhLocal.trim();
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "Something went wrong during translation");
+      return false;
+    } finally {
+      setLoading(false);
+      setModalOpen(false);
+      setProgress({ episode: 0, total: 0, phase: "generating" });
+    }
+  };
+
+  const handleDownloadPdfZh = async () => {
+    setError("");
+    try {
+      if (!scriptZh) {
+        const ok = await handleTranslateToChinese();
+        if (!ok) return;
+      }
+
+      setDownloading("zh");
       const pdfBytes = await buildScreenplayPdfBytes(scriptZh, "zh");
       triggerPdfDownload(pdfBytes, "vertical_script_zh.pdf");
     } catch (err) {
@@ -227,7 +312,7 @@ function App() {
               type="button"
               className="btn btn-secondary"
               onClick={handleDownloadPdfZh}
-              disabled={!scriptZh || downloading !== null}
+              disabled={!script || downloading !== null}
             >
               {downloading === "zh"
                 ? "Preparing Chinese PDF (font may download once)…"

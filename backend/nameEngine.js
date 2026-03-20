@@ -336,6 +336,7 @@ export function getRandomCorporationName() {
 export function getSeriesNames(genre) {
   const usedLastNames = new Set();
   const usedFirstNames = new Set();
+  const upperGenre = String(genre || "").toUpperCase();
 
   function nextUniqueLastName() {
     let name = pickRandom(LAST_NAMES);
@@ -363,16 +364,20 @@ export function getSeriesNames(genre) {
   const last2 = nextUniqueLastName();
   const last3 = nextUniqueLastName();
 
-  const isWerewolf = String(genre || "").toUpperCase() === "WEREWOLF";
+  const isWerewolf = upperGenre === "WEREWOLF";
   const familyName = isWerewolf ? getRandomPackName() : getRandomFamilyName();
-  const corporationName = getRandomCorporationName();
+
+  // Corporation naming nudges models toward modern finance/boardroom content.
+  // For Fantasy (and other non-corporate genres), omit it to preserve genre fidelity.
+  const allowCorporationNames = !isWerewolf && ["DRAMA", "ROMANCE", "CRIME", "ACTION"].includes(upperGenre);
+  const corporationName = allowCorporationNames ? getRandomCorporationName() : null;
 
   return {
     heroine: `${heroineFirst} ${last1}`,
     coldCeo: `${coldFirst} ${last2}`,
     warmFriend: `${warmFirst} ${last3}`,
     familyName,
-    corporationName,
+    ...(corporationName ? { corporationName } : {}),
     ...(isWerewolf && { packName: familyName }),
   };
 }
