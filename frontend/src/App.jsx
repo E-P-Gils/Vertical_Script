@@ -8,6 +8,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
 function App() {
   const [modalOpen, setModalOpen] = useState(false);
+  const [translating, setTranslating] = useState(false);
   const GENRES = [
     "Romance",
     "Drama",
@@ -181,66 +182,81 @@ function App() {
     setError("");
     setScriptZh("");
     setProgress({ episode: 0, total: 0, phase: "translating" });
-    setModalOpen(true);
-    setLoading(true);
+    setTranslating(true);
 
     try {
-      const res = await fetch(`${API_BASE}/translate-to-chinese`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: script }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Translation failed");
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
       let fullScriptZhLocal = "";
 
-      const applyNdjsonLine = (trimmed) => {
-        const data = JSON.parse(trimmed);
-        if (data.type === "translation_progress") {
-          setProgress({
-            episode: data.episode || 0,
-            total: data.total || 0,
-            phase: "translating",
-          });
-        } else if (data.type === "episode_zh") {
-          const block =
-            data.episode != null && data.text != null
-              ? `EPISODE ${data.episode}\n\n${data.text}`
-              : "";
-          if (block) fullScriptZhLocal += (fullScriptZhLocal ? "\n\n" : "") + block;
-          setScriptZh(fullScriptZhLocal);
-        } else if (data.type === "translation_error") {
-          setError(data.message || "Chinese translation failed (quota/API error)");
-        }
-      };
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            const data = JSON.parse(trimmed);
-            if (data.type === "done") continue;
-            applyNdjsonLine(trimmed);
-          } catch (_) {}
-        }
+      const lines = script.split(/\r?\n/);
+      const starts = [];
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].trim().match(/^EPISODE\s+(\d+)\s*$/i);
+        if (m) starts.push({ episode: parseInt(m[1], 10), idx: i });
       }
 
-      if (buffer.trim()) {
-        try {
-          applyNdjsonLine(buffer.trim());
-        } catch (_) {}
+      if (!starts.length) {
+        setError("Could not parse EPISODE headings from English script.");
+        return false;
+      }
+
+      const totalEpisodes = starts.length;
+      setProgress({ episode: 0, total: totalEpisodes, phase: "translating" });
+
+      for (let si = 0; si < starts.length; si++) {
+        const cur = starts[si];
+        const next = si + 1 < starts.length ? starts[si + 1].idx : lines.length;
+        const chunkText = lines.slice(cur.idx, next).join("\n");
+
+        // Update progress as soon as we start this episode.
+        setProgress({
+          episode: si + 1,
+          total: totalEpisodes,
+          phase: "translating",
+        });
+
+        const res = await fetch(`${API_BASE}/translate-to-chinese`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: chunkText }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `Translation failed (HTTP ${res.status})`);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let episodeZh = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const ndjsonLines = buffer.split("\n");
+          buffer = ndjsonLines.pop() || "";
+
+          for (const line of ndjsonLines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const data = JSON.parse(trimmed);
+              if (data.type === "episode_zh" && data.episode === cur.episode) {
+                episodeZh = data.text || "";
+              } else if (data.type === "translation_error") {
+                throw new Error(data.message || "Chinese translation failed");
+              }
+            } catch (_) {}
+          }
+        }
+
+        if (!episodeZh.trim()) {
+          throw new Error(`Episode ${cur.episode} translation produced no text.`);
+        }
+
+        const block = `EPISODE ${cur.episode}\n\n${episodeZh}`;
+        fullScriptZhLocal += (fullScriptZhLocal ? "\n\n" : "") + block;
+        setScriptZh(fullScriptZhLocal);
       }
 
       return !!fullScriptZhLocal.trim();
@@ -249,8 +265,7 @@ function App() {
       setError(err.message || "Something went wrong during translation");
       return false;
     } finally {
-      setLoading(false);
-      setModalOpen(false);
+      setTranslating(false);
       setProgress({ episode: 0, total: 0, phase: "generating" });
     }
   };
@@ -312,13 +327,29 @@ function App() {
               type="button"
               className="btn btn-secondary"
               onClick={handleDownloadPdfZh}
-              disabled={!script || downloading !== null}
+              disabled={!script || translating || downloading !== null}
             >
               {downloading === "zh"
                 ? "Preparing Chinese PDF (font may download once)…"
                 : "Download Chinese PDF / 下载中文 PDF"}
             </button>
           </div>
+
+          {translating && progress.total > 0 && (
+            <div className="episode-progress">
+              <div className="episode-progress-bar">
+                <div
+                  className="episode-progress-fill"
+                  style={{
+                    width: `${(progress.episode / progress.total) * 100}%`,
+                  }}
+                />
+              </div>
+              <p className="progress-text">
+                Translating episode {progress.episode} of {progress.total} / 翻译第 {progress.episode} 集
+              </p>
+            </div>
+          )}
           <pre className="script-text">{script}</pre>
           {scriptZh ? (
             <>

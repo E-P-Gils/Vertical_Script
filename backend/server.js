@@ -23,7 +23,9 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
-app.use(express.json());
+// Translation endpoint may receive the full English script in one request.
+// Increase body limit to avoid HTTP 413 on larger seasons.
+app.use(express.json({ limit: "20mb" }));
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FINETUNED_MODEL =
@@ -740,6 +742,42 @@ function normalizeEpisodeScriptFormatting(text) {
   return out.join("\n");
 }
 
+/**
+ * Detects "synonym vomit" / word-list drafts: long runs of punctuation-free
+ * single words or huge adjective chains with no normal screenplay structure.
+ */
+function looksLikeSynonymVomit(text) {
+  if (!text || typeof text !== "string") return false;
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return false;
+
+  // 1) Run of punctuation-free single-word lines.
+  let run = 0;
+  let maxRun = 0;
+  for (const line of lines) {
+    const hasPunct = /[.!?;,:]/.test(line);
+    const isSingleWord = /^[A-Za-z][A-Za-z'-]{2,}$/.test(line);
+    if (!hasPunct && isSingleWord) {
+      run += 1;
+      if (run > maxRun) maxRun = run;
+    } else {
+      run = 0;
+    }
+  }
+  if (maxRun >= 10) return true;
+
+  // 2) Extremely long punctuation-free word chains.
+  for (const line of lines) {
+    if (/[.!?;,:]/.test(line)) continue;
+    const words = line.split(/\s+/).filter(Boolean);
+    if (words.length >= 14 && words.every((w) => /^[A-Za-z][A-Za-z'-]{1,}$/.test(w))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function blocksToScriptText(blocks) {
   if (!Array.isArray(blocks) || blocks.length === 0) return "";
   const lines = [];
@@ -885,6 +923,7 @@ ANTI-REPETITION AND FORMAT (critical — vertical scripts are sparse):
 - Action/stage direction: maximum 1–2 sentences per block. Never write long descriptive paragraphs; break into short beats (e.g. "She turns. He steps closer.").
 - No adjective stacking: do NOT chain synonyms (e.g. incredible, extraordinary, miraculous, divine, magnificent). Use one strong word, then move on. Never repeat the same type of descriptor in a row.
 - No lists of similar words or emotional synonyms. If you need intensity, use a single clear word and then action or dialogue.
+- Do NOT output “synonym vomit” or word-list runs (e.g. many punctuation-free single-word adjectives across many lines). If you reach that point, rewrite the beat as normal screenplay action/dialogue.
 - Each beat should be action or dialogue, not a run of descriptive adjectives.
 - When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Victor", "Lance", or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
  - Do NOT use the name "Victor" for ANY character unless it is explicitly provided in the [HEROINE=...] / [MALE1=...] / [MALE2=...] tags or in the user-provided logline. If you need a new name, pick something else.
@@ -1358,6 +1397,32 @@ app.post("/generate", async (req, res) => {
             : `[Episode ${ep} — no content]`;
 
         episodeText = normalizeEpisodeScriptFormatting(episodeText);
+
+        // Quality gate: prevent "synonym vomit" / word-list runs.
+        if (looksLikeSynonymVomit(episodeText)) {
+          try {
+            const qualityRetryContent =
+              userContent +
+              "\n\nREWRITE REQUIREMENT (quality): The previous draft produced a word-list/synonym-vomit run (punctuation-free single-word lines or massive adjective chains). Remove that section and rewrite the beat as normal screenplay action/dialogue with proper sentences and spacing. Do NOT output long sequences of standalone words.";
+            const retry = await openai.chat.completions.create({
+              model: FINETUNED_MODEL,
+              messages: [
+                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                { role: "user", content: qualityRetryContent },
+              ],
+              max_tokens: 2048,
+              temperature: 0.5,
+              frequency_penalty: 1.0,
+              presence_penalty: 0.6,
+            });
+            const retryRaw = retry.choices?.[0]?.message?.content;
+            if (typeof retryRaw === "string" && retryRaw.trim()) {
+              episodeText = normalizeEpisodeScriptFormatting(retryRaw.trim());
+            }
+          } catch (qErr) {
+            console.error(`Quality retry failed for episode ${ep}:`, qErr);
+          }
+        }
 
         // Phase 2: if this episode is too similar to the previous one, regenerate once with a stronger instruction.
         if (ep > 1 && episodeScriptsMemo.length > 0) {
