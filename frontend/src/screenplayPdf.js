@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 
 /** Noto Sans SC (Simplified) — required for embedding CJK in pdf-lib. First download can be large / slow. */
 const NOTO_SC_OTF =
@@ -85,6 +86,8 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
   }
 
   const pdfDoc = await PDFDocument.create();
+  // Required for embedding custom fonts (e.g. Noto Sans SC OTF) in pdf-lib.
+  pdfDoc.registerFontkit(fontkit);
   const fontSize = 12;
   const lineHeight = 14;
 

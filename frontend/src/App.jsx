@@ -30,6 +30,7 @@ function App() {
     total: 0,
     phase: "generating",
   });
+  const [episodeCountRequested, setEpisodeCountRequested] = useState(60);
   const [script, setScript] = useState("");
   const [scriptZh, setScriptZh] = useState("");
   const [error, setError] = useState("");
@@ -62,7 +63,9 @@ function App() {
     setError("");
     setScript("");
     setScriptZh("");
-    setProgress({ episode: 0, total: 60, phase: "generating" });
+    const episodeCount = 60;
+    setEpisodeCountRequested(episodeCount);
+    setProgress({ episode: 0, total: episodeCount, phase: "generating" });
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/generate`, {
@@ -71,7 +74,7 @@ function App() {
         body: JSON.stringify({
           genre,
           language: "EN",
-          episodeCount: 60,
+          episodeCount,
           title: "Generated Script",
           logline: logline.trim().slice(0, 1500),
           translateToChinese: false,
@@ -199,12 +202,26 @@ function App() {
         return false;
       }
 
-      const totalEpisodes = starts.length;
+      // Some drafts sometimes include stray "EPISODE 61+" headings.
+      // We only translate up to what the user requested.
+      const filtered = starts
+        .filter((s) => s.episode <= episodeCountRequested)
+        .sort((a, b) => a.idx - b.idx);
+      const seen = new Set();
+      const unique = [];
+      for (const s of filtered) {
+        if (seen.has(s.episode)) continue;
+        seen.add(s.episode);
+        unique.push(s);
+      }
+
+      const totalEpisodes = unique.length;
       setProgress({ episode: 0, total: totalEpisodes, phase: "translating" });
 
-      for (let si = 0; si < starts.length; si++) {
-        const cur = starts[si];
-        const next = si + 1 < starts.length ? starts[si + 1].idx : lines.length;
+      for (let si = 0; si < unique.length; si++) {
+        const cur = unique[si];
+        const next =
+          si + 1 < unique.length ? unique[si + 1].idx : lines.length;
         const chunkText = lines.slice(cur.idx, next).join("\n");
 
         // Update progress as soon as we start this episode.
@@ -308,10 +325,6 @@ function App() {
       {script && (
         <section className="script-output">
           <h2>Generated script / 已生成剧本</h2>
-          <p className="script-output-hint">
-            English is written by the story model; Simplified Chinese is a separate translation pass (same API key, not the fine-tuned writer).
-            英文由剧本模型生成；简体中文为后续翻译（同一 API，非微调写作模型）。
-          </p>
           <div className="script-actions">
             <button
               type="button"
