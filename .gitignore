@@ -4,6 +4,9 @@
 .env.*.local
 *.env
 
+# OpenAI/translation key files you generate locally
+verticalscript-*.json
+
 # Training artifacts (large, derived)
 train.jsonl
 train_openai.jsonl
