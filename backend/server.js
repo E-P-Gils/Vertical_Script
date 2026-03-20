@@ -33,6 +33,9 @@ const PLANNER_MODEL =
   process.env.OPENAI_PLANNER_MODEL || "gpt-4.1-mini";
 const RECAP_MODEL =
   process.env.OPENAI_RECAP_MODEL || PLANNER_MODEL;
+/** Model for EN→ZH screenplay translation (defaults to planner; not the fine-tuned writer). */
+const TRANSLATION_MODEL =
+  process.env.OPENAI_TRANSLATION_MODEL || PLANNER_MODEL;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY in .env");
@@ -606,6 +609,137 @@ function safeStr(val) {
   return String(val).trim();
 }
 
+/** Words that are all-caps in action lines but must not be treated as character names when splitting merged cues. */
+const MERGE_SPLIT_NAME_BLOCKLIST = new Set(
+  [
+    "AND",
+    "THE",
+    "BUT",
+    "FOR",
+    "NOT",
+    "NOW",
+    "ALL",
+    "CAN",
+    "HER",
+    "HIS",
+    "ITS",
+    "OUR",
+    "OUT",
+    "OFF",
+    "SHE",
+    "THEY",
+    "THEM",
+    "THEN",
+    "THAN",
+    "THIS",
+    "THAT",
+    "THERE",
+    "THESE",
+    "THOSE",
+    "WHAT",
+    "WHEN",
+    "WITH",
+    "FROM",
+    "INTO",
+    "OVER",
+    "UNDER",
+    "ABOVE",
+    "AFTER",
+    "BEFORE",
+    "WHILE",
+    "DURING",
+    "SUDDENLY",
+    "SLOWLY",
+    "FINALLY",
+    "MEANWHILE",
+    "WITHOUT",
+    "INSIDE",
+    "OUTSIDE",
+    "BEHIND",
+    "BESIDE",
+    "ACROSS",
+    "AROUND",
+    "AGAINST",
+    "THROUGH",
+    "TOWARD",
+    "EVERYONE",
+    "SOMEONE",
+    "SOMETHING",
+    "NOTHING",
+    "EVERYWHERE",
+    "SILENCE",
+    "FOOTSTEPS",
+    "CHAOS",
+    "BACK",
+    "JUST",
+    "ONLY",
+    "EVEN",
+    "STILL",
+    "ALSO",
+    "VERY",
+    "MORE",
+    "MOST",
+    "SOME",
+    "MANY",
+    "MUCH",
+    "SUCH",
+    "INT",
+    "EXT",
+  ].map((w) => w.toUpperCase())
+);
+
+/**
+ * Repairs common model mistakes: character cue glued to parenthetical or dialogue (e.g. LUKESorry, LUKE(mocking)Well).
+ * Preserves intentional lines (scene headings, most action).
+ */
+function normalizeEpisodeScriptFormatting(text) {
+  if (!text || typeof text !== "string") return text;
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  for (const raw of lines) {
+    const m = raw.match(/^(\s*)(.*)$/);
+    const indent = m ? m[1] : "";
+    let rest = m ? m[2] : raw;
+    let guard = 0;
+    while (rest && guard++ < 10) {
+      const t = rest.trimStart();
+      const leadWs = rest.slice(0, rest.length - t.length);
+      if (
+        /^(INT\.|EXT\.|INT\/|EXT\/|I\/E\.|EST\.|FADE\s|CUT\s|DISSOLVE|END\s+OF\s+EPISODE|EPISODE\s+\d+)/i.test(
+          t
+        )
+      ) {
+        break;
+      }
+      // NAME(parenthetical)Dialogue — missing line breaks
+      const parenMerge = t.match(/^([A-Z][A-Z0-9'\-]{1,20})(\([^)]+\))\s*(.+)$/);
+      if (parenMerge && parenMerge[3].trim()) {
+        const name = parenMerge[1].toUpperCase();
+        if (!MERGE_SPLIT_NAME_BLOCKLIST.has(name)) {
+          out.push(indent + leadWs + name);
+          out.push(indent + leadWs + parenMerge[2]);
+          rest = indent + leadWs + parenMerge[3].trimStart();
+          continue;
+        }
+      }
+      // NAME + DialogueWord (no space): LUKE + Sorry…
+      const capMerge = t.match(/^([A-Z][A-Z0-9'\-]{1,20})([A-Z][a-z]{2,}[^\n]*)$/);
+      if (capMerge) {
+        const name = capMerge[1].toUpperCase();
+        const dialogue = capMerge[2];
+        if (!MERGE_SPLIT_NAME_BLOCKLIST.has(name) && name.length >= 2 && name.length <= 22) {
+          out.push(indent + leadWs + name);
+          rest = indent + leadWs + dialogue;
+          continue;
+        }
+      }
+      break;
+    }
+    out.push(rest || raw);
+  }
+  return out.join("\n");
+}
+
 function blocksToScriptText(blocks) {
   if (!Array.isArray(blocks) || blocks.length === 0) return "";
   const lines = [];
@@ -645,6 +779,7 @@ Rules:
 
 Output:
 - Return the FULL edited episode script in the same format (scene headings, dialogue, and action lines), but with the ending adjusted to satisfy the rules above.
+- Preserve mandatory screenplay line breaks: scene headings and character cues on their own lines; never concatenate a character name with dialogue or parentheticals on one line.
 - Do NOT add commentary or explanation—only the edited script.`;
 
 // Simple repetition score between two episode scripts.
@@ -678,6 +813,36 @@ function parseBlocksFromContent(content) {
   } catch (_) {
     return null;
   }
+}
+
+const SCRIPT_TRANSLATION_SYSTEM_PROMPT = `You are a professional screenplay translator for short-form vertical dramas.
+
+You will receive ONE episode of an English script. Translate it into Simplified Chinese (简体中文).
+
+Rules:
+- Output ONLY the translated script for this episode. No preamble, notes, or markdown.
+- Preserve line breaks and blank lines: the output should have the same paragraph structure as the input.
+- Keep scene headings in standard English abbreviations (INT., EXT., DAY, NIGHT, CONTINUED, CUT TO:, FADE IN/OUT, V.O., O.S., etc.).
+- Keep CHARACTER NAMES in ALL CAPS exactly as in the source (same spelling). Translate dialogue, action lines, and parentheticals into natural Simplified Chinese.
+- Do not add or remove scenes, lines, or episode markers.`;
+
+async function translateEpisodeScriptToChinese(episodeNumber, totalEpisodes, englishText) {
+  const src = safeStr(englishText);
+  if (!src) return "";
+  const completion = await openai.chat.completions.create({
+    model: TRANSLATION_MODEL,
+    messages: [
+      { role: "system", content: SCRIPT_TRANSLATION_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `This is episode ${episodeNumber} of ${totalEpisodes}.\n\n${src}`,
+      },
+    ],
+    max_tokens: 4096,
+    temperature: 0.25,
+  });
+  const out = completion.choices?.[0]?.message?.content;
+  return typeof out === "string" ? out.trim() : "";
 }
 
 // Plain-text episode generation (no JSON parsing) ---------------------------
@@ -723,6 +888,13 @@ ANTI-REPETITION AND FORMAT (critical — vertical scripts are sparse):
 - When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Victor", "Lance", or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
  - Do NOT use the name "Victor" for ANY character unless it is explicitly provided in the [HEROINE=...] / [MALE1=...] / [MALE2=...] tags or in the user-provided logline. If you need a new name, pick something else.
  - When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Lance" or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
+
+SCREENPLAY LINE BREAKS (mandatory — parsers and PDF layout depend on this):
+- Put each scene heading (e.g. INT. ROOM - NIGHT) on its own line, followed by a blank line, then the first action or dialogue.
+- Character cue: the speaking character’s name in ALL CAPS alone on one line. The next line is their spoken dialogue (or a parenthetical on its own line between name and dialogue).
+- NEVER glue a character name to dialogue or to a parenthetical on the same line. Forbidden examples: LUKESorry… / LUKE(mocking)You… / COLEUrgently… — always split onto separate lines.
+- After each action paragraph or each line of dialogue, use a newline before the next element. Do not run multiple speakers or multiple action beats into one paragraph without line breaks.
+- Transitions (FADE OUT., CUT TO:, etc.) go on their own line with a blank line before and after when they separate major beats.
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
@@ -1023,6 +1195,9 @@ function buildEpisodePromptText({
       );
     }
   }
+  lines.push(
+    "Output formatting: blank line after each scene heading; each character cue (ALL CAPS name) on its own line with dialogue on the following line — never output glued cues like LUKESorry or LUKE(mocking)You."
+  );
   return lines.join("\n");
 }
 
@@ -1181,6 +1356,8 @@ app.post("/generate", async (req, res) => {
             ? rawContent.trim()
             : `[Episode ${ep} — no content]`;
 
+        episodeText = normalizeEpisodeScriptFormatting(episodeText);
+
         // Phase 2: if this episode is too similar to the previous one, regenerate once with a stronger instruction.
         if (ep > 1 && episodeScriptsMemo.length > 0) {
           const prevScript = episodeScriptsMemo[episodeScriptsMemo.length - 1];
@@ -1208,7 +1385,7 @@ app.post("/generate", async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = retryRaw.trim();
+              episodeText = normalizeEpisodeScriptFormatting(retryRaw.trim());
             }
           }
         }
@@ -1236,7 +1413,7 @@ app.post("/generate", async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = retryRaw.trim();
+              episodeText = normalizeEpisodeScriptFormatting(retryRaw.trim());
             }
           } catch (e) {
             console.error(`Victor rename retry failed for episode ${ep}:`, e);
@@ -1272,7 +1449,7 @@ app.post("/generate", async (req, res) => {
             });
             const editedRaw = edit.choices?.[0]?.message?.content;
             if (typeof editedRaw === "string" && editedRaw.trim()) {
-              episodeText = editedRaw.trim();
+              episodeText = normalizeEpisodeScriptFormatting(editedRaw.trim());
             }
           } catch (editErr) {
             console.error(`Ending edit failed for final episode ${ep}:`, editErr);
@@ -1311,6 +1488,42 @@ app.post("/generate", async (req, res) => {
         sendStreamLine(res, { type: "episode", episode: ep, text: fallback });
       }
     }
+
+    const lang = String(body.language || "EN").toUpperCase();
+    const wantZh =
+      body.translateToChinese !== false &&
+      lang !== "ZH" &&
+      episodeScriptsMemo.length > 0;
+    if (wantZh) {
+      const total = episodeScriptsMemo.length;
+      for (let i = 0; i < total; i++) {
+        const epNum = i + 1;
+        sendStreamLine(res, {
+          type: "translation_progress",
+          episode: epNum,
+          total,
+        });
+        try {
+          const zh = await translateEpisodeScriptToChinese(
+            epNum,
+            total,
+            episodeScriptsMemo[i]
+          );
+          const text =
+            zh ||
+            `[Episode ${epNum} — translation produced no text; see English PDF.]`;
+          sendStreamLine(res, { type: "episode_zh", episode: epNum, text });
+        } catch (trErr) {
+          console.error(`Chinese translation failed for episode ${epNum}:`, trErr);
+          sendStreamLine(res, {
+            type: "episode_zh",
+            episode: epNum,
+            text: `[Episode ${epNum} — translation failed: ${safeStr(trErr.message) || "error"}]`,
+          });
+        }
+      }
+    }
+
     sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });
   } catch (err) {
     console.error(err);

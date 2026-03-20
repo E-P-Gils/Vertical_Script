@@ -112,10 +112,26 @@
   font-size: 1.1rem;
   color: var(--blood-pale);
 }
+.script-output-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--cream);
+  opacity: 0.85;
+}
+.script-zh-title {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 1rem;
+  color: var(--blood-pale);
+}
+.script-text-zh {
+  max-height: 40vh;
+}
 .script-actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-bottom: 0.75rem;
 }
