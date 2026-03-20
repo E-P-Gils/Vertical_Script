@@ -2,21 +2,33 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 
 /** Noto Sans SC (Simplified) — required for embedding CJK in pdf-lib. First download can be large / slow. */
-const NOTO_SC_OTF =
-  "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf";
+// Load from local Vite `public/` folder so PDF rendering does not depend on 3rd-party CDN availability.
+const NOTO_SC_OTF = "/fonts/NotoSansCJKsc-Regular.otf";
 
 let notoFontBytesPromise = null;
 
 export function loadNotoSansScFontBytes() {
   if (!notoFontBytesPromise) {
-    notoFontBytesPromise = fetch(NOTO_SC_OTF).then((r) => {
-      if (!r.ok) {
-        throw new Error(
-          `Could not download Chinese font (${r.status}). Check your network and try again.`
-        );
+    notoFontBytesPromise = (async () => {
+      // Browser: fetch from Vite `public/` folder.
+      if (typeof window !== "undefined") {
+        const r = await fetch(NOTO_SC_OTF);
+        if (!r.ok) {
+          throw new Error(
+            `Could not download Chinese font (${r.status}). Check your network and try again.`
+          );
+        }
+        return r.arrayBuffer();
       }
-      return r.arrayBuffer();
-    });
+
+      // Node: read the same file from disk (so our PDF logic is testable).
+      const fs = await import("fs");
+      const { fileURLToPath } = await import("url");
+      const fontPath = fileURLToPath(
+        new URL("../public/fonts/NotoSansCJKsc-Regular.otf", import.meta.url)
+      );
+      return fs.promises.readFile(fontPath);
+    })();
   }
   return notoFontBytesPromise;
 }

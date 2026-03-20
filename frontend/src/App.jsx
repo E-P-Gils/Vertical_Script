@@ -295,6 +295,13 @@ function App() {
         if (!ok) return;
       }
 
+      const hasHan = /[\u3400-\u9FFF]/.test(scriptZh || "");
+      if (!hasHan) {
+        throw new Error(
+          "Chinese PDF not generated: translation output appears empty or missing Chinese characters."
+        );
+      }
+
       setDownloading("zh");
       const pdfBytes = await buildScreenplayPdfBytes(scriptZh, "zh");
       triggerPdfDownload(pdfBytes, "vertical_script_zh.pdf");
