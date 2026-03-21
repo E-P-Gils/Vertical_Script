@@ -3,7 +3,12 @@ import fontkit from "@pdf-lib/fontkit";
 
 /** Noto Sans SC (Simplified) — required for embedding CJK in pdf-lib. First download can be large / slow. */
 // Load from local Vite `public/` folder so PDF rendering does not depend on 3rd-party CDN availability.
-const NOTO_SC_OTF = "/fonts/NotoSansCJKsc-Regular.otf";
+// Use BASE_URL so fonts resolve when the app is served under a subpath (e.g. GitHub Pages).
+const viteBase =
+  typeof import.meta !== "undefined" && import.meta.env?.BASE_URL != null
+    ? String(import.meta.env.BASE_URL)
+    : "/";
+const NOTO_SC_OTF = `${viteBase.endsWith("/") ? viteBase : `${viteBase}/`}fonts/NotoSansCJKsc-Regular.otf`;
 
 let notoFontBytesPromise = null;
 
@@ -107,7 +112,9 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
   let pageNumFont;
   if (variant === "zh") {
     const bytes = await loadNotoSansScFontBytes();
-    bodyFont = await pdfDoc.embedFont(bytes, { subset: true });
+    // subset:true + fontkit often yields empty/broken CJK outlines in the saved PDF (blank in viewers).
+    // Full embed is larger (~font file size) but renders reliably.
+    bodyFont = await pdfDoc.embedFont(bytes, { subset: false });
     pageNumFont = bodyFont;
   } else {
     bodyFont = await pdfDoc.embedFont(StandardFonts.Courier);
