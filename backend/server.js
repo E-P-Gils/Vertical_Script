@@ -849,11 +849,73 @@ function stripEpisodeStructuralNoise(text, expectedEpisodeNumber) {
     .trim();
 }
 
+/**
+ * Heuristic repair for LLM token-boundary failures (enteringthe, Lucasthis, etc.).
+ * Skips scene headings, episode markers, and short ALL-CAPS slug lines.
+ */
+function shouldSkipMergedWordFix(trimmed) {
+  const t = trimmed.trim();
+  if (!t) return true;
+  if (/^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(t)) return true;
+  if (/^EPISODE\s+\d/i.test(t)) return true;
+  if (/^(FADE\s|CUT\s|DISSOLVE\b)/i.test(t)) return true;
+  if (/^ONSCREEN\b/i.test(t)) return false;
+  // Short slug-only lines (names, transitions in caps)
+  if (!/[a-z]/.test(t) && t.length <= 48) return true;
+  return false;
+}
+
+function fixMergedWordSpacingInLine(line) {
+  const m = line.match(/^(\s*)(.*)$/);
+  const indent = m ? m[1] : "";
+  let body = m ? m[2] : line;
+  const trimmed = body.trim();
+  if (!trimmed || shouldSkipMergedWordFix(trimmed)) return line;
+
+  let t = body;
+  t = t.replace(/([a-z])([A-Z])/g, "$1 $2");
+  t = t.replace(/([.!?])([A-Z])/g, "$1 $2");
+  t = t.replace(/([,;:])([A-Za-z])/g, "$1 $2");
+  t = t.replace(/\bhisthere's\b/gi, "his there's");
+  t = t.replace(/\bhisthere\b/gi, "his there");
+
+  const glued = [
+    [/\benteringthe\b/gi, "entering the"],
+    [/\bnearbythe\b/gi, "nearby the"],
+    [/\bsharplyand\b/gi, "sharply and"],
+    [/\bcloseragain\b/gi, "closer again"],
+    [/\bagainabout\b/gi, "again about"],
+    [/\btogetherthen\b/gi, "together then"],
+    [/\bLucasthis\b/gi, "Lucas this"],
+    [/\bstiffensher\b/gi, "stiffens her"],
+    [/\bherselfconsciously\b/gi, "herself consciously"],
+    [/\bsomeoneelse\b/gi, "someone else"],
+    [/\bwithoutwarning\b/gi, "without warning"],
+    [/\bfrombehind\b/gi, "from behind"],
+    [/\belsein\b/gi, "else in"],
+    [/\bdresseda\b/gi, "dressed a"],
+    [/\btoithis\b/gi, "to it his"],
+    [/\bforithis\b/gi, "for it his"],
+  ];
+  for (const [re, rep] of glued) t = t.replace(re, rep);
+
+  t = t.replace(/ {2,}/g, " ");
+  return indent + t;
+}
+
+function fixMergedWordsEpisodeText(text) {
+  if (!text || typeof text !== "string") return text;
+  return text
+    .split(/\r?\n/)
+    .map((ln) => fixMergedWordSpacingInLine(ln))
+    .join("\n");
+}
+
 function finalizeEpisodeText(text, episodeNumber) {
   if (!text || typeof text !== "string") return text;
-  return normalizeEpisodeScriptFormatting(
-    stripEpisodeStructuralNoise(text, episodeNumber)
-  );
+  let t = stripEpisodeStructuralNoise(text, episodeNumber);
+  t = fixMergedWordsEpisodeText(t);
+  return normalizeEpisodeScriptFormatting(t);
 }
 
 /**
@@ -1071,6 +1133,15 @@ ANTI-REPETITION AND FORMAT (critical — vertical scripts are sparse):
 - When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Victor", "Lance", or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
  - Do NOT use the name "Victor" for ANY character unless it is explicitly provided in the [HEROINE=...] / [MALE1=...] / [MALE2=...] tags or in the user-provided logline. If you need a new name, pick something else.
  - When you invent new powerful male characters (CEOs, bosses, shadowy masterminds), vary their names; do NOT repeatedly default to "Lance" or "Ethan" across unrelated series. Prefer fresh, distinctive names that fit the setting and avoid name recycling.
+
+WORD SPACING (critical — invalid output if broken):
+- Put a normal ASCII space between every English word. Never merge tokens (e.g. "enteringthe", "histhere's", "nearbythe", "Lucasthis", "closeragainabout" are forbidden).
+- After . ! ? and before the next sentence, include a space. After , ; : before the next word if needed, include a space.
+- Hyphenated compounds are fine ("self-consciously"); random merges like "herselfconsciously" are not — use two words or a correct hyphenated form.
+
+STRUCTURED BEATS (avoid dense run-ons):
+- Prefer one short action thought per line or per sentence — not a single line that chains many clauses with commas (that pattern causes missing spaces and merged words).
+- After each distinct beat ("Leo hands her a glass." / "Their fingers brush.") use a newline before the next beat when the line is getting long or dense.
 
 SCREENPLAY LINE BREAKS (mandatory — parsers and PDF layout depend on this):
 - Put each scene heading (e.g. INT. ROOM - NIGHT) on its own line, followed by a blank line, then the first action or dialogue.

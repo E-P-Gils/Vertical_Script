@@ -39,8 +39,9 @@ export function loadNotoSansScFontBytes() {
 }
 
 /**
- * Models often emit thin/narrow/zero-width spaces. English PDF path then strips non–Latin-1
- * bytes, which removes those characters entirely and can glue words (looks fine in <pre>).
+ * Thin / zero-width spaces: browsers render a gap, but the old English PDF path stripped
+ * non–Latin-1 without replacing them first → glued words in PDF only. Always normalize
+ * before PDF or use the exported helpers for on-page display so web and PDF match.
  */
 function normalizeWhitespaceForPdf(script) {
   if (!script || typeof script !== "string") return script;
@@ -48,6 +49,64 @@ function normalizeWhitespaceForPdf(script) {
     .replace(/\r\n/g, "\n")
     .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ")
     .replace(/\u200B|\u200C|\u200D|\uFEFF/g, " ");
+}
+
+/** Chinese PDF input + display: unicode whitespace cleanup only (full CJK preserved). */
+export function prepareChineseScriptLikePdfInput(script) {
+  return normalizeWhitespaceForPdf(script);
+}
+
+/**
+ * English PDF input + display: same normalization, punctuation, Latin-1 window, and
+ * conservative glue repair as `buildScreenplayPdfBytes` uses before layout.
+ * (Sentence-case softening of shouty dialogue is still PDF-only during line typing.)
+ */
+export function prepareEnglishScriptLikePdfInput(script) {
+  if (!script || typeof script !== "string") return script;
+  let t = normalizeWhitespaceForPdf(script);
+  t = t
+    .replace(/\u3002/g, ".")
+    .replace(/\uFF0C/g, ",")
+    .replace(/\uFF1A/g, ":")
+    .replace(/\uFF1B/g, ";")
+    .replace(/\uFF01/g, "!")
+    .replace(/\uFF1F/g, "?")
+    .replace(/\u2018|\u2019|\uFF07/g, "'")
+    .replace(/\u201C|\u201D|\uFF02/g, '"');
+  t = t.replace(/[^\x00-\xFF]/g, "");
+  return t.split("\n").map((ln) => repairStuckWordsLine(ln)).join("\n");
+}
+
+/**
+ * Conservative glue fixes only. Broader patterns like /...+(the|and|here)/ were removed:
+ * they fire inside normal words ("grand", "atmosphere", "otherwise").
+ */
+function repairStuckWordsLine(line) {
+  let s = line;
+  // dateIsabelle, hisName — lowercase run then TitleCase
+  s = s.replace(/([a-z])([A-Z][a-z]+)\b/g, "$1 $2");
+  // SHOUTYTOKENSTUCK — only when both halves are ASCII caps
+  s = s.replace(
+    /\b([A-Z]{2,})(ABOUT|TOGETHER|THEN|THERE|THE|THAT|THIS|WHAT|WHEN|WITH|FROM|INTO|ONTO|OVER|UNDER|AFTER|BEFORE|INSIDE|OUTSIDE|AROUND|AGAIN|ALSO|EVEN|ONLY|JUST|LEAN|KISS|BACK|WELL|SUDDENLY)\b/g,
+    "$1 $2"
+  );
+  return s;
+}
+
+/** Shouty ALL-CAPS dialogue / parentheticals → sentence case */
+function softenAllCapsLine(s) {
+  const t = s.trim();
+  if (t.length < 8) return s;
+  const paren = /^\(([^)]*)\)$/.test(t);
+  const core = paren ? t.slice(1, -1) : t;
+  if (core.length < 6) return s;
+  if (core !== core.toUpperCase()) return s;
+  if (/[^A-Z\s,'\-!?]/.test(core)) return s;
+  const words = core.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return s;
+  let lower = core.toLowerCase().replace(/\bi\b/g, "I");
+  const out = lower.charAt(0).toUpperCase() + lower.slice(1);
+  return paren ? `(${out})` : out;
 }
 
 function wrapToWidthAscii(font, text, size, maxWidth) {
@@ -100,19 +159,10 @@ function wrapToWidthUnicode(font, text, size, maxWidth) {
 export async function buildScreenplayPdfBytes(script, variant = "en") {
   const yieldToMain = () => new Promise((r) => setTimeout(r, 0));
 
-  let workText = normalizeWhitespaceForPdf(script);
-  if (variant === "en") {
-    workText = script
-      .replace(/\u3002/g, ".")
-      .replace(/\uFF0C/g, ",")
-      .replace(/\uFF1A/g, ":")
-      .replace(/\uFF1B/g, ";")
-      .replace(/\uFF01/g, "!")
-      .replace(/\uFF1F/g, "?")
-      .replace(/\u2018|\u2019|\uFF07/g, "'")
-      .replace(/\u201C|\u201D|\uFF02/g, '"');
-    workText = workText.replace(/[^\x00-\xFF]/g, "");
-  }
+  const workText =
+    variant === "en"
+      ? prepareEnglishScriptLikePdfInput(script)
+      : prepareChineseScriptLikePdfInput(script);
 
   const pdfDoc = await PDFDocument.create();
   // Required for embedding custom fonts (e.g. Noto Sans SC OTF) in pdf-lib.
@@ -154,6 +204,10 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
   const isCharacterLine = (t) => {
     const s = t.trim();
     if (!s) return false;
+    const words = s.split(/\s+/).filter(Boolean);
+    if (words.length >= 5 && !/\(/.test(s)) return false;
+    if (words.length >= 7) return false;
+    if (/[,:;]/.test(s) && !/\([^)]+\)/.test(s)) return false;
     // Whole cue on one line: ANNOUNCER (V.O.) / EMILY LAWRENCE (CONT'D)
     const parenCue = s.match(
       /^([A-Z0-9][A-Z0-9\s\-'.]{0,30})(\([^)]{1,28}\))\s*$/
@@ -172,6 +226,9 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
       (s === s.toUpperCase() || letters.length >= Math.floor(s.length * 0.5))
     );
   };
+
+  const canStartCharacterSlug = (pt) =>
+    pt === "blank" || pt === "scene" || pt === "action" || pt === "dialogue";
 
   const isParenthetical = (t) => {
     const s = t.trim();
@@ -206,6 +263,7 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
   const lines = workText.split(/\r?\n/);
   let prevType = "blank";
   let lineIndex = 0;
+  let skipLonelyDigitAfterEpisode = false;
 
   for (const raw of lines) {
     lineIndex += 1;
@@ -219,12 +277,18 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
       continue;
     }
 
+    if (skipLonelyDigitAfterEpisode && /^\d{1,2}$/.test(trimmed)) {
+      skipLonelyDigitAfterEpisode = false;
+      continue;
+    }
+
     let lineType;
     if (isSceneHeading(trimmed)) {
       lineType = "scene";
-    } else if (isCharacterLine(trimmed)) {
-      lineType = "character";
-    } else if (isParenthetical(trimmed)) {
+      if (/^EPISODE\s+\d+/i.test(trimmed)) {
+        skipLonelyDigitAfterEpisode = true;
+      }
+    } else if (prevType === "character" && isParenthetical(trimmed)) {
       lineType = "parenthetical";
     } else if (
       prevType === "character" ||
@@ -232,12 +296,27 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
       prevType === "dialogue"
     ) {
       lineType = "dialogue";
+    } else if (canStartCharacterSlug(prevType) && isCharacterLine(trimmed)) {
+      const oneWord =
+        trimmed.split(/\s+/).filter(Boolean).length === 1 && !/\(/.test(trimmed);
+      const shoutAfterDialogue =
+        prevType === "dialogue" &&
+        oneWord &&
+        /^(HERE|YES|NO|OK|OKAY|WHY|HOW|WHAT|WHO|HMM|OH|AH|UH|UM|STOP|RUN|WAIT)$/i.test(
+          trimmed
+        );
+      lineType = shoutAfterDialogue ? "dialogue" : "character";
+    } else if (isParenthetical(trimmed)) {
+      lineType = "parenthetical";
     } else {
       lineType = "action";
     }
 
     const sceneLine = trimmed.toUpperCase();
-    const displayText = lineType === "scene" ? sceneLine : trimmed;
+    let displayText = lineType === "scene" ? sceneLine : trimmed;
+    if (variant === "en" && (lineType === "dialogue" || lineType === "parenthetical")) {
+      displayText = softenAllCapsLine(displayText);
+    }
 
     if (lineType === "scene" && prevType !== "blank") y -= lineHeight;
     if (lineType === "character" && prevType !== "blank" && prevType !== "scene") {

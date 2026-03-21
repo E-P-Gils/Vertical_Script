@@ -1,5 +1,9 @@
 import { useState } from "react";
-import { buildScreenplayPdfBytes } from "./screenplayPdf.js";
+import {
+  buildScreenplayPdfBytes,
+  prepareChineseScriptLikePdfInput,
+  prepareEnglishScriptLikePdfInput,
+} from "./screenplayPdf.js";
 import "./App.css";
 
 // If you run the backend locally, keep VITE_API_BASE unset and calls go to Vite's `/api` proxy.
@@ -350,7 +354,7 @@ function App() {
               disabled={!script || translating || downloading !== null}
             >
               {downloading === "zh"
-                ? "Preparing Chinese PDF (font may download once)…"
+                ? "Preparing Chinese PDF…"
                 : "Download Chinese PDF / 下载中文 PDF"}
             </button>
           </div>
@@ -370,11 +374,15 @@ function App() {
               </p>
             </div>
           )}
-          <pre className="script-text">{script}</pre>
+          <pre className="script-text">
+            {prepareEnglishScriptLikePdfInput(script)}
+          </pre>
           {scriptZh ? (
             <>
               <h3 className="script-zh-title">Simplified Chinese / 简体中文</h3>
-              <pre className="script-text script-text-zh">{scriptZh}</pre>
+              <pre className="script-text script-text-zh">
+                {prepareChineseScriptLikePdfInput(scriptZh)}
+              </pre>
             </>
           ) : null}
         </section>
