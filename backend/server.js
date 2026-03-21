@@ -273,6 +273,7 @@ Season arc rules (macro-structure):
 - Story must have a clear beginning, middle, and end across the full season; no resets.
 
 Character role locking:
+- You MUST include the "characters" array with exactly three entries (heroine, cold male lead, warm male lead) on every blueprint. Downstream script generation copies these into every episode prompt; omitting the array breaks cast consistency.
 - The "characters" array must describe the heroine and the two main male leads using stable roles, goals, traits, and taboos.
 - These roles MUST remain consistent across all episodes: do NOT turn the heroine into a villain, swap the cold/warm male leads' archetypes, or radically change professions/alignments unless the arc_phase and episode plan clearly mark a turning point.
 - If a turning point changes a character’s alignment (e.g., warm lead betrays heroine), it must be foreshadowed and then stay consistent afterward; no random flip-flopping.
@@ -353,6 +354,71 @@ function parseBlueprintFromContent(content) {
   }
 }
 
+/**
+ * The episode writer only sees character roles if blueprint.characters is present.
+ * Models sometimes omit the array (or truncate JSON); fill from locked name tags so
+ * constraints apply for every genre the same way.
+ */
+function hydrateBlueprintCharactersFromNames(blueprint, names) {
+  if (!blueprint || typeof blueprint !== "object" || !names) return blueprint;
+  const filled = Array.isArray(blueprint.characters)
+    ? blueprint.characters.filter((c) => c && typeof c.name === "string" && c.name.trim())
+    : [];
+  if (filled.length >= 3) return blueprint;
+
+  const h = safeStr(names.heroine).trim() || "HEROINE";
+  const m1 = safeStr(names.coldCeo).trim() || "COLD_MALE_LEAD";
+  const m2 = safeStr(names.warmFriend).trim() || "WARM_MALE_LEAD";
+
+  blueprint.characters = [
+    {
+      name: h,
+      role: "heroine_protagonist",
+      goal: "Carry the season’s emotional arc; grow from underdog to agency without losing core values.",
+      traits: ["underdog", "resilient", "emotionally driven"],
+      taboos: [
+        "recast or merge with another love-interest",
+        "random alignment flip without a planned turning point",
+      ],
+    },
+    {
+      name: m1,
+      role: "cold_male_lead",
+      goal: "Embody power, pride, and guarded desire toward the heroine; evolve without swapping archetypes with the warm lead.",
+      traits: ["powerful", "controlled", "protective underneath"],
+      taboos: [
+        "swap roles with the warm male lead",
+        "become comic relief only",
+        "change profession or family tie without set-up",
+      ],
+    },
+    {
+      name: m2,
+      role: "warm_male_lead",
+      goal: "Offer steadiness and loyalty; compete for the heroine without becoming the main villain unless foreshadowed.",
+      traits: ["protective", "patient", "loyal"],
+      taboos: [
+        "merge into the cold lead’s personality",
+        "vanish for many episodes with no payoff",
+      ],
+    },
+  ];
+  return blueprint;
+}
+
+/** Same bullets as blueprint context, when generation runs without a season outline. */
+function formatFallbackCharacterConstraints(names) {
+  if (!names || !names.heroine || !names.coldCeo || !names.warmFriend) return "";
+  const lines = [
+    "CHARACTER ROLE CONSTRAINTS (locked cast — same for every genre; do NOT break these):",
+    `- ${names.heroine} | role: heroine_protagonist | taboos: do not swap her with a different heroine; do not rewrite her as parent/guardian of the male leads unless the logline already says so.`,
+    `- ${names.coldCeo} | role: cold_male_lead | taboos: do not merge with ${names.warmFriend}; do not randomly become her father/brother unless the logline already establishes that.`,
+    `- ${names.warmFriend} | role: warm_male_lead | taboos: do not merge with ${names.coldCeo}; stay a distinct person and relationship vector.`,
+    "",
+  ];
+  return lines.join("\n");
+}
+
 async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tropes }) {
   const userContent = buildBlueprintPrompt({
     logline,
@@ -383,6 +449,7 @@ async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tr
   if (!blueprint || !Array.isArray(blueprint.episodes)) {
     throw new Error("Failed to parse season blueprint JSON");
   }
+  hydrateBlueprintCharactersFromNames(blueprint, names);
   return blueprint;
 }
 
@@ -742,6 +809,53 @@ function normalizeEpisodeScriptFormatting(text) {
   return out.join("\n");
 }
 
+/** "EPISODE 12" / common model typos — not real scene headings; app adds canonical markers when streaming. */
+const SYNTHETIC_EPISODE_HEADING =
+  /^\s*EP(?:ISODE|OSODE|ISDE|OSDE)\s+(\d+)\s*$/i;
+
+function syntheticEpisodeNumberFromLine(line) {
+  const m = String(line || "").trim().match(SYNTHETIC_EPISODE_HEADING);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * Removes duplicate episode headings, END markers, and truncates when the model
+ * packs multiple episode blocks into one response (e.g. EPISODE 27 … EPISODE 28 …).
+ */
+function stripEpisodeStructuralNoise(text, expectedEpisodeNumber) {
+  if (!text || typeof text !== "string") return text;
+  let lines = text.replace(/\r\n/g, "\n").split("\n");
+
+  const spillIdx = lines.findIndex((raw) => {
+    const n = syntheticEpisodeNumberFromLine(raw);
+    return n != null && n > expectedEpisodeNumber;
+  });
+  if (spillIdx >= 0) {
+    lines = lines.slice(0, spillIdx);
+  }
+
+  lines = lines.filter((raw) => syntheticEpisodeNumberFromLine(raw) == null);
+
+  const standaloneEnd = /^\s*END\s+OF\s+(?:EPISODE|EPOSODE|EPISODES?|EPODES)\b/i;
+  lines = lines.filter((l) => !standaloneEnd.test(l));
+
+  const inlineEnd =
+    /\s*\(\s*END\s+OF\s+(?:EPISODE|EPOSODE|EPISODES?|EPODES)\b[^)]*\)\s*$/i;
+  lines = lines.map((l) => l.replace(inlineEnd, "").trimEnd());
+
+  return lines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function finalizeEpisodeText(text, episodeNumber) {
+  if (!text || typeof text !== "string") return text;
+  return normalizeEpisodeScriptFormatting(
+    stripEpisodeStructuralNoise(text, episodeNumber)
+  );
+}
+
 /**
  * Detects "synonym vomit" / word-list drafts: long runs of punctuation-free
  * single words or huge adjective chains with no normal screenplay structure.
@@ -936,6 +1050,10 @@ SCREENPLAY LINE BREAKS (mandatory — parsers and PDF layout depend on this):
 - After each action paragraph or each line of dialogue, use a newline before the next element. Do not run multiple speakers or multiple action beats into one paragraph without line breaks.
 - Transitions (FADE OUT., CUT TO:, etc.) go on their own line with a blank line before and after when they separate major beats.
 
+STRUCTURE (critical — avoids broken exports):
+- Do NOT output lines like "EPISODE 7" or "END OF EPISODE". The pipeline already knows the episode index and adds headings when saving. Start with your cold open or the first INT./EXT. scene heading.
+- Write exactly ONE episode per response: never stack multiple "EPISODE N" sections or sneak in the next episode’s beats after an "END OF EPISODE" marker.
+
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
 function formatBlueprintContext(blueprint, episodeNumber) {
@@ -1042,6 +1160,13 @@ function buildEpisodePromptText({
       lines.push(
         `For finance/boardroom storylines use this corporation consistently: ${names.corporationName}.`
       );
+    }
+    if (!blueprint) {
+      const fb = formatFallbackCharacterConstraints(names);
+      if (fb) {
+        lines.push("");
+        lines.push(fb);
+      }
     }
   }
   if (cleanLogline) {
@@ -1396,7 +1521,7 @@ app.post("/generate", async (req, res) => {
             ? rawContent.trim()
             : `[Episode ${ep} — no content]`;
 
-        episodeText = normalizeEpisodeScriptFormatting(episodeText);
+        episodeText = finalizeEpisodeText(episodeText, ep);
 
         // Quality gate: prevent "synonym vomit" / word-list runs.
         if (looksLikeSynonymVomit(episodeText)) {
@@ -1417,7 +1542,7 @@ app.post("/generate", async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = normalizeEpisodeScriptFormatting(retryRaw.trim());
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
             }
           } catch (qErr) {
             console.error(`Quality retry failed for episode ${ep}:`, qErr);
@@ -1451,7 +1576,7 @@ app.post("/generate", async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = normalizeEpisodeScriptFormatting(retryRaw.trim());
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
             }
           }
         }
@@ -1479,7 +1604,7 @@ app.post("/generate", async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = normalizeEpisodeScriptFormatting(retryRaw.trim());
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
             }
           } catch (e) {
             console.error(`Victor rename retry failed for episode ${ep}:`, e);
@@ -1515,7 +1640,7 @@ app.post("/generate", async (req, res) => {
             });
             const editedRaw = edit.choices?.[0]?.message?.content;
             if (typeof editedRaw === "string" && editedRaw.trim()) {
-              episodeText = normalizeEpisodeScriptFormatting(editedRaw.trim());
+              episodeText = finalizeEpisodeText(editedRaw.trim(), ep);
             }
           } catch (editErr) {
             console.error(`Ending edit failed for final episode ${ep}:`, editErr);
