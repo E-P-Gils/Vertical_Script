@@ -956,6 +956,35 @@ function repetitionScore(currentText, previousText) {
   return overlap / curSentences.length;
 }
 
+/**
+ * Long verbatim overlap between the end of the previous episode and this draft
+ * (models often re-paste the same POV / reaction block after a cliffhanger).
+ */
+function maxTailBlockOverlap(prevText, curText) {
+  if (!prevText || !curText) return 0;
+  const norm = (t) =>
+    t
+      .replace(/\r\n/g, "\n")
+      .replace(/[\u00A0\u2000-\u200B\uFEFF]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const p = norm(prevText);
+  const c = norm(curText);
+  if (p.length < 120 || c.length < 80) return 0;
+  const tail = p.slice(-2400);
+  let best = 0;
+  const minLen = 95;
+  const maxLen = Math.min(720, tail.length);
+  for (let len = maxLen; len >= minLen; len -= 30) {
+    for (let start = Math.max(0, tail.length - 1100); start <= tail.length - len; start += 40) {
+      const block = tail.slice(start, start + len);
+      if (block.length < minLen) continue;
+      if (c.includes(block)) best = Math.max(best, block.length);
+    }
+  }
+  return best;
+}
+
 function parseBlocksFromContent(content) {
   const raw = (content || "").trim();
   const jsonMatch = raw.match(/\s*(\[[\s\S]*\])\s*$/);
@@ -1237,6 +1266,9 @@ function buildEpisodePromptText({
     );
     lines.push(
       `DO NOT restage the same key moments from the previous episode (no replaying the same kiss, shove, or confrontation). If you need to reference them, compress them into one short recap line, then move the story FORWARD with new events and consequences.`
+    );
+    lines.push(
+      `Do NOT copy-paste the previous episode’s closing paragraphs, identical POV blocks, or the same crowd reactions—advance to the next story beat with new material.`
     );
     lines.push("");
     const TAIL_LINES = 30; // only keep the tail of each previous episode
@@ -1553,16 +1585,16 @@ app.post("/generate", async (req, res) => {
         if (ep > 1 && episodeScriptsMemo.length > 0) {
           const prevScript = episodeScriptsMemo[episodeScriptsMemo.length - 1];
           const score = repetitionScore(episodeText, prevScript);
+          const blockDup = maxTailBlockOverlap(prevScript, episodeText);
           const REPETITION_THRESHOLD = 0.35;
-          if (score > REPETITION_THRESHOLD) {
+          const BLOCK_OVERLAP_MIN = 105;
+          if (score > REPETITION_THRESHOLD || blockDup >= BLOCK_OVERLAP_MIN) {
             console.warn(
-              `Episode ${ep} repetition score ${score.toFixed(
-                2
-              )} > ${REPETITION_THRESHOLD}, regenerating with anti-repetition hint.`
+              `Episode ${ep} repetition score ${score.toFixed(2)} / tail block ${blockDup} chars — regenerating with anti-repetition hint.`
             );
             const retryContent =
               userContent +
-              "\n\nREWRITE REQUIREMENT: The previous attempt repeated scenes or sentences from the prior episode. This time you MUST move the story forward with NEW events and consequences. Do not reuse sentences or restage the same physical beats.";
+              "\n\nREWRITE REQUIREMENT: This draft reused too much text from the prior episode (including repeated POV or reaction paragraphs). Remove ALL duplicated material from the previous episode’s ending. Continue the timeline forward with new dialogue and action only—no paste of the same beats, crowd shots, or “only one person unmoved” blocks. New scene energy, new information, new consequences.";
             const retry = await openai.chat.completions.create({
               model: FINETUNED_MODEL,
               messages: [

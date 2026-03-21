@@ -38,6 +38,18 @@ export function loadNotoSansScFontBytes() {
   return notoFontBytesPromise;
 }
 
+/**
+ * Models often emit thin/narrow/zero-width spaces. English PDF path then strips non–Latin-1
+ * bytes, which removes those characters entirely and can glue words (looks fine in <pre>).
+ */
+function normalizeWhitespaceForPdf(script) {
+  if (!script || typeof script !== "string") return script;
+  return script
+    .replace(/\r\n/g, "\n")
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ")
+    .replace(/\u200B|\u200C|\u200D|\uFEFF/g, " ");
+}
+
 function wrapToWidthAscii(font, text, size, maxWidth) {
   const lines = [];
   const words = text.split(/\s+/);
@@ -88,7 +100,7 @@ function wrapToWidthUnicode(font, text, size, maxWidth) {
 export async function buildScreenplayPdfBytes(script, variant = "en") {
   const yieldToMain = () => new Promise((r) => setTimeout(r, 0));
 
-  let workText = script;
+  let workText = normalizeWhitespaceForPdf(script);
   if (variant === "en") {
     workText = script
       .replace(/\u3002/g, ".")
@@ -141,7 +153,18 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
 
   const isCharacterLine = (t) => {
     const s = t.trim();
-    if (!s || s.length > 35) return false;
+    if (!s) return false;
+    // Whole cue on one line: ANNOUNCER (V.O.) / EMILY LAWRENCE (CONT'D)
+    const parenCue = s.match(
+      /^([A-Z0-9][A-Z0-9\s\-'.]{0,30})(\([^)]{1,28}\))\s*$/
+    );
+    if (parenCue) {
+      if (s.length > 44) return false;
+      const base = parenCue[1].replace(/\s+/g, " ").trim();
+      const letters = base.replace(/[^A-Za-z]/g, "");
+      if (letters.length >= 2 && base === base.toUpperCase()) return true;
+    }
+    if (s.length > 35) return false;
     if (/[.!?]/.test(s) && !/^[A-Z\s\-']+[.!?]?$/.test(s)) return false;
     const letters = s.replace(/[^A-Za-z]/g, "");
     return (
