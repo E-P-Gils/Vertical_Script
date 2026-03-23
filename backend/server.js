@@ -10,10 +10,19 @@ import OpenAI from "openai";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { getSeriesNames } from "./nameEngine.js";
+import {
+  updateCharacterNameRegistryFromEpisode,
+  normalizeEpisodeCharacterNames,
+} from "./characterNameRegistry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, "..");
 dotenv.config({ path: join(rootDir, ".env") });
+
+const CHARACTER_NAME_REGISTRY_PATH = join(
+  rootDir,
+  "character-name-registry.json"
+);
 
 const app = express();
 const corsOptions = {
@@ -38,6 +47,9 @@ const RECAP_MODEL =
 /** Model for EN→ZH screenplay translation (defaults to planner; not the fine-tuned writer). */
 const TRANSLATION_MODEL =
   process.env.OPENAI_TRANSLATION_MODEL || PLANNER_MODEL;
+
+const NAME_VALIDATION_MODEL =
+  process.env.OPENAI_NAME_VALIDATION_MODEL || PLANNER_MODEL;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY in .env");
@@ -678,6 +690,185 @@ function safeStr(val) {
   return String(val).trim();
 }
 
+function titleCaseName(name) {
+  const s = safeStr(name);
+  if (!s) return s;
+  return s
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => {
+      const parts = w.split("-");
+      return parts
+        .map((p) =>
+          p ? p[0].toUpperCase() + (p.length > 1 ? p.slice(1) : "") : p
+        )
+        .join("-");
+    })
+    .join(" ");
+}
+
+function normalizeNameKeyLoose(name) {
+  return safeStr(name)
+    .replace(/[’]/g, "'")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function levenshteinDistance(a, b) {
+  const s = String(a);
+  const t = String(b);
+  const n = s.length;
+  const m = t.length;
+  if (n === 0) return m;
+  if (m === 0) return n;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = 0; i <= n; i++) dp[i][0] = i;
+  for (let j = 0; j <= m; j++) dp[0][j] = j;
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[n][m];
+}
+
+function nameSimilarity(a, b) {
+  const na = normalizeNameKeyLoose(a);
+  const nb = normalizeNameKeyLoose(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const dist = levenshteinDistance(na, nb);
+  const maxLen = Math.max(na.length, nb.length);
+  return maxLen === 0 ? 0 : 1 - dist / maxLen;
+}
+
+function extractAllCapsCueLines(text) {
+  if (!text || typeof text !== "string") return [];
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  for (const raw of lines) {
+    const trimmed = String(raw || "").trim();
+    if (!trimmed) continue;
+    // Character cue-ish: ALL CAPS name with optional parenthetical.
+    if (!/^[A-Z0-9 '\-]+(?:\s*\([^)]*\))?$/.test(trimmed)) continue;
+    if (/[.!?]/.test(trimmed)) continue;
+    if (trimmed.length > 60) continue;
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function extractCueBaseNameFromHeaderLine(line) {
+  let s = String(line || "").trim();
+  const parenIdx = s.indexOf("(");
+  if (parenIdx >= 0) s = s.slice(0, parenIdx).trimEnd();
+  // Drop POV suffix from base.
+  s = s.replace(/\s+POV$/i, "").trimEnd();
+  // Drop possessive for base-key matching.
+  s = s.replace(/('S|'s)$/i, "").trimEnd();
+  return s;
+}
+
+function detectMainTrioNameMismatches(episodeText, names) {
+  if (!episodeText || typeof episodeText !== "string") return [];
+  if (!names) return [];
+
+  const expected = [
+    { key: normalizeNameKeyLoose(names.heroine), header: String(names.heroine).toUpperCase(), prose: titleCaseName(names.heroine), canonicalKey: "HEROINE" },
+    { key: normalizeNameKeyLoose(names.coldCeo), header: String(names.coldCeo).toUpperCase(), prose: titleCaseName(names.coldCeo), canonicalKey: "MALE1" },
+    { key: normalizeNameKeyLoose(names.warmFriend), header: String(names.warmFriend).toUpperCase(), prose: titleCaseName(names.warmFriend), canonicalKey: "MALE2" },
+  ].filter((x) => x.key);
+
+  if (!expected.length) return [];
+
+  const cueLines = extractAllCapsCueLines(episodeText);
+  const mismatches = [];
+
+  for (const cueLine of cueLines) {
+    const base = extractCueBaseNameFromHeaderLine(cueLine);
+    const cueKey = normalizeNameKeyLoose(base);
+    if (!cueKey) continue;
+
+    for (const ex of expected) {
+      if (cueKey === ex.key) continue;
+      const sim = nameSimilarity(cueKey, ex.key);
+      if (sim >= 0.92) {
+        mismatches.push({
+          expectedCanonicalKey: ex.canonicalKey,
+          expectedHeader: ex.header,
+          foundVariant: cueLine,
+          locationHint: "cue header line",
+        });
+      }
+    }
+  }
+
+  // Deduplicate by foundVariant.
+  const seen = new Set();
+  return mismatches.filter((m) => {
+    const k = m.expectedCanonicalKey + "::" + m.foundVariant;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function extractJsonObject(text) {
+  if (!text || typeof text !== "string") return null;
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function validateMainTrioNameConsistencyWithLLM({
+  episodeText,
+  names,
+  episodeNumber,
+}) {
+  if (!names) return null;
+  const expected = [
+    { expectedCanonicalKey: "HEROINE", expectedHeader: String(names.heroine).toUpperCase(), expectedProse: titleCaseName(names.heroine) },
+    { expectedCanonicalKey: "MALE1", expectedHeader: String(names.coldCeo).toUpperCase(), expectedProse: titleCaseName(names.coldCeo) },
+    { expectedCanonicalKey: "MALE2", expectedHeader: String(names.warmFriend).toUpperCase(), expectedProse: titleCaseName(names.warmFriend) },
+  ];
+
+  const cueLines = extractAllCapsCueLines(episodeText);
+  const payload = cueLines.slice(0, 120); // cap to avoid token bloat
+
+  const validation = await openai.chat.completions.create({
+    model: NAME_VALIDATION_MODEL,
+    messages: [
+      { role: "system", content: NAME_CONSISTENCY_VALIDATION_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content:
+          `EPISODE_NUMBER: ${episodeNumber}\n` +
+          `EXPECTED_CANONICAL_NAMES:\n` +
+          JSON.stringify(expected) +
+          `\n\nCUE_LINES:\n` +
+          payload.join("\n"),
+      },
+    ],
+    max_tokens: 320,
+    temperature: 0.2,
+    frequency_penalty: 1.0,
+    presence_penalty: 0.2,
+  });
+
+  const raw = validation.choices?.[0]?.message?.content;
+  const json = extractJsonObject(raw);
+  return json;
+}
+
 /** Words that are all-caps in action lines but must not be treated as character names when splitting merged cues. */
 const MERGE_SPLIT_NAME_BLOCKLIST = new Set(
   [
@@ -1203,6 +1394,29 @@ STRUCTURE (critical — avoids broken exports):
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
+const NAME_CONSISTENCY_VALIDATION_SYSTEM_PROMPT = `You are a script formatting auditor.
+
+Your task: given an episode's character cue lines, check whether the main trio character names are spelled consistently with the provided canonical spellings.
+
+Important:
+- Only inspect character cue headers (ALL CAPS speaker cue lines), including optional parentheticals like "(V.O.)", "(O.S.)", "(CONT'D)", "(WEAKLY)".
+- Do NOT rewrite or modify the script.
+- Identify likely misspellings/variants (case differences and letter transpositions) for the main trio only.
+
+Output STRICT JSON with this shape:
+{
+  "ok": boolean,
+  "mismatches": [
+    {
+      "expectedCanonicalKey": string,
+      "expectedHeader": string,
+      "foundVariant": string,
+      "locationHint": string
+    }
+  ],
+  "notes": string
+}`;
+
 function formatBlueprintContext(blueprint, episodeNumber) {
   if (!blueprint || !Array.isArray(blueprint.episodes)) return "";
   const total = blueprint.episodes.length;
@@ -1302,6 +1516,27 @@ function buildEpisodePromptText({
       `In this series, the heroine is ${names.heroine} (female underdog), ` +
         `the cold powerful male lead is ${names.coldCeo}, and the warm supportive male lead is ${names.warmFriend}. ` +
         `Use THESE exact names consistently in every episode unless the logline explicitly overrides them.`
+    );
+    // Phase 3: upstream prompt reinforcement — locked manifest for cue headers + prose mentions.
+    lines.push("");
+    lines.push("CHARACTER MANIFEST (locked canonical spellings; do NOT vary):");
+    lines.push(
+      `- HEROINE HEADER: ${String(names.heroine).toUpperCase()} | PROSE: ${titleCaseName(
+        names.heroine
+      )} | POSSESSIVE: ${String(names.heroine).toUpperCase()}'S`
+    );
+    lines.push(
+      `- MALE1 HEADER: ${String(names.coldCeo).toUpperCase()} | PROSE: ${titleCaseName(
+        names.coldCeo
+      )} | POSSESSIVE: ${String(names.coldCeo).toUpperCase()}'S`
+    );
+    lines.push(
+      `- MALE2 HEADER: ${String(names.warmFriend).toUpperCase()} | PROSE: ${titleCaseName(
+        names.warmFriend
+      )} | POSSESSIVE: ${String(names.warmFriend).toUpperCase()}'S`
+    );
+    lines.push(
+      "RULE: Any ALL CAPS dialogue cue/header for these characters MUST match the HEADER spellings exactly. Any prose/action mentions MUST use the PROSE spellings exactly."
     );
     if (names.corporationName) {
       lines.push(
@@ -1539,6 +1774,8 @@ app.post("/generate", async (req, res) => {
   let logline = safeStr(body.logline).slice(0, 1500);
   const genre = String(body.genre || "Romance").trim() || "Romance";
   const seriesNames = getSeriesNames(genre);
+  const generationLangTag = String(body.language || "EN").toUpperCase();
+  const shouldRunNameValidation = generationLangTag !== "ZH";
   const tropes = body.tropes && typeof body.tropes === "object" ? body.tropes : null;
   const shouldNormalizeLogline = body.normalizeLogline !== false;
   const wordCount = logline ? logline.trim().split(/\s+/).filter(Boolean).length : 0;
@@ -1672,6 +1909,32 @@ app.post("/generate", async (req, res) => {
             : `[Episode ${ep} — no content]`;
 
         episodeText = finalizeEpisodeText(episodeText, ep);
+        // Phase 3 validation — detect main-trio name inconsistencies before Phase 2 canonicalization.
+        if (shouldRunNameValidation) {
+          try {
+            const mismatches = detectMainTrioNameMismatches(episodeText, seriesNames);
+            if (mismatches.length > 0) {
+              const report = await validateMainTrioNameConsistencyWithLLM({
+                episodeText,
+                names: seriesNames,
+                episodeNumber: ep,
+              });
+              if (report && report.ok === false) {
+                console.warn(
+                  `Name consistency mismatches (episode ${ep}):`,
+                  report.mismatches || mismatches
+                );
+              }
+            }
+          } catch (nvErr) {
+            console.warn(`Name validation failed (episode ${ep}):`, nvErr?.message || nvErr);
+          }
+        }
+        // Phase 2: normalize character name variants into canonical spellings.
+        episodeText = normalizeEpisodeCharacterNames(
+          episodeText,
+          CHARACTER_NAME_REGISTRY_PATH
+        );
 
         // Hard validation: enforce zero merged-words for credibility.
         // Retry once if any merged-word patterns remain after post-processing.
@@ -1699,6 +1962,38 @@ app.post("/generate", async (req, res) => {
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
               episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              if (shouldRunNameValidation) {
+                try {
+                  const mismatches = detectMainTrioNameMismatches(
+                    episodeText,
+                    seriesNames
+                  );
+                  if (mismatches.length > 0) {
+                    const report = await validateMainTrioNameConsistencyWithLLM(
+                      {
+                        episodeText,
+                        names: seriesNames,
+                        episodeNumber: ep,
+                      }
+                    );
+                    if (report && report.ok === false) {
+                      console.warn(
+                        `Name consistency mismatches (episode ${ep}):`,
+                        report.mismatches || mismatches
+                      );
+                    }
+                  }
+                } catch (nvErr) {
+                  console.warn(
+                    `Name validation failed (episode ${ep}):`,
+                    nvErr?.message || nvErr
+                  );
+                }
+              }
+              episodeText = normalizeEpisodeCharacterNames(
+                episodeText,
+                CHARACTER_NAME_REGISTRY_PATH
+              );
             }
           } catch (sErr) {
             console.error(`Merged-word spacing retry failed for episode ${ep}:`, sErr);
@@ -1725,6 +2020,38 @@ app.post("/generate", async (req, res) => {
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
               episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              if (shouldRunNameValidation) {
+                try {
+                  const mismatches = detectMainTrioNameMismatches(
+                    episodeText,
+                    seriesNames
+                  );
+                  if (mismatches.length > 0) {
+                    const report = await validateMainTrioNameConsistencyWithLLM(
+                      {
+                        episodeText,
+                        names: seriesNames,
+                        episodeNumber: ep,
+                      }
+                    );
+                    if (report && report.ok === false) {
+                      console.warn(
+                        `Name consistency mismatches (episode ${ep}):`,
+                        report.mismatches || mismatches
+                      );
+                    }
+                  }
+                } catch (nvErr) {
+                  console.warn(
+                    `Name validation failed (episode ${ep}):`,
+                    nvErr?.message || nvErr
+                  );
+                }
+              }
+              episodeText = normalizeEpisodeCharacterNames(
+                episodeText,
+                CHARACTER_NAME_REGISTRY_PATH
+              );
             }
           } catch (qErr) {
             console.error(`Quality retry failed for episode ${ep}:`, qErr);
@@ -1759,6 +2086,38 @@ app.post("/generate", async (req, res) => {
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
               episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              if (shouldRunNameValidation) {
+                try {
+                  const mismatches = detectMainTrioNameMismatches(
+                    episodeText,
+                    seriesNames
+                  );
+                  if (mismatches.length > 0) {
+                    const report = await validateMainTrioNameConsistencyWithLLM(
+                      {
+                        episodeText,
+                        names: seriesNames,
+                        episodeNumber: ep,
+                      }
+                    );
+                    if (report && report.ok === false) {
+                      console.warn(
+                        `Name consistency mismatches (episode ${ep}):`,
+                        report.mismatches || mismatches
+                      );
+                    }
+                  }
+                } catch (nvErr) {
+                  console.warn(
+                    `Name validation failed (episode ${ep}):`,
+                    nvErr?.message || nvErr
+                  );
+                }
+              }
+              episodeText = normalizeEpisodeCharacterNames(
+                episodeText,
+                CHARACTER_NAME_REGISTRY_PATH
+              );
             }
           }
         }
@@ -1787,6 +2146,38 @@ app.post("/generate", async (req, res) => {
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
               episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              if (shouldRunNameValidation) {
+                try {
+                  const mismatches = detectMainTrioNameMismatches(
+                    episodeText,
+                    seriesNames
+                  );
+                  if (mismatches.length > 0) {
+                    const report = await validateMainTrioNameConsistencyWithLLM(
+                      {
+                        episodeText,
+                        names: seriesNames,
+                        episodeNumber: ep,
+                      }
+                    );
+                    if (report && report.ok === false) {
+                      console.warn(
+                        `Name consistency mismatches (episode ${ep}):`,
+                        report.mismatches || mismatches
+                      );
+                    }
+                  }
+                } catch (nvErr) {
+                  console.warn(
+                    `Name validation failed (episode ${ep}):`,
+                    nvErr?.message || nvErr
+                  );
+                }
+              }
+              episodeText = normalizeEpisodeCharacterNames(
+                episodeText,
+                CHARACTER_NAME_REGISTRY_PATH
+              );
             }
           } catch (e) {
             console.error(`Victor rename retry failed for episode ${ep}:`, e);
@@ -1823,6 +2214,38 @@ app.post("/generate", async (req, res) => {
             const editedRaw = edit.choices?.[0]?.message?.content;
             if (typeof editedRaw === "string" && editedRaw.trim()) {
               episodeText = finalizeEpisodeText(editedRaw.trim(), ep);
+              if (shouldRunNameValidation) {
+                try {
+                  const mismatches = detectMainTrioNameMismatches(
+                    episodeText,
+                    seriesNames
+                  );
+                  if (mismatches.length > 0) {
+                    const report = await validateMainTrioNameConsistencyWithLLM(
+                      {
+                        episodeText,
+                        names: seriesNames,
+                        episodeNumber: ep,
+                      }
+                    );
+                    if (report && report.ok === false) {
+                      console.warn(
+                        `Name consistency mismatches (episode ${ep}):`,
+                        report.mismatches || mismatches
+                      );
+                    }
+                  }
+                } catch (nvErr) {
+                  console.warn(
+                    `Name validation failed (episode ${ep}):`,
+                    nvErr?.message || nvErr
+                  );
+                }
+              }
+              episodeText = normalizeEpisodeCharacterNames(
+                episodeText,
+                CHARACTER_NAME_REGISTRY_PATH
+              );
             }
           } catch (editErr) {
             console.error(`Ending edit failed for final episode ${ep}:`, editErr);
@@ -1832,6 +2255,21 @@ app.post("/generate", async (req, res) => {
         // If the ending-edit step reintroduced the forbidden name, strip it (rare but possible).
         if (!victorAllowed && includesWord(episodeText, "Victor")) {
           episodeText = episodeText.replace(/\bVictor\b/g, pickReplacementNameForVictor());
+        }
+
+        // Phase 1: audit character cue name variants and keep a registry on disk.
+        try {
+          await updateCharacterNameRegistryFromEpisode({
+            episodeText,
+            registryPath: CHARACTER_NAME_REGISTRY_PATH,
+            seedCanonicalHeaderNames: [
+              seriesNames?.heroine,
+              seriesNames?.coldCeo,
+              seriesNames?.warmFriend,
+            ].filter(Boolean),
+          });
+        } catch (regErr) {
+          console.warn("Name registry update failed:", regErr?.message || regErr);
         }
 
         // Summarize this episode for future context (best-effort).
