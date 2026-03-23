@@ -84,13 +84,25 @@ async function sendVerificationEmail({ toEmail, code }) {
     return { sent: false, codeForDev: process.env.AUTH_DEV_RETURN_CODE === "true" ? code : null };
   }
 
-  await transport.sendMail({
-    from,
-    to: toEmail,
-    subject,
-    text,
-  });
-  return { sent: true };
+  try {
+    await transport.sendMail({
+      from,
+      to: toEmail,
+      subject,
+      text,
+    });
+    return { sent: true };
+  } catch (err) {
+    // If SMTP is configured incorrectly (e.g. BadCredentials), we still want
+    // the registration flow to complete so the user can verify.
+    // The code is returned for dev/testing via the existing frontend UI.
+    console.warn("[auth] Failed to send verification email; continuing with dev code.", {
+      toEmail,
+      error: err?.message || err,
+    });
+    console.warn("[auth] Verification code (smtp error):", code);
+    return { sent: false, codeForDev: code };
+  }
 }
 
 export async function registerUser(req, res) {

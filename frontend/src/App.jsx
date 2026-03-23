@@ -55,6 +55,8 @@ function App() {
   const [authCode, setAuthCode] = useState("");
   const [authMode, setAuthMode] = useState("register"); // register | confirm | login
   const [authDevCode, setAuthDevCode] = useState("");
+  const [confirmModalOpen, setConfirmModalOpen] = useState(false);
+  const [confirmLoading, setConfirmLoading] = useState(false);
 
   const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts
   const [myScripts, setMyScripts] = useState(() => {
@@ -198,8 +200,9 @@ function App() {
       if (!r.ok) throw new Error(data.error || "Registration failed");
       // Server always returns a response even if it couldn’t send the email (dev logs).
       setAuthDevCode(data?.verification?.devCode || "");
-      setAuthMode("confirm");
       setAuthCode("");
+      setConfirmModalOpen(true);
+      setAuthMode("login");
       setAuthConfirmPassword("");
       setError("");
     } catch (err) {
@@ -223,6 +226,7 @@ function App() {
   const handleConfirmEmail = async (e) => {
     e.preventDefault();
     setError("");
+    setConfirmLoading(true);
     try {
       const r = await fetch(`${API_BASE}/auth/confirm-email`, {
         method: "POST",
@@ -231,8 +235,27 @@ function App() {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || "Confirmation failed");
-      setAuthMode("login");
+
+      // After confirmation, auto-login and route to generation.
+      const loginR = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      const loginData = await loginR.json().catch(() => ({}));
+      if (!loginR.ok) throw new Error(loginData.error || "Login failed after confirmation");
+      if (!loginData?.token) throw new Error("Login failed: missing token");
+
+      setAuthToken(loginData.token);
+      try {
+        localStorage.setItem("authToken", loginData.token);
+      } catch {}
+
+      setConfirmModalOpen(false);
       setAuthCode("");
+      setError("");
+      setPage("generate");
+      setAuthMode("login");
     } catch (err) {
       const msg = String(err?.message || "");
       if (msg.includes("verification code missing/expired")) {
@@ -252,6 +275,8 @@ function App() {
       } else {
         setError(msg || "Confirmation failed. / 验证失败。");
       }
+    } finally {
+      setConfirmLoading(false);
     }
   };
 
@@ -281,9 +306,10 @@ function App() {
     } catch (err) {
       const msg = String(err?.message || "");
       if (msg.includes("email not verified")) {
-        setError(
-          "Please verify your email with the confirmation code, then log in again. / 请使用邮箱验证码完成验证后再登录。"
-        );
+        setConfirmModalOpen(true);
+        setAuthMode("login");
+        setAuthCode("");
+        setError("");
       } else if (msg.includes("invalid credentials")) {
         setError("No registered account found (or wrong password). Please register. / 未注册账号或密码错误，请先注册。");
       } else {
@@ -939,43 +965,7 @@ function App() {
               </>
             )}
 
-            {authMode === "confirm" && (
-              <form onSubmit={handleConfirmEmail} className="auth-form">
-                <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
-                  We sent a confirmation code to <b>{authEmail}</b>. Enter it below to verify. / 我们已向 <b>{authEmail}</b> 发送确认码。请在下方输入以完成验证。
-                </p>
-                <label className="field">
-                  <span>Confirmation code / 确认码</span>
-                  <input
-                    value={authCode}
-                    onChange={(e) => setAuthCode(e.target.value)}
-                    type="text"
-                    inputMode="numeric"
-                    required
-                  />
-                </label>
-                <button type="submit" className="btn btn-primary" disabled={!authCode}>
-                  Confirm / 验证
-                </button>
-                {authDevCode && (
-                  <p style={{ marginTop: "0.75rem", opacity: 0.85, fontSize: "0.85rem" }}>
-                    Dev code / 开发者验证码: <b>{authDevCode}</b>
-                  </p>
-                )}
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    setAuthMode("register");
-                    setAuthCode("");
-                    setAuthConfirmPassword("");
-                  }}
-                  style={{ marginTop: "0.75rem" }}
-                >
-                  Back / 返回
-                </button>
-              </form>
-            )}
+            {/* Confirmation code is handled in a modal. */}
 
             {authMode === "login" && (
               <form onSubmit={handleLogin} className="auth-form">
@@ -1021,6 +1011,69 @@ function App() {
             )}
           </div>
         </section>
+      )}
+
+      {confirmModalOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (confirmLoading) return;
+            setConfirmModalOpen(false);
+            setError("");
+          }}
+        >
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: 520 }}
+          >
+            <h2 className="modal-title">Confirmation / 邮箱验证码</h2>
+            <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
+              We sent a confirmation code to <b>{authEmail}</b>. Enter it below to verify. / 我们已向 <b>{authEmail}</b> 发送确认码。请在下方输入以完成验证。
+            </p>
+            {authDevCode && (
+              <p style={{ marginTop: "-0.25rem", marginBottom: "0.75rem", opacity: 0.85, fontSize: "0.9rem" }}>
+                Dev code: <b>{authDevCode}</b> / 开发者验证码：<b>{authDevCode}</b>
+              </p>
+            )}
+
+            {error && <p className="error">{error}</p>}
+
+            <form onSubmit={handleConfirmEmail}>
+              <label className="field">
+                <span>Confirmation code / 确认码</span>
+                <input
+                  value={authCode}
+                  onChange={(e) => setAuthCode(e.target.value)}
+                  type="text"
+                  inputMode="numeric"
+                  required
+                />
+              </label>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    if (confirmLoading) return;
+                    setConfirmModalOpen(false);
+                    setError("");
+                  }}
+                  disabled={confirmLoading}
+                >
+                  Back / 返回
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={!authCode || confirmLoading}
+                >
+                  {confirmLoading ? "Verifying... / 验证中..." : "Confirm / 验证"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {page === "generate" && (
