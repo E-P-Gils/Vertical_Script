@@ -57,11 +57,12 @@ const NAME_VALIDATION_MODEL =
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY in .env");
-  process.exit(1);
+  // Do not hard-exit: allow the server to start for auth + other non-OpenAI routes.
+  // Endpoints that call OpenAI will fail later with a clear error.
 }
 
 const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
+  apiKey: OPENAI_API_KEY || "",
   // Allow slower responses on free Render / high latency routes
   timeout: 600_000, // 10 minutes in milliseconds
   maxRetries: 2,
