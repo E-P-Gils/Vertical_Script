@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   buildScreenplayPdfBytes,
   prepareChineseScriptLikePdfInput,
@@ -51,9 +51,32 @@ function App() {
   });
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authConfirmPassword, setAuthConfirmPassword] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [authMode, setAuthMode] = useState("register"); // register | confirm | login
   const [authDevCode, setAuthDevCode] = useState("");
+
+  const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts
+  const [myScripts, setMyScripts] = useState(() => {
+    try {
+      const raw = localStorage.getItem("myScripts");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed)
+        ? parsed.map((it, idx) => ({
+            id: it?.id || `legacy_${idx}_${Date.now()}`,
+            createdAt: it?.createdAt || new Date().toISOString(),
+            title: String(it?.title || "Generated Script").trim() || "Generated Script",
+            genre: String(it?.genre || "").trim(),
+            summary: String(it?.summary || "").trim(),
+            englishText: String(it?.englishText || "").trim(),
+            chineseText: String(it?.chineseText || "").trim(),
+          }))
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeScriptId, setActiveScriptId] = useState(null);
 
   const wordCount = logline.trim() ? logline.trim().split(/\s+/).length : 0;
   const MIN_WORDS = 25;
@@ -65,6 +88,58 @@ function App() {
         Authorization: `Bearer ${authToken}`,
       }
     : {};
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("myScripts", JSON.stringify(myScripts));
+    } catch {}
+  }, [myScripts]);
+
+  const buildScriptTitle = (summaryText, genreName) => {
+    const s = String(summaryText || "").trim();
+    if (!s) return genreName ? `${genreName} Script` : "Generated Script";
+    const first = s.split(/[.?!\n]/)[0] || s;
+    const words = first.trim().split(/\s+/).slice(0, 8).join(" ");
+    return words ? words.replace(/[^\w\s'-]/g, "").trim() : (genreName ? `${genreName} Script` : "Generated Script");
+  };
+
+  const persistGeneratedScript = (englishText, genreName, summaryText) => {
+    const t = String(englishText || "").trim();
+    if (!t) return;
+    const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const summary = String(summaryText || "").trim();
+    const item = {
+      id,
+      createdAt: new Date().toISOString(),
+      title: buildScriptTitle(summary, genreName || genre || ""),
+      genre: genreName || genre || "",
+      summary,
+      englishText: t,
+      chineseText: "",
+    };
+    setMyScripts((prev) => [item, ...prev].slice(0, 30));
+    setActiveScriptId(id);
+  };
+
+  const updateActiveScriptChinese = (chText) => {
+    if (!activeScriptId) return;
+    const t = String(chText || "").trim();
+    if (!t) return;
+    setMyScripts((prev) =>
+      prev.map((it) => (it.id === activeScriptId ? { ...it, chineseText: t } : it))
+    );
+  };
+
+  const loadScriptItem = (item) => {
+    if (!item) return;
+    setScript(item.englishText || "");
+    setScriptZh(item.chineseText || "");
+    setGenre(item.genre || "");
+    setLogline(item.summary || "");
+    setActiveScriptId(item.id);
+    setPage("generate");
+    setModalOpen(false);
+  };
 
   const handleSuggestRandomSummary = async () => {
     setLoadingSuggestions(true);
@@ -85,6 +160,35 @@ function App() {
     setError("");
     setAuthDevCode("");
     try {
+      const emailOk = (() => {
+        const v = String(authEmail || "").trim();
+        // Require a "real-looking" domain: user@domain.tld
+        return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
+      })();
+      if (!emailOk) {
+        throw new Error("Please enter a valid email address with a real domain. / 请输入有效的邮箱地址（需包含域名）。");
+      }
+
+      const password = String(authPassword || "");
+      const confirm = String(authConfirmPassword || "");
+      if (password !== confirm) {
+        throw new Error("Passwords do not match. / 两次密码不一致。");
+      }
+
+      const passwordOk = password.length >= 8 &&
+        /[A-Za-z]/.test(password) &&
+        /[0-9]/.test(password) &&
+        /[^A-Za-z0-9]/.test(password);
+      if (!passwordOk) {
+        throw new Error(
+          "Password must be at least 8 characters and include letters, numbers, and a special character. / 密码至少8位，并包含字母、数字和特殊字符。"
+        );
+      }
+
+      if (!password) {
+        throw new Error("Password is required. / 请输入密码。");
+      }
+
       const r = await fetch(`${API_BASE}/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -96,9 +200,23 @@ function App() {
       setAuthDevCode(data?.verification?.devCode || "");
       setAuthMode("confirm");
       setAuthCode("");
+      setAuthConfirmPassword("");
       setError("");
     } catch (err) {
-      setError(err?.message || "Registration failed");
+      const msg = String(err?.message || "");
+      if (msg.includes("password must be at least 8 characters")) {
+        setError("Password must be at least 8 characters. / 密码至少8位。");
+      } else if (msg.includes("email and password are required")) {
+        setError("Email and password are required. / 需要邮箱与密码。");
+      } else if (msg.includes("auth is not enabled")) {
+        setError("Registration is not enabled on this server. / 此服务器尚未启用注册。");
+      } else if (msg.includes("user already exists")) {
+        setError("This account already exists. Please use the login flow. / 该账号已存在，请走登录流程。");
+      } else if (msg) {
+        setError(msg);
+      } else {
+        setError("Registration failed. / 注册失败。");
+      }
     }
   };
 
@@ -124,6 +242,12 @@ function App() {
     e.preventDefault();
     setError("");
     try {
+      const email = String(authEmail || "").trim();
+      const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+      if (!emailOk) {
+        throw new Error("Please enter a valid email address with a real domain. / 请输入有效的邮箱地址（需包含域名）。");
+      }
+
       const r = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -138,7 +262,16 @@ function App() {
       } catch {}
       setAuthMode("login");
     } catch (err) {
-      setError(err?.message || "Login failed");
+      const msg = String(err?.message || "");
+      if (msg.includes("email not verified")) {
+        setError(
+          "Please verify your email with the confirmation code, then log in again. / 请使用邮箱验证码完成验证后再登录。"
+        );
+      } else if (msg.includes("invalid credentials")) {
+        setError("No registered account found (or wrong password). Please register. / 未注册账号或密码错误，请先注册。");
+      } else {
+        setError(err?.message || "Login failed");
+      }
     }
   };
 
@@ -147,6 +280,8 @@ function App() {
     try {
       localStorage.removeItem("authToken");
     } catch {}
+    setPage("home");
+    setModalOpen(false);
   };
 
   const handleSubmit = async (e) => {
@@ -220,6 +355,7 @@ function App() {
         } else if (data.type === "error") {
           setError(data.message || "Generation error");
         } else if (data.type === "done") {
+          persistGeneratedScript(fullScript, genre, logline);
           setModalOpen(false);
         }
       };
@@ -281,6 +417,11 @@ function App() {
 
   const handleTranslateToChinese = async () => {
     if (!script) return false;
+    if (!authToken) {
+      setError("Please log in or register first to translate and download Chinese PDF.");
+      setPage("login");
+      return false;
+    }
     setError("");
     setScriptZh("");
     setProgress({ episode: 0, total: 0, phase: "translating" });
@@ -381,6 +522,7 @@ function App() {
         setScriptZh(fullScriptZhLocal);
       }
 
+      updateActiveScriptChinese(fullScriptZhLocal);
       return !!fullScriptZhLocal.trim();
     } catch (err) {
       console.error(err);
@@ -393,6 +535,11 @@ function App() {
   };
 
   const handleDownloadPdfZh = async () => {
+    if (!authToken) {
+      setError("Please log in or register first to download Chinese PDF.");
+      setPage("login");
+      return;
+    }
     setError("");
     try {
       if (!scriptZh) {
@@ -424,26 +571,299 @@ function App() {
     <div className="page">
       <header className="header">
         <h1 className="title">VERTICAL INFINITE · 垂直剧本工厂</h1>
+        <p className="title-sub">Script Generator · 剧本生成器</p>
       </header>
 
-      <section className="script-output" style={{ maxWidth: 520, marginTop: 0 }}>
-        <h2 style={{ marginTop: 0 }}>Account / 账号</h2>
+      <div
+        style={{
+          display: "flex",
+          gap: "0.5rem",
+          marginBottom: "1rem",
+          flexWrap: "wrap",
+          justifyContent: "center",
+        }}
+      >
+        <button
+          type="button"
+          className={page === "home" ? "btn btn-primary" : "btn btn-secondary"}
+          onClick={() => setPage("home")}
+          style={{ borderRadius: 6 }}
+        >
+          Home / Landing
+        </button>
+        <button
+          type="button"
+          className={page === "generate" ? "btn btn-primary" : "btn btn-secondary"}
+          onClick={() => {
+            if (!authToken) {
+              setError("Please log in or register to generate a script.");
+              setPage("login");
+              return;
+            }
+            setPage("generate");
+            setModalOpen(true);
+          }}
+          style={{ borderRadius: 6 }}
+        >
+          Generate
+        </button>
+        <button
+          type="button"
+          className={page === "pricing" ? "btn btn-primary" : "btn btn-secondary"}
+          onClick={() => setPage("pricing")}
+          style={{ borderRadius: 6 }}
+        >
+          Pricing
+        </button>
+        <button
+          type="button"
+          className={page === "login" ? "btn btn-primary" : "btn btn-secondary"}
+          onClick={() => setPage("login")}
+          style={{ borderRadius: 6 }}
+        >
+          Login / Dashboard
+        </button>
+        <button
+          type="button"
+          className={page === "scripts" ? "btn btn-primary" : "btn btn-secondary"}
+          onClick={() => {
+            if (!authToken) {
+              setError("Please log in or register first.");
+              setPage("login");
+              return;
+            }
+            setPage("scripts");
+          }}
+          style={{ borderRadius: 6 }}
+        >
+          My Scripts
+        </button>
+      </div>
 
-        {authToken ? (
-          <div>
-            <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
-              Logged in. You can generate scripts.
-            </p>
-            <button type="button" className="btn btn-secondary" onClick={handleLogout}>
-              Log out
+      {page === "home" && (
+        <section className="script-output page-panel page-panel-home" style={{ maxWidth: 720 }}>
+          <div
+            style={{
+              textAlign: "center",
+              padding: "0.75rem 0",
+              fontWeight: 800,
+              fontSize: "1.6rem",
+              lineHeight: 1.25,
+            }}
+          >
+            <div style={{ color: "var(--blood-pale)" }}>
+              GENERATE A FULL PRODUCTION-READY 60 EPISODE VERTICAL SCRIPT IN UNDER 10 MINUTES
+            </div>
+            <div style={{ marginTop: "0.5rem", opacity: 0.95 }}>
+              在不到 10 分钟内生成完整、可投入制作的 60 集垂直剧本
+            </div>
+          </div>
+          <div style={{ display: "flex", justifyContent: "center", marginTop: "0.75rem" }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                if (!authToken) {
+                  setError("Please log in or register to generate a script.");
+                  setPage("login");
+                  return;
+                }
+                setPage("generate");
+                setModalOpen(true);
+              }}
+            >
+              Get Started / 开始
             </button>
           </div>
-        ) : (
-          <div>
+        </section>
+      )}
+
+      {page === "pricing" && (
+        <section className="script-output pricing-panel" style={{ maxWidth: 980 }}>
+          <h2 className="pricing-title">PRICING / 定价</h2>
+          <p
+            className="script-output-hint pricing-hint"
+            style={{ marginTop: "-0.25rem" }}
+          >
+            Choose a plan. All plans include full 60-episode vertical script generation. / 选择一个方案。所有方案均包含完整60集垂直剧本生成。
+          </p>
+          <div className="pricing-grid">
+            <article className="pricing-card">
+              <h3 className="pricing-name">Free / 免费</h3>
+              <p className="pricing-rate">
+                $30 <span>per script generation (pay as you go) / 每次剧本生成（按需付费）</span>
+              </p>
+              <ul className="pricing-features">
+                <li>1 free generation / 1次免费生成</li>
+                <li>30 dollars per script generation / 每次剧本生成 30 美元</li>
+                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+              </ul>
+            </article>
+
+            <article className="pricing-card">
+              <h3 className="pricing-name">Starter / 入门</h3>
+              <p className="pricing-rate">
+                $99/mo <span>or $1,000/year / 或 $1,000/年</span>
+              </p>
+              <ul className="pricing-features">
+                <li>$20 per script generation / 每次剧本生成 $20</li>
+                <li>3 free monthly generations / 每月3次免费生成</li>
+                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+              </ul>
+            </article>
+
+            <article className="pricing-card">
+              <h3 className="pricing-name">Professional / 专业</h3>
+              <p className="pricing-rate">
+                $499/mo <span>or $5,000/year / 或 $5,000/年</span>
+              </p>
+              <ul className="pricing-features">
+                <li>$12 per script generation / 每次剧本生成 $12</li>
+                <li>6 free monthly generations / 每月6次免费生成</li>
+                <li>
+                  Access to high-performing “Science Fiction” and “Fantasy” genres / 可使用高表现的“科幻”和“奇幻”题材
+                </li>
+                <li>English and Chinese script support / 支持英文与简体中文剧本</li>
+                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+              </ul>
+            </article>
+
+            <article className="pricing-card">
+              <h3 className="pricing-name">Business / 商务</h3>
+              <p className="pricing-rate">
+                $999/mo <span>or $10,000/year / 或 $10,000/年</span>
+              </p>
+              <ul className="pricing-features">
+                <li>$5 per script generation / 每次剧本生成 $5</li>
+                <li>12 free monthly generations / 每月12次免费生成</li>
+                <li>Priority support / 优先支持</li>
+                <li>
+                  Access to high-performing “Science Fiction”, “Fantasy”, “Superhero”, and “Horror” genres / 可使用高表现的“科幻”、“奇幻”、“超级英雄”和“恐怖”题材
+                </li>
+                <li>English and Chinese script support / 支持英文与简体中文剧本</li>
+                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+      )}
+
+      {page === "scripts" && (
+        <section className="script-output" style={{ maxWidth: 720 }}>
+          <h2 style={{ marginTop: 0 }}>My Scripts</h2>
+          {!authToken ? (
+            <p style={{ opacity: 0.9 }}>
+              Please log in to access your saved scripts.
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ marginLeft: "0.75rem" }}
+                onClick={() => setPage("login")}
+              >
+                Go to Login
+              </button>
+            </p>
+          ) : myScripts.length === 0 ? (
+            <p style={{ opacity: 0.9 }}>No scripts saved yet. Generate your first one.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              {myScripts.map((it) => {
+                const created = new Date(it.createdAt);
+                const isActive = it.id === activeScriptId;
+                return (
+                  <div key={it.id} style={{ border: "1px solid var(--steel-light)", borderRadius: 8, padding: "0.75rem", background: "rgba(26,26,29,0.35)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+                      <div>
+                        <div style={{ fontWeight: 700 }}>{it.title || "Generated Script"}</div>
+                        <div style={{ opacity: 0.95, fontSize: "0.9rem", marginTop: "0.1rem" }}>
+                          Genre / 类型: {it.genre || "N/A"}
+                        </div>
+                        <div style={{ opacity: 0.85, fontSize: "0.85rem", marginTop: "0.1rem" }}>
+                          Date / 生成时间: {created.toLocaleString()}
+                        </div>
+                        {it.summary ? (
+                          <div style={{ opacity: 0.88, fontSize: "0.85rem", marginTop: "0.35rem", maxWidth: 560 }}>
+                            Summary / 摘要: {it.summary}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div style={{ opacity: isActive ? 1 : 0.75 }}>{it.chineseText ? "EN + ZH" : "EN only"}</div>
+                    </div>
+                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
+                      <button type="button" className="btn btn-secondary" onClick={() => loadScriptItem(it)}>
+                        Load
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={async () => {
+                          try {
+                            setError("");
+                            setDownloading("en");
+                            const pdfBytes = await buildScreenplayPdfBytes(it.englishText, "en");
+                            triggerPdfDownload(pdfBytes, "vertical_script_en.pdf");
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : "Download failed");
+                          } finally {
+                            setDownloading(null);
+                          }
+                        }}
+                        disabled={downloading !== null}
+                      >
+                        Download EN PDF
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={!it.chineseText || downloading !== null}
+                        onClick={async () => {
+                          try {
+                            setError("");
+                            setDownloading("zh");
+                            const pdfBytes = await buildScreenplayPdfBytes(it.chineseText, "zh");
+                            triggerPdfDownload(pdfBytes, "vertical_script_zh.pdf");
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : "Download failed");
+                          } finally {
+                            setDownloading(null);
+                          }
+                        }}
+                      >
+                        Download ZH PDF
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
+      {page === "login" && (
+        <section className="script-output page-panel page-panel-login" style={{ maxWidth: 600, marginTop: 0 }}>
+          <div className="auth-card-inner">
+            <p className="auth-need-login">
+              You need to login/register to start generating scripts. / 为开始生成剧本，你需要先登录/注册。
+            </p>
+            <h2 style={{ marginTop: 0 }}>Account / 账号</h2>
+
+            {authToken ? (
+              <div>
+                <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
+                  Logged in. You can generate scripts. / 已登录。你可以开始生成剧本。
+                </p>
+                <button type="button" className="btn btn-secondary" onClick={handleLogout}>
+                  Log out / 退出
+                </button>
+              </div>
+            ) : (
+              <div>
             {authMode === "register" && (
-              <form onSubmit={handleRegister}>
+              <>
+              <form onSubmit={handleRegister} className="auth-form">
                 <label className="field">
-                  <span>Email</span>
+                  <span>Email / 邮箱</span>
                   <input
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
@@ -452,33 +872,62 @@ function App() {
                   />
                 </label>
                 <label className="field">
-                  <span>Password</span>
+                  <span>Password / 密码</span>
                   <input
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
-                    type="password"
+                    type="text"
                     required
                     minLength={8}
                   />
                 </label>
-                <button type="submit" className="btn btn-primary" disabled={!authEmail || !authPassword}>
+                <label className="field">
+                  <span>Confirm Password / 确认密码</span>
+                  <input
+                    value={authConfirmPassword}
+                    onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                    type="text"
+                    required
+                    minLength={8}
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={!authEmail || !authPassword || !authConfirmPassword}
+                >
                   Register / 注册
                 </button>
                 {authDevCode && (
                   <p style={{ marginTop: "0.75rem", opacity: 0.85, fontSize: "0.85rem" }}>
-                    Dev code (only if SMTP is not configured): <b>{authDevCode}</b>
+                    Dev code (only if SMTP is not configured) / 开发者验证码（仅当 SMTP 未配置时）: <b>{authDevCode}</b>
                   </p>
                 )}
               </form>
+              <div className="auth-toggle">
+                <span className="auth-toggle-text">Already have an account? Log in / 已有账号？登录</span>
+                <button
+                  type="button"
+                  className="btn btn-secondary auth-toggle-btn"
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthCode("");
+                    setAuthConfirmPassword("");
+                  }}
+                >
+                  Log in / 登录
+                </button>
+              </div>
+              </>
             )}
 
             {authMode === "confirm" && (
-              <form onSubmit={handleConfirmEmail}>
+              <form onSubmit={handleConfirmEmail} className="auth-form">
                 <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
-                  We sent a confirmation code to <b>{authEmail}</b>. Enter it below to verify.
+                  We sent a confirmation code to <b>{authEmail}</b>. Enter it below to verify. / 我们已向 <b>{authEmail}</b> 发送确认码。请在下方输入以完成验证。
                 </p>
                 <label className="field">
-                  <span>Confirmation code</span>
+                  <span>Confirmation code / 确认码</span>
                   <input
                     value={authCode}
                     onChange={(e) => setAuthCode(e.target.value)}
@@ -492,7 +941,7 @@ function App() {
                 </button>
                 {authDevCode && (
                   <p style={{ marginTop: "0.75rem", opacity: 0.85, fontSize: "0.85rem" }}>
-                    Dev code: <b>{authDevCode}</b>
+                    Dev code / 开发者验证码: <b>{authDevCode}</b>
                   </p>
                 )}
                 <button
@@ -501,18 +950,19 @@ function App() {
                   onClick={() => {
                     setAuthMode("register");
                     setAuthCode("");
+                    setAuthConfirmPassword("");
                   }}
-                  style={{ marginLeft: "0.5rem" }}
+                  style={{ marginTop: "0.75rem" }}
                 >
-                  Back
+                  Back / 返回
                 </button>
               </form>
             )}
 
             {authMode === "login" && (
-              <form onSubmit={handleLogin}>
+              <form onSubmit={handleLogin} className="auth-form">
                 <label className="field">
-                  <span>Email</span>
+                  <span>Email / 邮箱</span>
                   <input
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
@@ -521,7 +971,7 @@ function App() {
                   />
                 </label>
                 <label className="field">
-                  <span>Password</span>
+                  <span>Password / 密码</span>
                   <input
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
@@ -533,32 +983,46 @@ function App() {
                 <button type="submit" className="btn btn-primary" disabled={!authEmail || !authPassword}>
                   Log in / 登录
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    setAuthMode("register");
-                    setAuthCode("");
-                  }}
-                  style={{ marginLeft: "0.5rem" }}
-                >
-                  New account
-                </button>
+                <div className="auth-toggle">
+                  <span className="auth-toggle-text">New here? Register / 新用户？注册</span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary auth-toggle-btn"
+                    onClick={() => {
+                      setAuthMode("register");
+                      setAuthCode("");
+                      setAuthConfirmPassword("");
+                    }}
+                  >
+                    Register / 注册
+                  </button>
+                </div>
               </form>
             )}
           </div>
-        )}
-      </section>
+            )}
+          </div>
+        </section>
+      )}
 
-      <button
-        type="button"
-        className="btn-open"
-        onClick={() => setModalOpen(true)}
-      >
-        Generate script / 生成剧本
-      </button>
+      {page === "generate" && (
+        <button
+          type="button"
+          className="btn-open"
+          onClick={() => {
+            if (!authToken) {
+              setError("Please log in or register to generate a script.");
+              setPage("login");
+              return;
+            }
+            setModalOpen(true);
+          }}
+        >
+          Generate script / 生成剧本
+        </button>
+      )}
 
-      {script && (
+      {page === "generate" && script && (
         <section className="script-output">
           <h2>Generated script / 已生成剧本</h2>
           <div className="script-actions">
@@ -625,7 +1089,7 @@ function App() {
         </div>
       </footer>
 
-      {modalOpen && (
+      {page === "generate" && modalOpen && (
         <div className="modal-backdrop" onClick={() => !loading && setModalOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2 className="modal-title">New script / 新剧本</h2>
