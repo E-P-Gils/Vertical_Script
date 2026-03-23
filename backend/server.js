@@ -911,6 +911,53 @@ function fixMergedWordsEpisodeText(text) {
     .join("\n");
 }
 
+function hasMergedWordIssues(text) {
+  if (!text || typeof text !== "string") return false;
+  const t = text;
+
+  // 1) Disallowed exact glued tokens we have seen.
+  const gluedTokens = [
+    "enteringthe",
+    "nearbythe",
+    "sharplyand",
+    "closeragainabout",
+    "closeragain",
+    "againabout",
+    "togetherthen",
+    "lucasthis",
+    "stiffensher",
+    "herselfconsciously",
+    "someoneelse",
+    "withoutwarning",
+    "frombehind",
+    "elsein",
+    "dresseda",
+    "toithis",
+    "forithis",
+  ];
+  for (const tok of gluedTokens) {
+    const re = new RegExp(`\\b${tok}\\b`, "i");
+    if (re.test(t)) return true;
+  }
+
+  // 2) Generic "missing space" patterns that should never occur in English prose.
+  //    - camel-glue (lowercase immediately followed by Uppercase)
+  if (/[a-z][A-Z]/.test(t)) return true;
+  //    - lowercase glued to a common lowercase connector at the end
+  //      (e.g. "enteringthe", "nearbythe", "closeragainabout")
+  if (
+    /\b[a-z]{3,}(?:the|and|but|for|then|when|with|from|into|onto|upon|about|again|there|here|after|before|because|without)\b/i.test(
+      t
+    )
+  )
+    return true;
+  //    - punctuation immediately followed by a letter (no space)
+  if (/[.!?][A-Za-z]/.test(t)) return true;
+  if (/[,:;][A-Za-z]/.test(t)) return true;
+
+  return false;
+}
+
 function finalizeEpisodeText(text, episodeNumber) {
   if (!text || typeof text !== "string") return text;
   let t = stripEpisodeStructuralNoise(text, episodeNumber);
@@ -1625,6 +1672,38 @@ app.post("/generate", async (req, res) => {
             : `[Episode ${ep} — no content]`;
 
         episodeText = finalizeEpisodeText(episodeText, ep);
+
+        // Hard validation: enforce zero merged-words for credibility.
+        // Retry once if any merged-word patterns remain after post-processing.
+        if (hasMergedWordIssues(episodeText)) {
+          try {
+            const spacingRetryContent =
+              userContent +
+              "\n\nCRITICAL FORMAT VALIDATION (do not fail this):\n" +
+              "- The output MUST contain NO merged/glued words.\n" +
+              "- Every English word must be separated by exactly ONE space.\n" +
+              "- Do NOT remove spaces after punctuation (e.g. \".Next\" is invalid; must be \". Next\").\n" +
+              "- Do NOT glue a character cue to dialogue (e.g. \"LUCAS(speaking)\" or \"LUCASHello\" is invalid).\n" +
+              "- Before returning, scan the output for any pattern where a word is immediately followed by another word with no space.\n";
+            const retry = await openai.chat.completions.create({
+              model: FINETUNED_MODEL,
+              messages: [
+                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                { role: "user", content: spacingRetryContent },
+              ],
+              max_tokens: 2048,
+              temperature: 0.3,
+              frequency_penalty: 1.0,
+              presence_penalty: 0.4,
+            });
+            const retryRaw = retry.choices?.[0]?.message?.content;
+            if (typeof retryRaw === "string" && retryRaw.trim()) {
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+            }
+          } catch (sErr) {
+            console.error(`Merged-word spacing retry failed for episode ${ep}:`, sErr);
+          }
+        }
 
         // Quality gate: prevent "synonym vomit" / word-list runs.
         if (looksLikeSynonymVomit(episodeText)) {

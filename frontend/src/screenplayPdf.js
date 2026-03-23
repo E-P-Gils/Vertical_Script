@@ -83,13 +83,44 @@ export function prepareEnglishScriptLikePdfInput(script) {
  */
 function repairStuckWordsLine(line) {
   let s = line;
-  // dateIsabelle, hisName — lowercase run then TitleCase
+  // Normalize a few common glued-token failures (word-boundary safe).
+  // These come directly from your examples: enteringthe, Lucasthis, histhere's, etc.
+  const gluedReplacements = [
+    [/\benteringthe\b/gi, "entering the"],
+    [/\bnearbythe\b/gi, "nearby the"],
+    [/\bsharplyand\b/gi, "sharply and"],
+    [/\bcloseragainabout\b/gi, "closer again about"],
+    [/\bcloseragain\b/gi, "closer again"],
+    [/\bagainabout\b/gi, "again about"],
+    [/\btogetherthen\b/gi, "together then"],
+    [/\bLucasthis\b/g, "Lucas this"],
+    [/\bstiffensher\b/gi, "stiffens her"],
+    [/\bherselfconsciously\b/gi, "herself-consciously"],
+    [/\bsomeoneelse\b/gi, "someone else"],
+    [/\bwithoutwarning\b/gi, "without warning"],
+    [/\bfrombehind\b/gi, "from behind"],
+    [/\belsein\b/gi, "else in"],
+    [/\bdresseda\b/gi, "dressed a"],
+    [/\btoithis\b/gi, "to it his"],
+    [/\bforithis\b/gi, "for it his"],
+    [/\bhisthere's\b/gi, "his there's"],
+    [/\bwithout\s+warning\b/gi, "without warning"],
+  ];
+  for (const [re, rep] of gluedReplacements) s = s.replace(re, rep);
+
+  // dateIsabelle, other lower->TitleCase glitches.
   s = s.replace(/([a-z])([A-Z][a-z]+)\b/g, "$1 $2");
-  // SHOUTYTOKENSTUCK — only when both halves are ASCII caps
+
+  // SHOUTYTOKENSTUCK — only when both halves are ASCII caps.
   s = s.replace(
     /\b([A-Z]{2,})(ABOUT|TOGETHER|THEN|THERE|THE|THAT|THIS|WHAT|WHEN|WITH|FROM|INTO|ONTO|OVER|UNDER|AFTER|BEFORE|INSIDE|OUTSIDE|AROUND|AGAIN|ALSO|EVEN|ONLY|JUST|LEAN|KISS|BACK|WELL|SUDDENLY)\b/g,
     "$1 $2"
   );
+
+  // Punctuation spacing for English-only output.
+  s = s.replace(/([.!?])([A-Za-z])/g, "$1 $2");
+  s = s.replace(/([,;:])([A-Za-z])/g, "$1 $2");
+  s = s.replace(/ {2,}/g, " ");
   return s;
 }
 
