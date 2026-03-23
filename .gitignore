@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 *.env
+# Render / deploy-specific env files
+render.env
+render.env.*
 
 # OpenAI/translation key files you generate locally
 verticalscript-*.json

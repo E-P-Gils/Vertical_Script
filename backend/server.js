@@ -14,6 +14,10 @@ import {
   updateCharacterNameRegistryFromEpisode,
   normalizeEpisodeCharacterNames,
 } from "./characterNameRegistry.js";
+import { fixMergedWordIssuesPhase2 } from "./mergedWordsFix.js";
+import { auditMergedWords } from "./mergedWordsAudit.js";
+import { initDb } from "./db.js";
+import { loginUser, registerUser, requireAuth, verifyEmailCode } from "./auth.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, "..");
@@ -1104,54 +1108,20 @@ function fixMergedWordsEpisodeText(text) {
 
 function hasMergedWordIssues(text) {
   if (!text || typeof text !== "string") return false;
-  const t = text;
-
-  // 1) Disallowed exact glued tokens we have seen.
-  const gluedTokens = [
-    "enteringthe",
-    "nearbythe",
-    "sharplyand",
-    "closeragainabout",
-    "closeragain",
-    "againabout",
-    "togetherthen",
-    "lucasthis",
-    "stiffensher",
-    "herselfconsciously",
-    "someoneelse",
-    "withoutwarning",
-    "frombehind",
-    "elsein",
-    "dresseda",
-    "toithis",
-    "forithis",
-  ];
-  for (const tok of gluedTokens) {
-    const re = new RegExp(`\\b${tok}\\b`, "i");
-    if (re.test(t)) return true;
-  }
-
-  // 2) Generic "missing space" patterns that should never occur in English prose.
-  //    - camel-glue (lowercase immediately followed by Uppercase)
-  if (/[a-z][A-Z]/.test(t)) return true;
-  //    - lowercase glued to a common lowercase connector at the end
-  //      (e.g. "enteringthe", "nearbythe", "closeragainabout")
-  if (
-    /\b[a-z]{3,}(?:the|and|but|for|then|when|with|from|into|onto|upon|about|again|there|here|after|before|because|without)\b/i.test(
-      t
-    )
-  )
-    return true;
-  //    - punctuation immediately followed by a letter (no space)
-  if (/[.!?][A-Za-z]/.test(t)) return true;
-  if (/[,:;][A-Za-z]/.test(t)) return true;
-
-  return false;
+  const report = auditMergedWords(text);
+  // Phase 3 quality gate:
+  // if more than 3 merged words are detected, we consider it a failure.
+  return report.totals.mergedTotal > 3;
 }
 
 function finalizeEpisodeText(text, episodeNumber) {
   if (!text || typeof text !== "string") return text;
-  let t = stripEpisodeStructuralNoise(text, episodeNumber);
+  // Phase 2 sequential normalisation:
+  // 1) Fix END EPISODE newline swallow (can break line-based episode parsing)
+  // 2) Fix lowercase→uppercase boundary merges (targeted spacing)
+  // 3) Strip structural noise and apply other spacing/line-break repairs.
+  let t = fixMergedWordIssuesPhase2(text);
+  t = stripEpisodeStructuralNoise(t, episodeNumber);
   t = fixMergedWordsEpisodeText(t);
   return normalizeEpisodeScriptFormatting(t);
 }
@@ -1768,7 +1738,18 @@ function pickReplacementNameForVictor() {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-app.post("/generate", async (req, res) => {
+// ---------------------------------------------------------------------------
+// Auth (optional) - bcrypt + Postgres + JWT bearer
+// Enable by setting:
+// - AUTH_ENABLED=true
+// - JWT_SECRET=... (required)
+// - Postgres vars (DATABASE_URL or PGHOST+PGUSER+PGDATABASE(+PGPASSWORD))
+// ---------------------------------------------------------------------------
+app.post("/auth/register", (req, res) => registerUser(req, res));
+app.post("/auth/login", (req, res) => loginUser(req, res));
+app.post("/auth/confirm-email", (req, res) => verifyEmailCode(req, res));
+
+app.post("/generate", requireAuth, async (req, res) => {
   const body = req.body || {};
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
   let logline = safeStr(body.logline).slice(0, 1500);
@@ -2378,7 +2359,7 @@ function parseEpisodesFromEnglishScript(scriptText) {
   return { totalEpisodes, episodes };
 }
 
-app.post("/translate-to-chinese", async (req, res) => {
+app.post("/translate-to-chinese", requireAuth, async (req, res) => {
   const body = req.body || {};
   const englishText = safeStr(body.text || body.script);
   const parsed = parseEpisodesFromEnglishScript(englishText);
@@ -2488,7 +2469,16 @@ app.get("/summaries/random", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`Using model: ${FINETUNED_MODEL}`);
-});
+const start = async () => {
+  try {
+    await initDb();
+    console.log("Postgres DB initialized.");
+  } catch (e) {
+    console.warn("Postgres init skipped/failed:", e?.message || e);
+  }
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Using model: ${FINETUNED_MODEL}`);
+  });
+};
+start();

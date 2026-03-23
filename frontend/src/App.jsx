@@ -41,10 +41,30 @@ function App() {
   const [downloading, setDownloading] = useState(null);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
+  // Auth (optional; backend enables it via AUTH_ENABLED=true)
+  const [authToken, setAuthToken] = useState(() => {
+    try {
+      return localStorage.getItem("authToken");
+    } catch {
+      return null;
+    }
+  });
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authCode, setAuthCode] = useState("");
+  const [authMode, setAuthMode] = useState("register"); // register | confirm | login
+  const [authDevCode, setAuthDevCode] = useState("");
+
   const wordCount = logline.trim() ? logline.trim().split(/\s+/).length : 0;
   const MIN_WORDS = 25;
   const loglineUnderMin = wordCount > 0 && wordCount < MIN_WORDS;
   const loglineOverLimit = wordCount > 250;
+
+  const authHeaders = authToken
+    ? {
+        Authorization: `Bearer ${authToken}`,
+      }
+    : {};
 
   const handleSuggestRandomSummary = async () => {
     setLoadingSuggestions(true);
@@ -58,6 +78,75 @@ function App() {
     finally {
       setLoadingSuggestions(false);
     }
+  };
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setError("");
+    setAuthDevCode("");
+    try {
+      const r = await fetch(`${API_BASE}/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || "Registration failed");
+      // Server always returns a response even if it couldn’t send the email (dev logs).
+      setAuthDevCode(data?.verification?.devCode || "");
+      setAuthMode("confirm");
+      setAuthCode("");
+      setError("");
+    } catch (err) {
+      setError(err?.message || "Registration failed");
+    }
+  };
+
+  const handleConfirmEmail = async (e) => {
+    e.preventDefault();
+    setError("");
+    try {
+      const r = await fetch(`${API_BASE}/auth/confirm-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail, code: authCode }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || "Confirmation failed");
+      setAuthMode("login");
+      setAuthCode("");
+    } catch (err) {
+      setError(err?.message || "Confirmation failed");
+    }
+  };
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setError("");
+    try {
+      const r = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || "Login failed");
+      if (!data?.token) throw new Error("Login failed: missing token");
+      setAuthToken(data.token);
+      try {
+        localStorage.setItem("authToken", data.token);
+      } catch {}
+      setAuthMode("login");
+    } catch (err) {
+      setError(err?.message || "Login failed");
+    }
+  };
+
+  const handleLogout = () => {
+    setAuthToken(null);
+    try {
+      localStorage.removeItem("authToken");
+    } catch {}
   };
 
   const handleSubmit = async (e) => {
@@ -74,7 +163,10 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/generate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
         body: JSON.stringify({
           genre,
           language: "EN",
@@ -86,6 +178,9 @@ function App() {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        if (res.status === 401 || res.status === 403) {
+          throw new Error("Please register and verify your email, then log in again.");
+        }
         throw new Error(data.error || "Generation failed");
       }
       const reader = res.body.getReader();
@@ -237,11 +332,17 @@ function App() {
 
         const res = await fetch(`${API_BASE}/translate-to-chinese`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders,
+          },
           body: JSON.stringify({ text: chunkText }),
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
+          if (res.status === 401 || res.status === 403) {
+            throw new Error("Please log in again (email must be verified).");
+          }
           throw new Error(data.error || `Translation failed (HTTP ${res.status})`);
         }
 
@@ -324,6 +425,130 @@ function App() {
       <header className="header">
         <h1 className="title">VERTICAL INFINITE · 垂直剧本工厂</h1>
       </header>
+
+      <section className="script-output" style={{ maxWidth: 520, marginTop: 0 }}>
+        <h2 style={{ marginTop: 0 }}>Account / 账号</h2>
+
+        {authToken ? (
+          <div>
+            <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
+              Logged in. You can generate scripts.
+            </p>
+            <button type="button" className="btn btn-secondary" onClick={handleLogout}>
+              Log out
+            </button>
+          </div>
+        ) : (
+          <div>
+            {authMode === "register" && (
+              <form onSubmit={handleRegister}>
+                <label className="field">
+                  <span>Email</span>
+                  <input
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    type="email"
+                    required
+                  />
+                </label>
+                <label className="field">
+                  <span>Password</span>
+                  <input
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    type="password"
+                    required
+                    minLength={8}
+                  />
+                </label>
+                <button type="submit" className="btn btn-primary" disabled={!authEmail || !authPassword}>
+                  Register / 注册
+                </button>
+                {authDevCode && (
+                  <p style={{ marginTop: "0.75rem", opacity: 0.85, fontSize: "0.85rem" }}>
+                    Dev code (only if SMTP is not configured): <b>{authDevCode}</b>
+                  </p>
+                )}
+              </form>
+            )}
+
+            {authMode === "confirm" && (
+              <form onSubmit={handleConfirmEmail}>
+                <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
+                  We sent a confirmation code to <b>{authEmail}</b>. Enter it below to verify.
+                </p>
+                <label className="field">
+                  <span>Confirmation code</span>
+                  <input
+                    value={authCode}
+                    onChange={(e) => setAuthCode(e.target.value)}
+                    type="text"
+                    inputMode="numeric"
+                    required
+                  />
+                </label>
+                <button type="submit" className="btn btn-primary" disabled={!authCode}>
+                  Confirm / 验证
+                </button>
+                {authDevCode && (
+                  <p style={{ marginTop: "0.75rem", opacity: 0.85, fontSize: "0.85rem" }}>
+                    Dev code: <b>{authDevCode}</b>
+                  </p>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setAuthMode("register");
+                    setAuthCode("");
+                  }}
+                  style={{ marginLeft: "0.5rem" }}
+                >
+                  Back
+                </button>
+              </form>
+            )}
+
+            {authMode === "login" && (
+              <form onSubmit={handleLogin}>
+                <label className="field">
+                  <span>Email</span>
+                  <input
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    type="email"
+                    required
+                  />
+                </label>
+                <label className="field">
+                  <span>Password</span>
+                  <input
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    type="password"
+                    required
+                    minLength={8}
+                  />
+                </label>
+                <button type="submit" className="btn btn-primary" disabled={!authEmail || !authPassword}>
+                  Log in / 登录
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setAuthMode("register");
+                    setAuthCode("");
+                  }}
+                  style={{ marginLeft: "0.5rem" }}
+                >
+                  New account
+                </button>
+              </form>
+            )}
+          </div>
+        )}
+      </section>
 
       <button
         type="button"
