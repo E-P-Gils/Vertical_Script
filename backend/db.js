@@ -24,7 +24,8 @@ function buildConnectionConfig() {
         databaseUrl
       );
     }
-    return { connectionString: normalized, ssl: "require" };
+    // pg expects ssl to be boolean or an object. Passing a string can crash in newer pg versions.
+    return { connectionString: normalized, ssl: { rejectUnauthorized: false } };
   }
 
   const host = process.env.PGHOST;
@@ -36,7 +37,7 @@ function buildConnectionConfig() {
   if (!host || !user || !database) return null;
 
   // Many managed Postgres setups require SSL.
-  return { host, port, user, password, database, ssl: "require" };
+  return { host, port, user, password, database, ssl: { rejectUnauthorized: false } };
 }
 
 export function getPool() {
