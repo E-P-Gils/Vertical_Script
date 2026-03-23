@@ -234,7 +234,24 @@ function App() {
       setAuthMode("login");
       setAuthCode("");
     } catch (err) {
-      setError(err?.message || "Confirmation failed");
+      const msg = String(err?.message || "");
+      if (msg.includes("verification code missing/expired")) {
+        setError(
+          "Verification code is missing or expired. Please register again to resend. / 验证码缺失或已过期，请重新注册获取新验证码。"
+        );
+      } else if (msg.includes("verification code expired")) {
+        setError(
+          "Verification code expired. Please register again to resend. / 验证码已过期，请重新注册获取新验证码。"
+        );
+      } else if (msg.includes("invalid verification code")) {
+        setError(
+          "Invalid verification code. Please check and try again. / 验证码无效，请检查后重试。"
+        );
+      } else if (msg.includes("email and code are required")) {
+        setError("Email and code are required. / 需要邮箱和验证码。");
+      } else {
+        setError(msg || "Confirmation failed. / 验证失败。");
+      }
     }
   };
 
@@ -846,6 +863,7 @@ function App() {
             <p className="auth-need-login">
               You need to login/register to start generating scripts. / 为开始生成剧本，你需要先登录/注册。
             </p>
+            {error && <p className="error">{error}</p>}
             <h2 style={{ marginTop: 0 }}>Account / 账号</h2>
 
             {authToken ? (
