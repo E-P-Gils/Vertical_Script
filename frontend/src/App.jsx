@@ -93,6 +93,10 @@ function App() {
     } catch {}
   }, [myScripts]);
 
+  useEffect(() => {
+    if (authToken) setError("");
+  }, [authToken]);
+
   const buildScriptTitle = (summaryText, genreName) => {
     const s = String(summaryText || "").trim();
     if (!s) return genreName ? `${genreName} Script` : "Generated Script";
@@ -253,6 +257,7 @@ function App() {
         localStorage.setItem("authToken", data.token);
       } catch {}
       setAuthMode("login");
+      setError("");
       setPage("generate");
     } catch (err) {
       const msg = String(err?.message || "");
@@ -578,23 +583,15 @@ function App() {
           onClick={() => setPage("home")}
           style={{ borderRadius: 6 }}
         >
-          Home / Landing
+          Home / 首页
         </button>
         <button
           type="button"
           className={page === "generate" ? "btn btn-primary" : "btn btn-secondary"}
-          onClick={() => {
-            if (!authToken) {
-              setError("Please log in or register to generate a script.");
-              setPage("login");
-              return;
-            }
-            setPage("generate");
-            setModalOpen(true);
-          }}
+          onClick={() => setPage("generate")}
           style={{ borderRadius: 6 }}
         >
-          Generate
+          Generate / 生成
         </button>
         <button
           type="button"
@@ -602,7 +599,7 @@ function App() {
           onClick={() => setPage("pricing")}
           style={{ borderRadius: 6 }}
         >
-          Pricing
+          Pricing / 定价
         </button>
         <button
           type="button"
@@ -610,7 +607,7 @@ function App() {
           onClick={() => setPage("login")}
           style={{ borderRadius: 6 }}
         >
-          Login / Dashboard
+          Login / 登录
         </button>
         <button
           type="button"
@@ -625,7 +622,7 @@ function App() {
           }}
           style={{ borderRadius: 6 }}
         >
-          My Scripts
+          My Scripts / 我的剧本
         </button>
       </div>
 
@@ -651,15 +648,7 @@ function App() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => {
-                if (!authToken) {
-                  setError("Please log in or register to generate a script.");
-                  setPage("login");
-                  return;
-                }
-                setPage("generate");
-                setModalOpen(true);
-              }}
+              onClick={() => setPage("generate")}
             >
               Get Started / 开始
             </button>
@@ -739,7 +728,7 @@ function App() {
 
       {page === "scripts" && (
         <section className="script-output" style={{ maxWidth: 720 }}>
-          <h2 style={{ marginTop: 0 }}>My Scripts</h2>
+          <h2 style={{ marginTop: 0 }}>My Scripts / 我的剧本</h2>
           {!authToken ? (
             <p style={{ opacity: 0.9 }}>
               Please log in to access your saved scripts.
@@ -753,7 +742,9 @@ function App() {
               </button>
             </p>
           ) : myScripts.length === 0 ? (
-            <p style={{ opacity: 0.9 }}>No scripts saved yet. Generate your first one.</p>
+            <p style={{ opacity: 0.9 }}>
+              No scripts saved yet. Generate your first one. / 暂无已保存剧本。先生成你的第一份剧本吧。
+            </p>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
               {myScripts.map((it) => {
@@ -832,9 +823,11 @@ function App() {
       {page === "login" && (
         <section className="script-output page-panel page-panel-login" style={{ maxWidth: 600, marginTop: 0 }}>
           <div className="auth-card-inner">
-            <p className="auth-need-login">
-              You need to login/register to start generating scripts. / 为开始生成剧本，你需要先登录/注册。
-            </p>
+            {!authToken && (
+              <p className="auth-need-login">
+                You need to login/register to start generating scripts. / 为开始生成剧本，你需要先登录/注册。
+              </p>
+            )}
             {error && <p className="error">{error}</p>}
             <h2 style={{ marginTop: 0 }}>Account / 账号</h2>
 
@@ -955,20 +948,22 @@ function App() {
       )}
 
       {page === "generate" && (
-        <button
-          type="button"
-          className="btn-open"
-          onClick={() => {
-            if (!authToken) {
-              setError("Please log in or register to generate a script.");
-              setPage("login");
-              return;
-            }
-            setModalOpen(true);
-          }}
-        >
-          Generate script / 生成剧本
-        </button>
+        <div style={{ width: "100%", display: "flex", justifyContent: "center" }}>
+          <button
+            type="button"
+            className="btn-open"
+            onClick={() => {
+              if (!authToken) {
+                setError("Please log in or register to generate a script.");
+                setPage("login");
+                return;
+              }
+              setModalOpen(true);
+            }}
+          >
+            Generate script / 生成剧本
+          </button>
+        </div>
       )}
 
       {page === "generate" && script && (
