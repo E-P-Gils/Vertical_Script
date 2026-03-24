@@ -578,6 +578,22 @@ Given the full script text for ONE episode, write a single concise sentence (15�
 
 Output ONLY the sentence. No bullet points, no extra commentary.`;
 
+const EPISODE_STATE_SYSTEM_PROMPT = `You summarize ONE episode into strict JSON.
+Return ONLY JSON in this exact shape:
+{
+  "location": "last scene location (short phrase)",
+  "ending": "one sentence ending/cliffhanger state",
+  "character_state": "one sentence emotional position of heroine + two male leads"
+}`;
+
+const NARRATIVE_RESET_SYSTEM_PROMPT = `You create a compact narrative reset for long-running serialized scripts.
+Given recap lines and cast names, return ONLY text under 400 tokens with:
+1) Current cast emotional positions
+2) Central conflict status
+3) Unresolved threads (max 6 bullets)
+4) Immediate next-step pressure
+Do not add new plotlines.`;
+
 async function summarizeEpisode({ episodeNumber, text }) {
   const clean = safeStr(text);
   if (!clean) return null;
@@ -606,6 +622,63 @@ async function summarizeEpisode({ episodeNumber, text }) {
       ? rawContent.trim()
       : null;
   return recap;
+}
+
+async function summarizeEpisodeState({ episodeNumber, text }) {
+  const clean = safeStr(text);
+  if (!clean) return null;
+  const completion = await openai.chat.completions.create({
+    model: RECAP_MODEL,
+    messages: [
+      { role: "system", content: EPISODE_STATE_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `Episode ${episodeNumber} script:\n\n${clean.slice(0, 7000)}`,
+      },
+    ],
+    max_tokens: 180,
+    temperature: 0.2,
+  });
+  const raw = safeStr(completion.choices?.[0]?.message?.content);
+  const jsonMatch = raw.match(/\{[\s\S]*\}$/);
+  if (!jsonMatch) return null;
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      episode: episodeNumber,
+      location: safeStr(parsed.location).slice(0, 120),
+      ending: safeStr(parsed.ending).slice(0, 260),
+      character_state: safeStr(parsed.character_state).slice(0, 320),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function buildFullNarrativeReset(episodeRecaps, names, logline, episodeNumber) {
+  const recaps = Array.isArray(episodeRecaps)
+    ? episodeRecaps
+        .filter((r) => typeof r.episode === "number" && r.episode < episodeNumber)
+        .slice(-16)
+    : [];
+  if (!recaps.length) return "";
+  const recapText = recaps.map((r) => `Ep ${r.episode}: ${safeStr(r.recap)}`).join("\n");
+  const completion = await openai.chat.completions.create({
+    model: RECAP_MODEL,
+    messages: [
+      { role: "system", content: NARRATIVE_RESET_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content:
+          `LOGLINE:\n${safeStr(logline).slice(0, 700)}\n\n` +
+          `CAST:\nHeroine=${safeStr(names?.heroine)}\nMale1=${safeStr(names?.coldCeo)}\nMale2=${safeStr(names?.warmFriend)}\n\n` +
+          `RECAPS:\n${recapText}`,
+      },
+    ],
+    max_tokens: 420,
+    temperature: 0.25,
+  });
+  return safeStr(completion.choices?.[0]?.message?.content).slice(0, 2600);
 }
 
 function formatRecapContext(recaps, episodeNumber) {
@@ -1856,6 +1929,8 @@ function buildEpisodePromptText({
   episodeSummaries,
   recaps,
   previousEpisodeScripts = [],
+  previousEpisodeStates = [],
+  narrativeResetText = "",
   trimContext = ENABLE_TRIMMED_CONTEXT,
 }) {
   const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
@@ -1940,14 +2015,17 @@ function buildEpisodePromptText({
   }
 
   const blueprintContext = formatBlueprintContext(blueprint, ep);
-  const recapContext = trimContext
+  const recapContext = narrativeResetText
+    ? `NARRATIVE RESET CHECKPOINT:\n${narrativeResetText}`
+    : trimContext
     ? (() => {
         if (!Array.isArray(recaps) || !recaps.length) return "";
         const prev = recaps
           .filter((r) => typeof r.episode === "number" && r.episode < ep)
-          .slice(-2);
+          .slice(ep < 20 ? -3 : ep < 40 ? -2 : -1);
         if (!prev.length) return "";
-        const compact = prev.map((r) => `Ep ${r.episode}: ${safeStr(r.recap).slice(0, 220)}`);
+        const maxChars = ep < 20 ? 220 : ep < 40 ? 160 : 120;
+        const compact = prev.map((r) => `Ep ${r.episode}: ${safeStr(r.recap).slice(0, maxChars)}`);
         return ["COMPACT STORY STATE (recent recaps):", ...compact].join("\n");
       })()
     : formatRecapContext(recaps, ep);
@@ -1979,31 +2057,24 @@ function buildEpisodePromptText({
   // Dynamic programming / memo: pass the actual script of the previous episode(s)
   // so the model continues from the exact final line (critical for paid cliffhangers),
   // BUT do not allow the model to restage the exact same scene.
-  if (ep > 1 && Array.isArray(previousEpisodeScripts) && previousEpisodeScripts.length > 0) {
-    const toInclude = previousEpisodeScripts.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
-    const label = toInclude.length === 1 ? "PREVIOUS EPISODE" : "PREVIOUS EPISODES";
+  if (ep > 1 && Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
+    const toInclude = previousEpisodeStates.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
+    const label = toInclude.length === 1 ? "PREVIOUS EPISODE STATE" : "PREVIOUS EPISODE STATES";
     lines.push("");
     lines.push("[[DO_NOT_OUTPUT_INTERNAL_CONTEXT]]");
     lines.push(
-      `CONTINUATION REQUIREMENT (critical for this format): The audience has just paid to see what happens next. Below is the exact end of the ${label}. You MUST continue the story immediately from the next moment—same scene, same characters, same emotional beat. Do not time-skip, change location, or restart; pick up from the last line or action and continue.`
+      `CONTINUATION REQUIREMENT (critical for this format): Below is structured state from the ${label}. Continue immediately from this state with no timeline reset.`
     );
-    lines.push(
-      `DO NOT restage the same key moments from the previous episode (no replaying the same kiss, shove, or confrontation). If you need to reference them, compress them into one short recap line, then move the story FORWARD with new events and consequences.`
-    );
-    lines.push(
-      `Do NOT copy-paste the previous episode’s closing paragraphs, identical POV blocks, or the same crowd reactions—advance to the next story beat with new material.`
-    );
+    lines.push(`Do NOT restage previous beats; move story FORWARD with new consequences.`);
     lines.push("");
     lines.push("[[INTERNAL_CONTEXT_BEGIN]]");
-    const TAIL_LINES = trimContext ? CONTEXT_TAIL_LINES : 30; // token-budget trimming toggle
-    toInclude.forEach((script, i) => {
+    toInclude.forEach((state, i) => {
       const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
-      const full = safeStr(script).trim();
-      const split = full.split(/\r?\n/);
-      const tail = split.slice(-TAIL_LINES).join("\n");
-      lines.push(`[[PREVIOUS_EPISODE_TAIL ${which}]]`);
-      lines.push(tail);
-      lines.push(`[[END_PREVIOUS_EPISODE_TAIL ${which}]]`);
+      lines.push(`[[PREVIOUS_EPISODE_STATE ${which}]]`);
+      lines.push(`location: ${safeStr(state.location)}`);
+      lines.push(`ending: ${safeStr(state.ending)}`);
+      lines.push(`character_state: ${safeStr(state.character_state)}`);
+      lines.push(`[[END_PREVIOUS_EPISODE_STATE ${which}]]`);
       lines.push("");
     });
     lines.push("[[INTERNAL_CONTEXT_END]]");
@@ -2078,7 +2149,7 @@ function buildEpisodePromptText({
         (blueprintContext
           ? `Follow the season outline and THIS EPISODE'S PLAN above. `
           : "") +
-        (ep > 1 && previousEpisodeScripts.length > 0
+        (ep > 1 && previousEpisodeStates.length > 0
           ? `You have been given the exact previous episode text above—continue from its last line. `
           : "") +
         `Treat this as the finale and bring the main plot lines and central relationships to a clear resolution. ` +
@@ -2098,7 +2169,7 @@ function buildEpisodePromptText({
           (blueprintContext
             ? `Follow the season outline and THIS EPISODE'S PLAN above. `
             : "") +
-          (ep > 1 && previousEpisodeScripts.length > 0
+          (ep > 1 && previousEpisodeStates.length > 0
             ? `You have been given the exact previous episode text above—continue from its last line. `
             : "") +
           `Treat this as part of the finale arc, and begin RESOLVING major plot lines and emotional arcs rather than opening new ones. ` +
@@ -2114,7 +2185,7 @@ function buildEpisodePromptText({
           (blueprintContext
             ? `Follow the season outline and THIS EPISODE'S PLAN above. `
             : "") +
-          (ep > 1 && previousEpisodeScripts.length > 0
+          (ep > 1 && previousEpisodeStates.length > 0
             ? `You have been given the exact previous episode text above—continue from its last line. `
             : "") +
           `Treat this as the ${phase}, and continue the same plot line. ` +
@@ -2367,6 +2438,8 @@ app.post("/generate", requireAuth, async (req, res) => {
     }
 
     const episodeScriptsMemo = [];
+    const episodeStateMemo = [];
+    const narrativeResetMemo = new Map();
     const victorAllowed =
       includesWord(logline, "Victor") ||
       includesWord(seriesNames?.heroine, "Victor") ||
@@ -2377,6 +2450,26 @@ app.post("/generate", requireAuth, async (req, res) => {
       sendStreamLine(res, { type: "progress", episode: ep, total: episodeCount });
 
       try {
+        let narrativeResetText = "";
+        if ((ep === 20 || ep === 40) && !narrativeResetMemo.has(ep)) {
+          try {
+            const reset = await buildFullNarrativeReset(
+              episodeRecaps,
+              seriesNames,
+              logline,
+              ep
+            );
+            if (reset) {
+              narrativeResetMemo.set(ep, reset);
+              sendStreamLine(res, { type: "narrative_reset", episode: ep, ok: true });
+            }
+          } catch (resetErr) {
+            console.error(`Narrative reset generation failed for episode ${ep}:`, resetErr);
+            sendStreamLine(res, { type: "narrative_reset", episode: ep, ok: false });
+          }
+        }
+        if (narrativeResetMemo.has(ep)) narrativeResetText = narrativeResetMemo.get(ep) || "";
+
         const userContent = buildEpisodePromptText({
           language: body.language || "EN",
           genre,
@@ -2389,6 +2482,8 @@ app.post("/generate", requireAuth, async (req, res) => {
           episodeSummaries,
           recaps: episodeRecaps,
           previousEpisodeScripts: episodeScriptsMemo,
+          previousEpisodeStates: episodeStateMemo,
+          narrativeResetText,
           trimContext: ENABLE_TRIMMED_CONTEXT,
         });
         sendStreamLine(res, {
@@ -2943,6 +3038,23 @@ app.post("/generate", requireAuth, async (req, res) => {
           }
         } catch (recErr) {
           console.error(`Recap generation failed for episode ${ep}:`, recErr);
+        }
+
+        // Structured state summary for context-windowed chaining.
+        try {
+          const state = await summarizeEpisodeState({
+            episodeNumber: ep,
+            text: episodeText,
+          });
+          if (state) {
+            episodeStateMemo.push(state);
+            sendStreamLine(res, { type: "episode_state", episode: ep, ok: true });
+          } else {
+            sendStreamLine(res, { type: "episode_state", episode: ep, ok: false });
+          }
+        } catch (stateErr) {
+          console.error(`Episode state summary failed for episode ${ep}:`, stateErr);
+          sendStreamLine(res, { type: "episode_state", episode: ep, ok: false });
         }
 
         episodeScriptsMemo.push(episodeText);
