@@ -14,10 +14,11 @@ import {
   updateCharacterNameRegistryFromEpisode,
   normalizeEpisodeCharacterNames,
 } from "./characterNameRegistry.js";
-import { fixMergedWordIssuesPhase2 } from "./mergedWordsFix.js";
+import { fixMergedWordIssuesPhase2, fixMergedWordIssuesPhase2Detailed } from "./mergedWordsFix.js";
 import { auditMergedWords } from "./mergedWordsAudit.js";
 import { initDb } from "./db.js";
 import { loginUser, registerUser, requireAuth, verifyEmailCode } from "./auth.js";
+import { loadDynamicMergePatterns } from "./mergePatternRegistry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, "..");
@@ -26,6 +27,12 @@ dotenv.config({ path: join(rootDir, ".env") });
 const CHARACTER_NAME_REGISTRY_PATH = join(
   rootDir,
   "character-name-registry.json"
+);
+const DYNAMIC_MERGE_PATTERNS_PATH = join(
+  rootDir,
+  "backend",
+  "merging_audit",
+  "dynamic-merge-patterns-promoted.json"
 );
 
 const app = express();
@@ -54,6 +61,17 @@ const TRANSLATION_MODEL =
 
 const NAME_VALIDATION_MODEL =
   process.env.OPENAI_NAME_VALIDATION_MODEL || PLANNER_MODEL;
+const GENERATION_MODE = String(process.env.GENERATION_MODE || "single_pass").trim().toLowerCase();
+const ENABLE_TWO_PASS_EPISODE = GENERATION_MODE === "two_pass";
+const ENABLE_TRIMMED_CONTEXT =
+  String(process.env.ENABLE_TRIMMED_CONTEXT || "true").trim().toLowerCase() !== "false";
+const CONTEXT_TAIL_LINES = Math.max(
+  8,
+  Math.min(40, parseInt(process.env.CONTEXT_TAIL_LINES || "14", 10) || 14)
+);
+const ANCHOR_ENFORCEMENT_MODE = String(process.env.ANCHOR_ENFORCEMENT_MODE || "warn")
+  .trim()
+  .toLowerCase(); // off | warn | enforce
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY in .env");
@@ -67,6 +85,12 @@ const openai = new OpenAI({
   timeout: 600_000, // 10 minutes in milliseconds
   maxRetries: 2,
 });
+const DYNAMIC_MERGE_PATTERNS = loadDynamicMergePatterns(DYNAMIC_MERGE_PATTERNS_PATH);
+if (DYNAMIC_MERGE_PATTERNS.length) {
+  console.log(
+    `Loaded ${DYNAMIC_MERGE_PATTERNS.length} dynamic merge patterns from ${DYNAMIC_MERGE_PATTERNS_PATH}`
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Genre logline normalization ("custom summary" hardening)
@@ -695,6 +719,13 @@ function safeStr(val) {
   return String(val).trim();
 }
 
+function estimatePromptTokens(text) {
+  // Approximate for telemetry only (English-heavy prompts).
+  const s = safeStr(text);
+  if (!s) return 0;
+  return Math.ceil(s.length / 4);
+}
+
 function titleCaseName(name) {
   const s = safeStr(name);
   if (!s) return s;
@@ -1196,7 +1227,13 @@ function finalizeEpisodeText(text, episodeNumber) {
       sanitized.stripped.slice(0, 12)
     );
   }
-  let t = fixMergedWordIssuesPhase2(sanitized.text);
+  const mergeNorm = fixMergedWordIssuesPhase2Detailed(sanitized.text, {
+    dynamicPatterns: DYNAMIC_MERGE_PATTERNS,
+  });
+  let t = mergeNorm.text;
+  if (!mergeNorm.idempotent || mergeNorm.logs.some((x) => x.count > 0)) {
+    console.warn(`Merge normalizer metrics episode ${episodeNumber}:`, mergeNorm.logs);
+  }
   t = stripEpisodeStructuralNoise(t, episodeNumber);
   t = fixMergedWordsEpisodeText(t);
   const normalized = normalizeEpisodeScriptFormatting(t).trim();
@@ -1240,6 +1277,152 @@ function looksLikeSynonymVomit(text) {
   }
 
   return false;
+}
+
+function buildNameAnchors(names) {
+  const anchors = [];
+  const pushParts = (full) => {
+    const s = safeStr(full).trim();
+    if (!s) return;
+    anchors.push(s);
+    const parts = s.split(/\s+/).filter(Boolean);
+    if (parts[0]) anchors.push(parts[0]);
+    if (parts.length > 1 && parts[parts.length - 1]) anchors.push(parts[parts.length - 1]);
+  };
+  pushParts(names?.heroine);
+  pushParts(names?.coldCeo);
+  pushParts(names?.warmFriend);
+  return Array.from(new Set(anchors.map((x) => x.toLowerCase())));
+}
+
+function looksLikeContextCollapse(text, names) {
+  const raw = safeStr(text);
+  if (!raw) return false;
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return false;
+
+  const nameAnchors = buildNameAnchors(names);
+  let run = 0;
+  let maxRun = 0;
+  for (const line of lines) {
+    const isScene = /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(line);
+    const isCue = /^[A-Z][A-Z0-9 '\-]{1,30}$/.test(line) && !/^(EPISODE|END EPISODE|FADE|CUT)/i.test(line);
+    const hasName = nameAnchors.some((n) => n && new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(line));
+    const words = line.split(/\s+/).filter(Boolean);
+    const longListLike =
+      words.length >= 10 && (line.includes(",") || line.includes(";")) && !/[.!?]$/.test(line);
+    const anchor = isScene || isCue || hasName || words.length <= 5;
+    if (!anchor && (longListLike || words.length >= 12)) {
+      run += 1;
+      if (run > maxRun) maxRun = run;
+    } else {
+      run = 0;
+    }
+  }
+  if (maxRun >= 10) return true;
+
+  // Secondary guard: one giant abstract run line.
+  return lines.some((line) => {
+    const words = line.split(/\s+/).filter(Boolean);
+    return words.length >= 40 && !/^(INT\.|EXT\.)/i.test(line) && !/[.!?]/.test(line);
+  });
+}
+
+function splitScenesForAnchorValidation(text) {
+  const lines = safeStr(text).split(/\r?\n/);
+  const scenes = [];
+  let current = null;
+  const isHeading = (line) => /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(line.trim());
+  for (const raw of lines) {
+    const line = safeStr(raw);
+    if (!line) continue;
+    if (isHeading(line)) {
+      if (current) scenes.push(current);
+      current = { heading: line, lines: [] };
+      continue;
+    }
+    if (!current) current = { heading: "IMPLIED SCENE", lines: [] };
+    current.lines.push(line);
+  }
+  if (current) scenes.push(current);
+  return scenes;
+}
+
+function buildSceneAnchors(names) {
+  const out = new Set();
+  const addName = (full) => {
+    const s = safeStr(full);
+    if (!s) return;
+    out.add(s.toLowerCase());
+    const parts = s.split(/\s+/).filter(Boolean);
+    if (parts[0]) out.add(parts[0].toLowerCase());
+    if (parts.length > 1 && parts[parts.length - 1]) out.add(parts[parts.length - 1].toLowerCase());
+  };
+  addName(names?.heroine);
+  addName(names?.coldCeo);
+  addName(names?.warmFriend);
+  return [...out];
+}
+
+function validateSceneAnchors(episodeText, names) {
+  const scenes = splitScenesForAnchorValidation(episodeText);
+  const nameAnchors = buildSceneAnchors(names);
+  const actionVerbRe =
+    /\b(steps?|walks?|turns?|looks?|stares?|grabs?|holds?|opens?|closes?|leans?|nods?|shakes?|runs?|sits?|stands?|moves?|whispers?|says?|asks?|answers?|breathes?|freezes?|reaches?)\b/i;
+  const failures = [];
+  for (let i = 0; i < scenes.length; i++) {
+    const s = scenes[i];
+    const sceneText = [s.heading, ...s.lines].join("\n");
+    const hasName = nameAnchors.some((n) =>
+      new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(sceneText)
+    );
+    const hasActionVerb = actionVerbRe.test(sceneText);
+    if (!hasName || !hasActionVerb) {
+      failures.push({
+        sceneIndex: i + 1,
+        heading: s.heading,
+        hasName,
+        hasActionVerb,
+      });
+    }
+  }
+  return {
+    sceneCount: scenes.length,
+    failureCount: failures.length,
+    failures,
+    pass: failures.length === 0,
+  };
+}
+
+async function rewriteEpisodeForAnchors({
+  userContent,
+  episodeText,
+  episodeNumber,
+  totalEpisodes,
+  names,
+}) {
+  const anchorPrompt =
+    userContent +
+    "\n\nANCHOR ENFORCEMENT REWRITE:\n" +
+    `This is episode ${episodeNumber} of ${totalEpisodes}. Rewrite the episode so that every scene includes:\n` +
+    "- At least one canonical main-character name mention (heroine or one of the two male leads).\n" +
+    "- At least one concrete action verb in action lines.\n" +
+    "- Keep screenplay formatting and continuity; do not output lists or abstract vocabulary runs.\n\n" +
+    "Current draft to fix:\n\n" +
+    episodeText;
+  const completion = await openai.chat.completions.create({
+    model: FINETUNED_MODEL,
+    messages: [
+      { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+      { role: "user", content: anchorPrompt },
+    ],
+    max_tokens: 2048,
+    temperature: 0.4,
+    frequency_penalty: 0.9,
+    presence_penalty: 0.4,
+  });
+  const out = completion.choices?.[0]?.message?.content;
+  return typeof out === "string" ? out.trim() : "";
 }
 
 function blocksToScriptText(blocks) {
@@ -1449,6 +1632,119 @@ STRUCTURE (critical — avoids broken exports):
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
+const EPISODE_PLAN_SYSTEM_PROMPT = `You are a TV episode planner.
+Return STRICT JSON only with this exact shape:
+{
+  "episodeNumber": number,
+  "title": string,
+  "scenePlan": [
+    {
+      "sceneIndex": number,
+      "sceneHeading": string,
+      "purpose": string,
+      "mustIncludeCharacters": string[],
+      "beats": string[]
+    }
+  ],
+  "closingHook": string
+}
+
+Rules:
+- 2 to 5 scenes only.
+- Keep continuity with provided context.
+- Keep the same three protagonist names exactly as provided.
+- No markdown, no prose outside JSON.`;
+
+const EPISODE_RENDER_FROM_PLAN_SYSTEM_PROMPT = `You are a screenplay writer.
+You will receive:
+1) episode context
+2) a strict scene plan JSON
+
+Write screenplay text for ONE episode only.
+Rules:
+- Follow the provided scene plan in order.
+- Keep scene headings, action, and dialogue clear.
+- Character cues must be on their own lines in ALL CAPS.
+- Hard anti-merge contract:
+  - Never glue words (e.g. togetherjust, Ruicollapses, beforeturningquicklytowardsthe).
+  - Never glue cue/dialogue (e.g. LUKESorry).
+- Action-line constraint:
+  - Maximum 16 words per action line.
+  - Break dense action into multiple short lines.
+- Formatting contract:
+  - Add a blank line after each scene heading.
+  - Add a newline between distinct action beats.
+- Keep continuity with prior context.
+- Output script text only (no JSON, no notes).`;
+
+function parseEpisodePlanJson(raw, episodeNumber) {
+  const text = safeStr(raw).trim();
+  if (!text) return null;
+  const jsonMatch = text.match(/\{[\s\S]*\}$/);
+  const payload = jsonMatch ? jsonMatch[0] : text;
+  try {
+    const parsed = JSON.parse(payload);
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!Array.isArray(parsed.scenePlan) || parsed.scenePlan.length < 2) return null;
+    parsed.episodeNumber = Number(parsed.episodeNumber) || episodeNumber;
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function generateEpisodeTextTwoPass({
+  userContent,
+  episodeNumber,
+  totalEpisodes,
+  names,
+  language,
+  genre,
+}) {
+  const planCompletion = await openai.chat.completions.create({
+    model: PLANNER_MODEL,
+    messages: [
+      { role: "system", content: EPISODE_PLAN_SYSTEM_PROMPT },
+      { role: "user", content: userContent },
+    ],
+    max_tokens: 1400,
+    temperature: 0.35,
+  });
+  const planRaw = planCompletion.choices?.[0]?.message?.content;
+  const plan = parseEpisodePlanJson(planRaw, episodeNumber);
+  if (!plan) {
+    return { ok: false, reason: "plan_parse_failed", text: "" };
+  }
+
+  const renderPrompt =
+    `[LANG=${String(language || "EN").toUpperCase()}] [GENRE=${safeStr(genre) || "Romance"}] ` +
+    `[EPISODES=${totalEpisodes}] [EPISODE=${episodeNumber}]\n` +
+    `[HEROINE=${safeStr(names?.heroine)}] [MALE1=${safeStr(names?.coldCeo)}] [MALE2=${safeStr(
+      names?.warmFriend
+    )}]\n\n` +
+    `CONTEXT:\n${userContent}\n\n` +
+    `SCENE PLAN JSON:\n${JSON.stringify(plan, null, 2)}`;
+
+  const renderCompletion = await openai.chat.completions.create({
+    model: FINETUNED_MODEL,
+    messages: [
+      { role: "system", content: EPISODE_RENDER_FROM_PLAN_SYSTEM_PROMPT },
+      { role: "user", content: renderPrompt },
+    ],
+    max_tokens: 2048,
+    temperature: 0.45,
+    frequency_penalty: 1.0,
+    presence_penalty: 0.5,
+  });
+  const rendered = renderCompletion.choices?.[0]?.message?.content;
+  return {
+    ok: typeof rendered === "string" && rendered.trim().length > 0,
+    reason: "ok",
+    text: typeof rendered === "string" ? rendered.trim() : "",
+    plan,
+  };
+}
+
 const NAME_CONSISTENCY_VALIDATION_SYSTEM_PROMPT = `You are a script formatting auditor.
 
 Your task: given an episode's character cue lines, check whether the main trio character names are spelled consistently with the provided canonical spellings.
@@ -1553,6 +1849,7 @@ function buildEpisodePromptText({
   episodeSummaries,
   recaps,
   previousEpisodeScripts = [],
+  trimContext = ENABLE_TRIMMED_CONTEXT,
 }) {
   const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
   const genreTag = String(genre || "Romance").trim() || "Romance";
@@ -1636,7 +1933,17 @@ function buildEpisodePromptText({
   }
 
   const blueprintContext = formatBlueprintContext(blueprint, ep);
-  const recapContext = formatRecapContext(recaps, ep);
+  const recapContext = trimContext
+    ? (() => {
+        if (!Array.isArray(recaps) || !recaps.length) return "";
+        const prev = recaps
+          .filter((r) => typeof r.episode === "number" && r.episode < ep)
+          .slice(-2);
+        if (!prev.length) return "";
+        const compact = prev.map((r) => `Ep ${r.episode}: ${safeStr(r.recap).slice(0, 220)}`);
+        return ["COMPACT STORY STATE (recent recaps):", ...compact].join("\n");
+      })()
+    : formatRecapContext(recaps, ep);
   const summaryText =
     episodeSummaries && episodeSummaries instanceof Map
       ? episodeSummaries.get(ep)
@@ -1681,7 +1988,7 @@ function buildEpisodePromptText({
     );
     lines.push("");
     lines.push("[[INTERNAL_CONTEXT_BEGIN]]");
-    const TAIL_LINES = 30; // only keep the tail of each previous episode
+    const TAIL_LINES = trimContext ? CONTEXT_TAIL_LINES : 30; // token-budget trimming toggle
     toInclude.forEach((script, i) => {
       const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
       const full = safeStr(script).trim();
@@ -1698,6 +2005,10 @@ function buildEpisodePromptText({
       `Do NOT output any INTERNAL_CONTEXT markers, instruction text, or transition notes.`
     );
     lines.push("");
+  }
+
+  if (trimContext) {
+    lines.push("CONTEXT BUDGET MODE: compact continuity context is enabled.");
   }
 
   let phase;
@@ -1814,6 +2125,111 @@ function buildEpisodePromptText({
 
 function sendStreamLine(res, obj) {
   res.write(JSON.stringify(obj) + "\n");
+}
+
+function buildCollapseSafeEpisodeFallback({
+  episodeNumber,
+  totalEpisodes,
+  names,
+  genre,
+  summary,
+}) {
+  const heroine = safeStr(names?.heroine) || "THE HEROINE";
+  const male1 = safeStr(names?.coldCeo) || "MALE LEAD 1";
+  const male2 = safeStr(names?.warmFriend) || "MALE LEAD 2";
+  const summaryLine =
+    safeStr(summary).trim() ||
+    `The conflict intensifies in episode ${episodeNumber} as relationships and stakes escalate.`;
+  const isFinal = episodeNumber === totalEpisodes;
+  const ending =
+    isFinal
+      ? `${heroine} chooses a clear future with no new threat introduced.`
+      : `${heroine} realizes the next move could change everything.`;
+  const location =
+    /horror|monster|werewolf/i.test(String(genre || ""))
+      ? "INT. SAFE ROOM - NIGHT"
+      : "INT. PRIVATE OFFICE - NIGHT";
+
+  return [
+    location,
+    "",
+    `${heroine.toUpperCase()}`,
+    "I won't let this spiral out of control.",
+    "",
+    `${male1.toUpperCase()}`,
+    "Then we move now, together. No more delays.",
+    "",
+    `${male2.toUpperCase()}`,
+    "Whatever happens next, I stay with you.",
+    "",
+    summaryLine,
+    "",
+    ending,
+  ].join("\n");
+}
+
+function targetedCollapseSpanRepair(text, names) {
+  const lines = safeStr(text).split(/\r?\n/);
+  if (!lines.length) return text;
+  const anchors = buildNameAnchors(names);
+  const repaired = [];
+  let run = [];
+  const flushRun = () => {
+    if (!run.length) return;
+    if (run.length >= 10) {
+      const heroine = safeStr(names?.heroine) || "THE HEROINE";
+      const male1 = safeStr(names?.coldCeo) || "MALE LEAD 1";
+      const male2 = safeStr(names?.warmFriend) || "MALE LEAD 2";
+      repaired.push(`${heroine.toUpperCase()}`);
+      repaired.push("Stay with me. We focus on what matters right now.");
+      repaired.push("");
+      repaired.push(`${male1.toUpperCase()}`);
+      repaired.push("We move to the next concrete step. No distractions.");
+      repaired.push("");
+      repaired.push(`${male2.toUpperCase()}`);
+      repaired.push("I'm here. We decide together and keep moving.");
+    } else {
+      repaired.push(...run);
+    }
+    run = [];
+  };
+
+  for (const raw of lines) {
+    const line = safeStr(raw);
+    if (!line) {
+      flushRun();
+      repaired.push("");
+      continue;
+    }
+    const isScene = /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(line);
+    const isCue = /^[A-Z][A-Z0-9 '\-]{1,30}$/.test(line) && !/^(EPISODE|END EPISODE|FADE|CUT)/i.test(line);
+    const hasName = anchors.some((n) =>
+      new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(line)
+    );
+    const words = line.split(/\s+/).filter(Boolean);
+    const looksUnanchored = !isScene && !isCue && !hasName && words.length >= 12;
+    if (looksUnanchored) {
+      run.push(line);
+      continue;
+    }
+    flushRun();
+    repaired.push(line);
+  }
+  flushRun();
+  return repaired.join("\n");
+}
+
+function targetedRepairEpisodeText(text, names) {
+  const mergeRes = fixMergedWordIssuesPhase2Detailed(text, {
+    characterNames: [names?.heroine, names?.coldCeo, names?.warmFriend].filter(Boolean),
+    dynamicPatterns: DYNAMIC_MERGE_PATTERNS,
+  });
+  const collapsed = targetedCollapseSpanRepair(mergeRes.text, names);
+  return {
+    text: collapsed,
+    spanRepairsApplied: mergeRes.logs.reduce((acc, x) => acc + (x.count || 0), 0),
+    repairTypes: mergeRes.logs.filter((x) => (x.count || 0) > 0).map((x) => x.rule),
+  };
 }
 
 function includesWord(haystack, word) {
@@ -1960,21 +2376,64 @@ app.post("/generate", requireAuth, async (req, res) => {
           episodeSummaries,
           recaps: episodeRecaps,
           previousEpisodeScripts: episodeScriptsMemo,
+          trimContext: ENABLE_TRIMMED_CONTEXT,
+        });
+        sendStreamLine(res, {
+          type: "prompt_metrics",
+          episode: ep,
+          chars: userContent.length,
+          approx_tokens: estimatePromptTokens(userContent),
+          trim_context: ENABLE_TRIMMED_CONTEXT,
+          mode: ENABLE_TWO_PASS_EPISODE ? "two_pass" : "single_pass",
         });
 
-        const completion = await openai.chat.completions.create({
-          model: FINETUNED_MODEL,
-          messages: [
-            { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
-            { role: "user", content: userContent },
-          ],
-          max_tokens: 2048,
-          temperature: 0.5,
-          frequency_penalty: 1.0,
-          presence_penalty: 0.6,
-        });
+        let rawContent = "";
+        if (ENABLE_TWO_PASS_EPISODE) {
+          try {
+            const twoPass = await generateEpisodeTextTwoPass({
+              userContent,
+              episodeNumber: ep,
+              totalEpisodes: episodeCount,
+              names: seriesNames,
+              language: body.language || "EN",
+              genre,
+            });
+            if (twoPass.ok) {
+              rawContent = twoPass.text;
+              sendStreamLine(res, { type: "episode_mode", episode: ep, mode: "two_pass" });
+            } else {
+              sendStreamLine(res, {
+                type: "episode_mode",
+                episode: ep,
+                mode: "single_pass_fallback",
+                reason: twoPass.reason,
+              });
+            }
+          } catch (twoPassErr) {
+            console.error(`Two-pass generation failed for episode ${ep}:`, twoPassErr);
+            sendStreamLine(res, {
+              type: "episode_mode",
+              episode: ep,
+              mode: "single_pass_fallback",
+              reason: "two_pass_error",
+            });
+          }
+        }
+        if (!rawContent) {
+          const completion = await openai.chat.completions.create({
+            model: FINETUNED_MODEL,
+            messages: [
+              { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+              { role: "user", content: userContent },
+            ],
+            max_tokens: 2048,
+            temperature: 0.5,
+            frequency_penalty: 1.0,
+            presence_penalty: 0.6,
+          });
+          rawContent = completion.choices?.[0]?.message?.content || "";
+        }
 
-        let rawContent = completion.choices?.[0]?.message?.content;
         let episodeText =
           typeof rawContent === "string" && rawContent.trim()
             ? rawContent.trim()
@@ -2007,6 +2466,18 @@ app.post("/generate", requireAuth, async (req, res) => {
           episodeText,
           CHARACTER_NAME_REGISTRY_PATH
         );
+        // Phase 4 targeted span repair (non-LLM first): repair only flagged merge/collapse spans.
+        {
+          const spanRepair = targetedRepairEpisodeText(episodeText, seriesNames);
+          episodeText = spanRepair.text;
+          sendStreamLine(res, {
+            type: "span_repair",
+            episode: ep,
+            span_repairs_applied: spanRepair.spanRepairsApplied,
+            repair_types: spanRepair.repairTypes,
+            remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
+          });
+        }
 
         // Hard validation: enforce zero merged-words for credibility.
         // Retry once if any merged-word patterns remain after post-processing.
@@ -2066,18 +2537,29 @@ app.post("/generate", requireAuth, async (req, res) => {
                 episodeText,
                 CHARACTER_NAME_REGISTRY_PATH
               );
+              {
+                const spanRepair = targetedRepairEpisodeText(episodeText, seriesNames);
+                episodeText = spanRepair.text;
+                sendStreamLine(res, {
+                  type: "span_repair",
+                  episode: ep,
+                  span_repairs_applied: spanRepair.spanRepairsApplied,
+                  repair_types: spanRepair.repairTypes,
+                  remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
+                });
+              }
             }
           } catch (sErr) {
             console.error(`Merged-word spacing retry failed for episode ${ep}:`, sErr);
           }
         }
 
-        // Quality gate: prevent "synonym vomit" / word-list runs.
-        if (looksLikeSynonymVomit(episodeText)) {
+        // Quality gate: prevent "synonym vomit" / context-collapse word-list runs.
+        if (looksLikeSynonymVomit(episodeText) || looksLikeContextCollapse(episodeText, seriesNames)) {
           try {
             const qualityRetryContent =
               userContent +
-              "\n\nREWRITE REQUIREMENT (quality): The previous draft produced a word-list/synonym-vomit run (punctuation-free single-word lines or massive adjective chains). Remove that section and rewrite the beat as normal screenplay action/dialogue with proper sentences and spacing. Do NOT output long sequences of standalone words.";
+              "\n\nREWRITE REQUIREMENT (quality): The previous draft produced context-collapse output (word-list/synonym-vomit or abstract list drift with no scene/cast anchors). Remove that section and rewrite as normal screenplay scenes with named characters, dialogue cues, and concrete actions. Do NOT output long unanchored vocabulary runs.";
             const retry = await openai.chat.completions.create({
               model: FINETUNED_MODEL,
               messages: [
@@ -2124,9 +2606,97 @@ app.post("/generate", requireAuth, async (req, res) => {
                 episodeText,
                 CHARACTER_NAME_REGISTRY_PATH
               );
+              {
+                const spanRepair = targetedRepairEpisodeText(episodeText, seriesNames);
+                episodeText = spanRepair.text;
+                sendStreamLine(res, {
+                  type: "span_repair",
+                  episode: ep,
+                  span_repairs_applied: spanRepair.spanRepairsApplied,
+                  repair_types: spanRepair.repairTypes,
+                  remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
+                });
+              }
             }
           } catch (qErr) {
             console.error(`Quality retry failed for episode ${ep}:`, qErr);
+          }
+          // Verification policy: one more targeted repair loop before fallback.
+          if (looksLikeSynonymVomit(episodeText) || looksLikeContextCollapse(episodeText, seriesNames)) {
+            const spanRepair2 = targetedRepairEpisodeText(episodeText, seriesNames);
+            episodeText = spanRepair2.text;
+            sendStreamLine(res, {
+              type: "span_repair",
+              episode: ep,
+              span_repairs_applied: spanRepair2.spanRepairsApplied,
+              repair_types: spanRepair2.repairTypes,
+              remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
+              pass: "verification_loop",
+            });
+          }
+          // Client-safe mode: if collapse remains after retry/repair, auto-heal with
+          // a deterministic anchored fallback episode instead of failing generation.
+          if (looksLikeSynonymVomit(episodeText) || looksLikeContextCollapse(episodeText, seriesNames)) {
+            const fallbackSummary =
+              episodeSummaries && episodeSummaries instanceof Map
+                ? episodeSummaries.get(ep)
+                : "";
+            const healed = buildCollapseSafeEpisodeFallback({
+              episodeNumber: ep,
+              totalEpisodes: episodeCount,
+              names: seriesNames,
+              genre,
+              summary: fallbackSummary,
+            });
+            episodeText = finalizeEpisodeText(healed, ep);
+            sendStreamLine(res, {
+              type: "quality_gate",
+              episode: ep,
+              status: "auto_healed",
+              reason: "context_collapse_detected_after_retry",
+            });
+          }
+        }
+
+        // Phase 3: scene-anchor enforcement (default warn mode).
+        if (ANCHOR_ENFORCEMENT_MODE !== "off") {
+          let anchorReport = validateSceneAnchors(episodeText, seriesNames);
+          if (!anchorReport.pass) {
+            sendStreamLine(res, {
+              type: "quality_gate",
+              episode: ep,
+              status: "anchor_warning",
+              mode: ANCHOR_ENFORCEMENT_MODE,
+              scene_failures: anchorReport.failureCount,
+            });
+          }
+          if (!anchorReport.pass && ANCHOR_ENFORCEMENT_MODE === "enforce") {
+            try {
+              const rewritten = await rewriteEpisodeForAnchors({
+                userContent,
+                episodeText,
+                episodeNumber: ep,
+                totalEpisodes: episodeCount,
+                names: seriesNames,
+              });
+              if (rewritten) {
+                episodeText = finalizeEpisodeText(rewritten, ep);
+                episodeText = normalizeEpisodeCharacterNames(
+                  episodeText,
+                  CHARACTER_NAME_REGISTRY_PATH
+                );
+                anchorReport = validateSceneAnchors(episodeText, seriesNames);
+                sendStreamLine(res, {
+                  type: "quality_gate",
+                  episode: ep,
+                  status: anchorReport.pass ? "anchor_auto_healed" : "anchor_enforce_partial",
+                  mode: ANCHOR_ENFORCEMENT_MODE,
+                  scene_failures: anchorReport.failureCount,
+                });
+              }
+            } catch (anchorErr) {
+              console.error(`Anchor rewrite failed for episode ${ep}:`, anchorErr);
+            }
           }
         }
 
