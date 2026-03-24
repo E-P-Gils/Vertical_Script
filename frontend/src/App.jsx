@@ -52,11 +52,7 @@ function App() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authConfirmPassword, setAuthConfirmPassword] = useState("");
-  const [authCode, setAuthCode] = useState("");
-  const [authMode, setAuthMode] = useState("register"); // register | confirm | login
-  const [authDevCode, setAuthDevCode] = useState("");
-  const [confirmModalOpen, setConfirmModalOpen] = useState(false);
-  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [authMode, setAuthMode] = useState("register"); // register | login
 
   const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts
   const [myScripts, setMyScripts] = useState(() => {
@@ -160,7 +156,6 @@ function App() {
   const handleRegister = async (e) => {
     e.preventDefault();
     setError("");
-    setAuthDevCode("");
     try {
       const emailOk = (() => {
         const v = String(authEmail || "").trim();
@@ -198,13 +193,25 @@ function App() {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || "Registration failed");
-      // Server always returns a response even if it couldn’t send the email (dev logs).
-      setAuthDevCode(data?.verification?.devCode || "");
-      setAuthCode("");
-      setConfirmModalOpen(true);
-      setAuthMode("login");
+      // Auto-login after successful registration.
+      const loginR = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      const loginData = await loginR.json().catch(() => ({}));
+      if (!loginR.ok) throw new Error(loginData.error || "Login failed");
+      if (!loginData?.token) throw new Error("Login failed: missing token");
+
+      setAuthToken(loginData.token);
+      try {
+        localStorage.setItem("authToken", loginData.token);
+      } catch {}
+
       setAuthConfirmPassword("");
       setError("");
+      setPage("generate");
+      setAuthMode("login");
     } catch (err) {
       const msg = String(err?.message || "");
       if (msg.includes("password must be at least 8 characters")) {
@@ -220,63 +227,6 @@ function App() {
       } else {
         setError("Registration failed. / 注册失败。");
       }
-    }
-  };
-
-  const handleConfirmEmail = async (e) => {
-    e.preventDefault();
-    setError("");
-    setConfirmLoading(true);
-    try {
-      const r = await fetch(`${API_BASE}/auth/confirm-email`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: authEmail, code: authCode }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.error || "Confirmation failed");
-
-      // After confirmation, auto-login and route to generation.
-      const loginR = await fetch(`${API_BASE}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: authEmail, password: authPassword }),
-      });
-      const loginData = await loginR.json().catch(() => ({}));
-      if (!loginR.ok) throw new Error(loginData.error || "Login failed after confirmation");
-      if (!loginData?.token) throw new Error("Login failed: missing token");
-
-      setAuthToken(loginData.token);
-      try {
-        localStorage.setItem("authToken", loginData.token);
-      } catch {}
-
-      setConfirmModalOpen(false);
-      setAuthCode("");
-      setError("");
-      setPage("generate");
-      setAuthMode("login");
-    } catch (err) {
-      const msg = String(err?.message || "");
-      if (msg.includes("verification code missing/expired")) {
-        setError(
-          "Verification code is missing or expired. Please register again to resend. / 验证码缺失或已过期，请重新注册获取新验证码。"
-        );
-      } else if (msg.includes("verification code expired")) {
-        setError(
-          "Verification code expired. Please register again to resend. / 验证码已过期，请重新注册获取新验证码。"
-        );
-      } else if (msg.includes("invalid verification code")) {
-        setError(
-          "Invalid verification code. Please check and try again. / 验证码无效，请检查后重试。"
-        );
-      } else if (msg.includes("email and code are required")) {
-        setError("Email and code are required. / 需要邮箱和验证码。");
-      } else {
-        setError(msg || "Confirmation failed. / 验证失败。");
-      }
-    } finally {
-      setConfirmLoading(false);
     }
   };
 
@@ -303,14 +253,10 @@ function App() {
         localStorage.setItem("authToken", data.token);
       } catch {}
       setAuthMode("login");
+      setPage("generate");
     } catch (err) {
       const msg = String(err?.message || "");
-      if (msg.includes("email not verified")) {
-        setConfirmModalOpen(true);
-        setAuthMode("login");
-        setAuthCode("");
-        setError("");
-      } else if (msg.includes("invalid credentials")) {
+      if (msg.includes("invalid credentials")) {
         setError("No registered account found (or wrong password). Please register. / 未注册账号或密码错误，请先注册。");
       } else {
         setError(err?.message || "Login failed");
@@ -942,11 +888,6 @@ function App() {
                 >
                   Register / 注册
                 </button>
-                {authDevCode && (
-                  <p style={{ marginTop: "0.75rem", opacity: 0.85, fontSize: "0.85rem" }}>
-                    Dev code (only if SMTP is not configured) / 开发者验证码（仅当 SMTP 未配置时）: <b>{authDevCode}</b>
-                  </p>
-                )}
               </form>
               <div className="auth-toggle">
                 <span className="auth-toggle-text">Already have an account? Log in / 已有账号？登录</span>
@@ -1011,69 +952,6 @@ function App() {
             )}
           </div>
         </section>
-      )}
-
-      {confirmModalOpen && (
-        <div
-          className="modal-backdrop"
-          onClick={() => {
-            if (confirmLoading) return;
-            setConfirmModalOpen(false);
-            setError("");
-          }}
-        >
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-            style={{ maxWidth: 520 }}
-          >
-            <h2 className="modal-title">Confirmation / 邮箱验证码</h2>
-            <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
-              We sent a confirmation code to <b>{authEmail}</b>. Enter it below to verify. / 我们已向 <b>{authEmail}</b> 发送确认码。请在下方输入以完成验证。
-            </p>
-            {authDevCode && (
-              <p style={{ marginTop: "-0.25rem", marginBottom: "0.75rem", opacity: 0.85, fontSize: "0.9rem" }}>
-                Dev code: <b>{authDevCode}</b> / 开发者验证码：<b>{authDevCode}</b>
-              </p>
-            )}
-
-            {error && <p className="error">{error}</p>}
-
-            <form onSubmit={handleConfirmEmail}>
-              <label className="field">
-                <span>Confirmation code / 确认码</span>
-                <input
-                  value={authCode}
-                  onChange={(e) => setAuthCode(e.target.value)}
-                  type="text"
-                  inputMode="numeric"
-                  required
-                />
-              </label>
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    if (confirmLoading) return;
-                    setConfirmModalOpen(false);
-                    setError("");
-                  }}
-                  disabled={confirmLoading}
-                >
-                  Back / 返回
-                </button>
-                <button
-                  type="submit"
-                  className="btn btn-primary"
-                  disabled={!authCode || confirmLoading}
-                >
-                  {confirmLoading ? "Verifying... / 验证中..." : "Confirm / 验证"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
       )}
 
       {page === "generate" && (
