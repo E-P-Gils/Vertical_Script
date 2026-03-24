@@ -1304,6 +1304,8 @@ function looksLikeContextCollapse(text, names) {
   const nameAnchors = buildNameAnchors(names);
   let run = 0;
   let maxRun = 0;
+  const technicalLexicon =
+    /\b(geology|chemistry|physics|quantum|blockchain|algorithm|nucleosynthesis|pharmacogenomics|ontology|epistemology|topology|astrophysics|biochemistry)\b/i;
   for (const line of lines) {
     const isScene = /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(line);
     const isCue = /^[A-Z][A-Z0-9 '\-]{1,30}$/.test(line) && !/^(EPISODE|END EPISODE|FADE|CUT)/i.test(line);
@@ -1312,19 +1314,24 @@ function looksLikeContextCollapse(text, names) {
     const longListLike =
       words.length >= 10 && (line.includes(",") || line.includes(";")) && !/[.!?]$/.test(line);
     const anchor = isScene || isCue || hasName || words.length <= 5;
-    if (!anchor && (longListLike || words.length >= 12)) {
+    const techHeavy = technicalLexicon.test(line) && words.length >= 8;
+    if (!anchor && (longListLike || words.length >= 12 || techHeavy)) {
       run += 1;
       if (run > maxRun) maxRun = run;
     } else {
       run = 0;
     }
   }
-  if (maxRun >= 10) return true;
+  if (maxRun >= 6) return true;
 
   // Secondary guard: one giant abstract run line.
   return lines.some((line) => {
     const words = line.split(/\s+/).filter(Boolean);
-    return words.length >= 40 && !/^(INT\.|EXT\.)/i.test(line) && !/[.!?]/.test(line);
+    return (
+      (words.length >= 32 || (technicalLexicon.test(line) && words.length >= 14)) &&
+      !/^(INT\.|EXT\.)/i.test(line) &&
+      !/[.!?]/.test(line)
+    );
   });
 }
 
@@ -2174,9 +2181,11 @@ function targetedCollapseSpanRepair(text, names) {
   const anchors = buildNameAnchors(names);
   const repaired = [];
   let run = [];
+  const technicalLexicon =
+    /\b(geology|chemistry|physics|quantum|blockchain|algorithm|nucleosynthesis|pharmacogenomics|ontology|epistemology|topology|astrophysics|biochemistry)\b/i;
   const flushRun = () => {
     if (!run.length) return;
-    if (run.length >= 10) {
+    if (run.length >= 6) {
       const heroine = safeStr(names?.heroine) || "THE HEROINE";
       const male1 = safeStr(names?.coldCeo) || "MALE LEAD 1";
       const male2 = safeStr(names?.warmFriend) || "MALE LEAD 2";
@@ -2207,7 +2216,11 @@ function targetedCollapseSpanRepair(text, names) {
       new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(line)
     );
     const words = line.split(/\s+/).filter(Boolean);
-    const looksUnanchored = !isScene && !isCue && !hasName && words.length >= 12;
+    const looksUnanchored =
+      !isScene &&
+      !isCue &&
+      !hasName &&
+      (words.length >= 10 || (technicalLexicon.test(line) && words.length >= 8));
     if (looksUnanchored) {
       run.push(line);
       continue;
