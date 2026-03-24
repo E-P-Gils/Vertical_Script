@@ -333,17 +333,21 @@ function App() {
             phase: "translating",
           });
         } else if (data.type === "episode") {
-          const block =
-            data.episode != null && data.text != null
-              ? `EPISODE ${data.episode}\n\n${data.text}`
-              : "";
+          const block = data.episode != null && data.text != null
+            ? (() => {
+                const t = String(data.text || "").trim();
+                return /^EPISODE\s+\d+/i.test(t) ? t : `EPISODE ${data.episode}\n\n${t}`;
+              })()
+            : "";
           if (block) fullScript += (fullScript ? "\n\n" : "") + block;
           setScript(fullScript);
         } else if (data.type === "episode_zh") {
-          const block =
-            data.episode != null && data.text != null
-              ? `EPISODE ${data.episode}\n\n${data.text}`
-              : "";
+          const block = data.episode != null && data.text != null
+            ? (() => {
+                const t = String(data.text || "").trim();
+                return /^EPISODE\s+\d+/i.test(t) ? t : `EPISODE ${data.episode}\n\n${t}`;
+              })()
+            : "";
           if (block) fullScriptZh += (fullScriptZh ? "\n\n" : "") + block;
           setScriptZh(fullScriptZh);
         } else if (data.type === "error") {
@@ -511,7 +515,9 @@ function App() {
           throw new Error(`Episode ${cur.episode} translation produced no text.`);
         }
 
-        const block = `EPISODE ${cur.episode}\n\n${episodeZh}`;
+        const block = /^EPISODE\s+\d+/i.test(String(episodeZh || "").trim())
+          ? String(episodeZh || "").trim()
+          : `EPISODE ${cur.episode}\n\n${episodeZh}`;
         fullScriptZhLocal += (fullScriptZhLocal ? "\n\n" : "") + block;
         setScriptZh(fullScriptZhLocal);
       }

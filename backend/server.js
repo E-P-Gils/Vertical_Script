@@ -1115,16 +1115,95 @@ function hasMergedWordIssues(text) {
   return report.totals.mergedTotal > 3;
 }
 
+const PROMPT_LEAK_LINE_PATTERNS = [
+  /\bEND\s+OF\s+PREVIOUS\s+EPISODE\b/i,
+  /\bWrite\s+episode\s+\d+\s+now\b/i,
+  /\bcontinuing\s+directly\b/i,
+  /\bline\s+spacing\s+separator\b/i,
+  /\bmarking\s+transition\b/i,
+  /\bCONTINUATION\s+REQUIREMENT\b/i,
+  /\bCHARACTER\s+MANIFEST\b/i,
+  /\bDo\s+NOT\s+output\b/i,
+  /\bOutput\s+only\b.*\b(script|screenplay|content)\b/i,
+  /\[\[\s*INTERNAL_CONTEXT_(?:BEGIN|END)\s*\]\]/i,
+  /\[\[\s*DO_NOT_OUTPUT_INTERNAL_CONTEXT\s*\]\]/i,
+];
+
+function isMessyEpisodeDivider(line) {
+  const t = String(line || "").trim();
+  if (!t) return false;
+  if (/^(?:-\d+\s+){2,}EP(?:ISODE|OSODE|ISDE|ODES?)\s*\d+/i.test(t)) return true;
+  if (/^-{2,}\s*EP(?:ISODE|OSODE|ISDE|ODES?)\s*\d+/i.test(t)) return true;
+  if (/^-{2,}\s*$/.test(t)) return true;
+  return false;
+}
+
+function sanitizeEpisodePromptLeaks(text, episodeNumber) {
+  if (!text || typeof text !== "string") return { text, stripped: [] };
+  const stripped = [];
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const kept = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const t = raw.trim();
+    if (!t) {
+      kept.push(raw);
+      continue;
+    }
+
+    if (PROMPT_LEAK_LINE_PATTERNS.some((re) => re.test(t))) {
+      stripped.push({ line: i + 1, reason: "prompt_leak", text: t.slice(0, 220) });
+      continue;
+    }
+
+    if (isMessyEpisodeDivider(t)) {
+      stripped.push({ line: i + 1, reason: "dash_separator_noise", text: t.slice(0, 220) });
+      continue;
+    }
+
+    // Remove explicit episode wrappers if model leaks them; pipeline adds canonical wrappers.
+    if (/^\s*EP(?:ISODE|OSODE|ISDE|ODES?)\s+\d+\s*$/i.test(t)) {
+      stripped.push({ line: i + 1, reason: "episode_heading_noise", text: t });
+      continue;
+    }
+    if (/^\s*END\s+(?:OF\s+)?EP(?:ISODE|OSODE|ISDE|ODES?)\s+\d+\s*$/i.test(t)) {
+      stripped.push({ line: i + 1, reason: "episode_end_noise", text: t });
+      continue;
+    }
+
+    kept.push(raw);
+  }
+
+  let cleaned = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (!cleaned) cleaned = `[Episode ${episodeNumber} content unavailable]`;
+
+  // Canonical wrappers required by Phase 2.
+  cleaned = `EPISODE ${episodeNumber}\n\n${cleaned}\n\nEND EPISODE ${episodeNumber}`;
+  return { text: cleaned, stripped };
+}
+
 function finalizeEpisodeText(text, episodeNumber) {
   if (!text || typeof text !== "string") return text;
   // Phase 2 sequential normalisation:
-  // 1) Fix END EPISODE newline swallow (can break line-based episode parsing)
-  // 2) Fix lowercase→uppercase boundary merges (targeted spacing)
+  // 1) Strip prompt/meta leaks and enforce canonical EPISODE / END EPISODE wrappers
+  // 2) Fix END EPISODE newline swallow + lowercase→uppercase boundary merges
   // 3) Strip structural noise and apply other spacing/line-break repairs.
-  let t = fixMergedWordIssuesPhase2(text);
+  const sanitized = sanitizeEpisodePromptLeaks(text, episodeNumber);
+  if (sanitized.stripped.length) {
+    console.warn(
+      `Sanitizer stripped ${sanitized.stripped.length} leak/noise lines in episode ${episodeNumber}:`,
+      sanitized.stripped.slice(0, 12)
+    );
+  }
+  let t = fixMergedWordIssuesPhase2(sanitized.text);
   t = stripEpisodeStructuralNoise(t, episodeNumber);
   t = fixMergedWordsEpisodeText(t);
-  return normalizeEpisodeScriptFormatting(t);
+  const normalized = normalizeEpisodeScriptFormatting(t).trim();
+  return `EPISODE ${episodeNumber}\n\n${normalized
+    .replace(/^\s*EP(?:ISODE|OSODE|ISDE|ODES?)\s+\d+\s*/i, "")
+    .replace(/\s*END\s+EP(?:ISODE|OSODE|ISDE|ODES?)\s+\d+\s*$/i, "")
+    .trim()}\n\nEND EPISODE ${episodeNumber}`;
 }
 
 /**
@@ -1310,6 +1389,11 @@ This is always ONE SINGLE SERIES told over many episodes. All  episodes in the r
 - A continuous plot line with clear beginning, middle, and end across the whole season.
 - Stable relationships and history between characters that evolve, but are never reset or forgotten.
 - The protagonists NEVER get replaced: do NOT switch to a new set of main characters mid-season. You may introduce supporting characters, but every episode must include the heroine and at least one of the two male leads, and the main plot must remain about this trio.
+
+CRITICAL BOUNDARY RULE (never violate):
+- The prompt may include INTERNAL CONTEXT sections and operational instructions wrapped in markers such as [[INTERNAL_CONTEXT_BEGIN]] ... [[INTERNAL_CONTEXT_END]].
+- These markers and their contents are PRIVATE scaffolding. NEVER reproduce marker text, instruction text, transition notes, or any meta-commentary in output.
+- Output ONLY screenplay content (scene headings, action, dialogue). No instructions, no notes, no boundary tokens.
 
 If the logline explicitly gives character names, you may align the provided HEROINE/MALE1/MALE2 tags with those names, but once the names are fixed you MUST keep them consistent in every episode.
 
@@ -1585,6 +1669,7 @@ function buildEpisodePromptText({
     const toInclude = previousEpisodeScripts.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
     const label = toInclude.length === 1 ? "PREVIOUS EPISODE" : "PREVIOUS EPISODES";
     lines.push("");
+    lines.push("[[DO_NOT_OUTPUT_INTERNAL_CONTEXT]]");
     lines.push(
       `CONTINUATION REQUIREMENT (critical for this format): The audience has just paid to see what happens next. Below is the exact end of the ${label}. You MUST continue the story immediately from the next moment—same scene, same characters, same emotional beat. Do not time-skip, change location, or restart; pick up from the last line or action and continue.`
     );
@@ -1595,18 +1680,23 @@ function buildEpisodePromptText({
       `Do NOT copy-paste the previous episode’s closing paragraphs, identical POV blocks, or the same crowd reactions—advance to the next story beat with new material.`
     );
     lines.push("");
+    lines.push("[[INTERNAL_CONTEXT_BEGIN]]");
     const TAIL_LINES = 30; // only keep the tail of each previous episode
     toInclude.forEach((script, i) => {
       const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
       const full = safeStr(script).trim();
       const split = full.split(/\r?\n/);
       const tail = split.slice(-TAIL_LINES).join("\n");
-      lines.push(`--- END OF ${which} (tail) ---`);
+      lines.push(`[[PREVIOUS_EPISODE_TAIL ${which}]]`);
       lines.push(tail);
-      lines.push(`--- END OF ${which} (tail) ---`);
+      lines.push(`[[END_PREVIOUS_EPISODE_TAIL ${which}]]`);
       lines.push("");
     });
-    lines.push(`Write episode ${ep} now, continuing directly from the text above.`);
+    lines.push("[[INTERNAL_CONTEXT_END]]");
+    lines.push(
+      `Now write screenplay content for EPISODE ${ep} only, continuing directly from story state above. ` +
+      `Do NOT output any INTERNAL_CONTEXT markers, instruction text, or transition notes.`
+    );
     lines.push("");
   }
 
