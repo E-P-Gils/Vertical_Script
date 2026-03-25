@@ -367,12 +367,24 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
         y -= lineHeight;
       }
     } else if (lineType === "character") {
-      ensureSpace(1);
       const upper = displayText.toUpperCase();
       const w = bodyFont.widthOfTextAtSize(upper, fontSize);
-      const x = CONTENT_LEFT + (CONTENT_WIDTH - w) / 2;
-      page.drawText(upper, { x, y, size: fontSize, font: bodyFont });
-      y -= lineHeight;
+      // Long ALL-CAPS cues (e.g. multi-word names): wrap so pdf-lib never clips mid-name in a way that reads as "MAT EOZH AO".
+      if (w <= CONTENT_WIDTH) {
+        ensureSpace(1);
+        const x = CONTENT_LEFT + (CONTENT_WIDTH - w) / 2;
+        page.drawText(upper, { x, y, size: fontSize, font: bodyFont });
+        y -= lineHeight;
+      } else {
+        const segs = wrap(bodyFont, upper, fontSize, CONTENT_WIDTH);
+        ensureSpace(segs.length);
+        for (const seg of segs) {
+          const sw = bodyFont.widthOfTextAtSize(seg, fontSize);
+          const x = CONTENT_LEFT + (CONTENT_WIDTH - sw) / 2;
+          page.drawText(seg, { x, y, size: fontSize, font: bodyFont });
+          y -= lineHeight;
+        }
+      }
     } else if (lineType === "parenthetical") {
       const segs = wrap(bodyFont, displayText, fontSize - 1, CONTENT_WIDTH - 80);
       ensureSpace(segs.length);

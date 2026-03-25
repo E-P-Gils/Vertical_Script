@@ -1287,7 +1287,7 @@ function sanitizeEpisodePromptLeaks(text, episodeNumber) {
   return { text: cleaned, stripped };
 }
 
-function finalizeEpisodeText(text, episodeNumber) {
+function finalizeEpisodeText(text, episodeNumber, names = null) {
   if (!text || typeof text !== "string") return text;
   // Phase 2 sequential normalisation:
   // 1) Strip prompt/meta leaks and enforce canonical EPISODE / END EPISODE wrappers
@@ -1300,8 +1300,12 @@ function finalizeEpisodeText(text, episodeNumber) {
       sanitized.stripped.slice(0, 12)
     );
   }
+  const characterNames = names
+    ? [names.heroine, names.coldCeo, names.warmFriend].filter(Boolean)
+    : [];
   const mergeNorm = fixMergedWordIssuesPhase2Detailed(sanitized.text, {
     dynamicPatterns: DYNAMIC_MERGE_PATTERNS,
+    characterNames,
   });
   let t = mergeNorm.text;
   if (!mergeNorm.idempotent || mergeNorm.logs.some((x) => x.count > 0)) {
@@ -1314,6 +1318,17 @@ function finalizeEpisodeText(text, episodeNumber) {
     .replace(/^\s*EP(?:ISODE|OSODE|ISDE|ODES?)\s+\d+\s*/i, "")
     .replace(/\s*END\s+EP(?:ISODE|OSODE|ISDE|ODES?)\s+\d+\s*$/i, "")
     .trim()}\n\nEND EPISODE ${episodeNumber}`;
+}
+
+/** Collapse detection: technical word-vomit vs philosophical / abstract prose (thin-genre failures). */
+const COLLAPSE_TECH_LEXICON =
+  /\b(geology|chemistry|physics|quantum|blockchain|algorithm|nucleosynthesis|pharmacogenomics|ontology|epistemology|topology|astrophysics|biochemistry)\b/i;
+
+const COLLAPSE_ABSTRACT_LEXICON =
+  /\b(forevermore|eternity|destiny|cosmos|existence|metaphysics|consciousness|transcend(?:s|ed|ing)?|infinite|eternal|universal|omnipotent|inevitably|perpetually|ceaselessly|endlessly|boundless|immutable|wholeheartedly|willingly|embraced)\b/i;
+
+function lineHasCollapseLexicon(line) {
+  return COLLAPSE_TECH_LEXICON.test(line) || COLLAPSE_ABSTRACT_LEXICON.test(line);
 }
 
 /**
@@ -1338,7 +1353,7 @@ function looksLikeSynonymVomit(text) {
       run = 0;
     }
   }
-  if (maxRun >= 10) return true;
+  if (maxRun >= 6) return true;
 
   // 2) Extremely long punctuation-free word chains.
   for (const line of lines) {
@@ -1377,8 +1392,6 @@ function looksLikeContextCollapse(text, names) {
   const nameAnchors = buildNameAnchors(names);
   let run = 0;
   let maxRun = 0;
-  const technicalLexicon =
-    /\b(geology|chemistry|physics|quantum|blockchain|algorithm|nucleosynthesis|pharmacogenomics|ontology|epistemology|topology|astrophysics|biochemistry)\b/i;
   for (const line of lines) {
     const isScene = /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(line);
     const isCue = /^[A-Z][A-Z0-9 '\-]{1,30}$/.test(line) && !/^(EPISODE|END EPISODE|FADE|CUT)/i.test(line);
@@ -1387,21 +1400,21 @@ function looksLikeContextCollapse(text, names) {
     const longListLike =
       words.length >= 10 && (line.includes(",") || line.includes(";")) && !/[.!?]$/.test(line);
     const anchor = isScene || isCue || hasName || words.length <= 5;
-    const techHeavy = technicalLexicon.test(line) && words.length >= 8;
-    if (!anchor && (longListLike || words.length >= 12 || techHeavy)) {
+    const lexiconHeavy = lineHasCollapseLexicon(line) && words.length >= 8;
+    if (!anchor && (longListLike || words.length >= 12 || lexiconHeavy)) {
       run += 1;
       if (run > maxRun) maxRun = run;
     } else {
       run = 0;
     }
   }
-  if (maxRun >= 6) return true;
+  if (maxRun >= 4) return true;
 
   // Secondary guard: one giant abstract run line.
   return lines.some((line) => {
     const words = line.split(/\s+/).filter(Boolean);
     return (
-      (words.length >= 32 || (technicalLexicon.test(line) && words.length >= 14)) &&
+      (words.length >= 32 || (lineHasCollapseLexicon(line) && words.length >= 14)) &&
       !/^(INT\.|EXT\.)/i.test(line) &&
       !/[.!?]/.test(line)
     );
@@ -1917,6 +1930,41 @@ function formatBlueprintContext(blueprint, episodeNumber) {
 // How many prior episodes to include in full for continuation (token budget).
 const PREVIOUS_EPISODES_IN_CONTEXT = 1;
 
+/** Minimal user prompt for collapse rescue — avoids resending the full context that triggered the failure. */
+function buildCollapseRescueUserPrompt({
+  language,
+  genre,
+  totalEpisodes,
+  episodeNumber,
+  logline,
+  names,
+  blueprint,
+}) {
+  const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
+  const genreTag = String(genre || "Romance").trim() || "Romance";
+  const total = Math.max(1, totalEpisodes || 1);
+  const ep = Math.max(1, episodeNumber || 1);
+  const blueprintContext = formatBlueprintContext(blueprint, ep);
+  const parts = [
+    `[LANG=${langTag}] [GENRE=${genreTag}] [EPISODES=${total}] [EPISODE=${ep}]`,
+  ];
+  if (names?.heroine && names?.coldCeo && names?.warmFriend) {
+    parts.push(
+      `[HEROINE=${names.heroine}] [MALE1=${names.coldCeo}] [MALE2=${names.warmFriend}]`
+    );
+  }
+  parts.push(`[LOGLINE] ${safeStr(logline).slice(0, 500)}`);
+  parts.push(
+    "Write ONE complete episode of screenplay for the episode number above. Use the cast and logline only. Named characters only. Concrete action and dialogue. No abstract prose, no philosophy monologues, no vocabulary lists. Use standard screenplay format: scene headings (INT./EXT.), character cues in ALL CAPS, dialogue on the following line."
+  );
+  if (blueprintContext) {
+    parts.push(
+      `THIS EPISODE PLAN (follow beats; stay concrete):\n${blueprintContext.slice(0, 600)}`
+    );
+  }
+  return parts.join("\n\n");
+}
+
 function buildEpisodePromptText({
   language,
   genre,
@@ -1928,7 +1976,6 @@ function buildEpisodePromptText({
   blueprint,
   episodeSummaries,
   recaps,
-  previousEpisodeScripts = [],
   previousEpisodeStates = [],
   narrativeResetText = "",
   trimContext = ENABLE_TRIMMED_CONTEXT,
@@ -2252,8 +2299,6 @@ function targetedCollapseSpanRepair(text, names) {
   const anchors = buildNameAnchors(names);
   const repaired = [];
   let run = [];
-  const technicalLexicon =
-    /\b(geology|chemistry|physics|quantum|blockchain|algorithm|nucleosynthesis|pharmacogenomics|ontology|epistemology|topology|astrophysics|biochemistry)\b/i;
   const flushRun = () => {
     if (!run.length) return;
     if (run.length >= 6) {
@@ -2291,7 +2336,7 @@ function targetedCollapseSpanRepair(text, names) {
       !isScene &&
       !isCue &&
       !hasName &&
-      (words.length >= 10 || (technicalLexicon.test(line) && words.length >= 8));
+      (words.length >= 10 || (lineHasCollapseLexicon(line) && words.length >= 8));
     if (looksUnanchored) {
       run.push(line);
       continue;
@@ -2451,7 +2496,12 @@ app.post("/generate", requireAuth, async (req, res) => {
 
       try {
         let narrativeResetText = "";
-        if ((ep === 20 || ep === 40) && !narrativeResetMemo.has(ep)) {
+        const narrativeResetEpisodes = /superhero|sci[-.\s]?fi|science\s*fiction|fantasy|horror/i.test(
+          String(genre || "")
+        )
+          ? [10, 25, 45]
+          : [20, 40];
+        if (narrativeResetEpisodes.includes(ep) && !narrativeResetMemo.has(ep)) {
           try {
             const reset = await buildFullNarrativeReset(
               episodeRecaps,
@@ -2481,7 +2531,6 @@ app.post("/generate", requireAuth, async (req, res) => {
           blueprint,
           episodeSummaries,
           recaps: episodeRecaps,
-          previousEpisodeScripts: episodeScriptsMemo,
           previousEpisodeStates: episodeStateMemo,
           narrativeResetText,
           trimContext: ENABLE_TRIMMED_CONTEXT,
@@ -2547,7 +2596,7 @@ app.post("/generate", requireAuth, async (req, res) => {
             ? rawContent.trim()
             : `[Episode ${ep} — no content]`;
 
-        episodeText = finalizeEpisodeText(episodeText, ep);
+        episodeText = finalizeEpisodeText(episodeText, ep, seriesNames);
         // Phase 3 validation — detect main-trio name inconsistencies before Phase 2 canonicalization.
         if (shouldRunNameValidation) {
           try {
@@ -2612,7 +2661,7 @@ app.post("/generate", requireAuth, async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
               if (shouldRunNameValidation) {
                 try {
                   const mismatches = detectMainTrioNameMismatches(
@@ -2665,23 +2714,29 @@ app.post("/generate", requireAuth, async (req, res) => {
         // Quality gate: prevent "synonym vomit" / context-collapse word-list runs.
         if (looksLikeSynonymVomit(episodeText) || looksLikeContextCollapse(episodeText, seriesNames)) {
           try {
-            const qualityRetryContent =
-              userContent +
-              "\n\nREWRITE REQUIREMENT (quality): The previous draft produced context-collapse output (word-list/synonym-vomit or abstract list drift with no scene/cast anchors). Remove that section and rewrite as normal screenplay scenes with named characters, dialogue cues, and concrete actions. Do NOT output long unanchored vocabulary runs.";
+            const qualityRetryContent = buildCollapseRescueUserPrompt({
+              language: body.language || "EN",
+              genre,
+              totalEpisodes: episodeCount,
+              episodeNumber: ep,
+              logline,
+              names: seriesNames,
+              blueprint,
+            });
             const retry = await openai.chat.completions.create({
-              model: FINETUNED_MODEL,
+              model: PLANNER_MODEL,
               messages: [
                 { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
                 { role: "user", content: qualityRetryContent },
               ],
               max_tokens: 2048,
-              temperature: 0.5,
+              temperature: 0.3,
               frequency_penalty: 1.0,
               presence_penalty: 0.6,
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
               if (shouldRunNameValidation) {
                 try {
                   const mismatches = detectMainTrioNameMismatches(
@@ -2756,7 +2811,7 @@ app.post("/generate", requireAuth, async (req, res) => {
               genre,
               summary: fallbackSummary,
             });
-            episodeText = finalizeEpisodeText(healed, ep);
+            episodeText = finalizeEpisodeText(healed, ep, seriesNames);
             sendStreamLine(res, {
               type: "quality_gate",
               episode: ep,
@@ -2788,7 +2843,7 @@ app.post("/generate", requireAuth, async (req, res) => {
                 names: seriesNames,
               });
               if (rewritten) {
-                episodeText = finalizeEpisodeText(rewritten, ep);
+                episodeText = finalizeEpisodeText(rewritten, ep, seriesNames);
                 episodeText = normalizeEpisodeCharacterNames(
                   episodeText,
                   CHARACTER_NAME_REGISTRY_PATH
@@ -2835,7 +2890,7 @@ app.post("/generate", requireAuth, async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
               if (shouldRunNameValidation) {
                 try {
                   const mismatches = detectMainTrioNameMismatches(
@@ -2895,7 +2950,7 @@ app.post("/generate", requireAuth, async (req, res) => {
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
             if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = finalizeEpisodeText(retryRaw.trim(), ep);
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
               if (shouldRunNameValidation) {
                 try {
                   const mismatches = detectMainTrioNameMismatches(
@@ -2963,7 +3018,7 @@ app.post("/generate", requireAuth, async (req, res) => {
             });
             const editedRaw = edit.choices?.[0]?.message?.content;
             if (typeof editedRaw === "string" && editedRaw.trim()) {
-              episodeText = finalizeEpisodeText(editedRaw.trim(), ep);
+              episodeText = finalizeEpisodeText(editedRaw.trim(), ep, seriesNames);
               if (shouldRunNameValidation) {
                 try {
                   const mismatches = detectMainTrioNameMismatches(
