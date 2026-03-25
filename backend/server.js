@@ -927,6 +927,38 @@ function detectMainTrioNameMismatches(episodeText, names) {
   });
 }
 
+/**
+ * Directly fixes detected main-trio name variants in cue header lines.
+ * Previously detection logged mismatches but never applied corrections — this is the fix.
+ */
+function applyMainTrioNameCorrections(episodeText, mismatches) {
+  if (!mismatches || !mismatches.length || !episodeText) return episodeText;
+  const lines = String(episodeText).split(/\r?\n/);
+  return lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+    // Only operate on lines that look like character cue headers (ALL CAPS, optional parens)
+    if (!/^[A-Z0-9 '\-]+(?:\s*\([^)]*\))?$/.test(trimmed)) return line;
+    if (/[.!?]/.test(trimmed) || trimmed.length > 60) return line;
+    // Extract base name (strip parenthetical, POV suffix, possessive)
+    let base = trimmed;
+    const parenIdx = base.indexOf("(");
+    if (parenIdx >= 0) base = base.slice(0, parenIdx).trimEnd();
+    base = base.replace(/\s+POV$/i, "").trimEnd();
+    base = base.replace(/('S|'s)$/i, "").trimEnd();
+    if (!base) return line;
+    for (const mm of mismatches) {
+      const variant = String(mm.foundVariant || "").trim();
+      const expected = String(mm.expectedHeader || "").trim();
+      if (!variant || !expected || variant === expected) continue;
+      if (base === variant) {
+        return line.replace(variant, expected);
+      }
+    }
+    return line;
+  }).join("\n");
+}
+
 function extractJsonObject(text) {
   if (!text || typeof text !== "string") return null;
   const match = text.match(/\{[\s\S]*\}/);
@@ -1214,9 +1246,8 @@ function fixMergedWordsEpisodeText(text) {
 function hasMergedWordIssues(text) {
   if (!text || typeof text !== "string") return false;
   const report = auditMergedWords(text);
-  // Phase 3 quality gate:
-  // if more than 3 merged words are detected, we consider it a failure.
-  return report.totals.mergedTotal > 3;
+  // Trigger retry if more than 1 merged word remains after post-processing.
+  return report.totals.mergedTotal > 1;
 }
 
 const PROMPT_LEAK_LINE_PATTERNS = [
@@ -1366,13 +1397,13 @@ function looksLikeSynonymVomit(text) {
       run = 0;
     }
   }
-  if (maxRun >= 6) return true;
+  if (maxRun >= 5) return true;
 
   // 2) Extremely long punctuation-free word chains.
   for (const line of lines) {
     if (/[.!?;,:]/.test(line)) continue;
     const words = line.split(/\s+/).filter(Boolean);
-    if (words.length >= 14 && words.every((w) => /^[A-Za-z][A-Za-z'-]{1,}$/.test(w))) {
+    if (words.length >= 12 && words.every((w) => /^[A-Za-z][A-Za-z'-]{1,}$/.test(w))) {
       return true;
     }
   }
@@ -1436,13 +1467,13 @@ function looksLikeContextCollapse(text, names) {
       run = 0;
     }
   }
-  if (maxRun >= 4) return true;
+  if (maxRun >= 3) return true;
 
   // Secondary guard: one giant abstract run line.
   return lines.some((line) => {
     const words = line.split(/\s+/).filter(Boolean);
     return (
-      (words.length >= 32 || (lineHasCollapseLexicon(line) && words.length >= 14)) &&
+      (words.length >= 28 || (lineHasCollapseLexicon(line) && words.length >= 12)) &&
       !/^(INT\.|EXT\.)/i.test(line) &&
       !/[.!?]/.test(line)
     );
@@ -2286,38 +2317,74 @@ function buildCollapseSafeEpisodeFallback({
   names,
   genre,
   summary,
+  plan,
 }) {
   const heroine = safeStr(names?.heroine) || "THE HEROINE";
   const male1 = safeStr(names?.coldCeo) || "MALE LEAD 1";
   const male2 = safeStr(names?.warmFriend) || "MALE LEAD 2";
-  const summaryLine =
-    safeStr(summary).trim() ||
-    `The conflict intensifies in episode ${episodeNumber} as relationships and stakes escalate.`;
+  const heroineUpper = heroine.toUpperCase();
+  const male1Upper = male1.toUpperCase();
+  const male2Upper = male2.toUpperCase();
   const isFinal = episodeNumber === totalEpisodes;
-  const ending =
-    isFinal
-      ? `${heroine} chooses a clear future with no new threat introduced.`
-      : `${heroine} realizes the next move could change everything.`;
-  const location =
-    /horror|monster|werewolf/i.test(String(genre || ""))
-      ? "INT. SAFE ROOM - NIGHT"
-      : "INT. PRIVATE OFFICE - NIGHT";
+
+  const isWerewolf = /horror|monster|werewolf/i.test(String(genre || ""));
+  const isAction = /action|crime|superhero/i.test(String(genre || ""));
+
+  // Pull concrete details from blueprint plan if available
+  const conflict = safeStr(plan?.main_conflict).trim();
+  const cliffhanger = safeStr(plan?.cliffhanger).trim();
+  const keyEvents = Array.isArray(plan?.key_events) ? plan.key_events.filter(Boolean) : [];
+
+  // Pick locations appropriate to genre
+  const loc1 = isWerewolf ? "INT. PACK HOUSE - DAY" : isAction ? "INT. PRECINCT - DAY" : "INT. OFFICE LOBBY - DAY";
+  const loc2 = isWerewolf ? "EXT. FOREST CLEARING - NIGHT" : isAction ? "EXT. CITY STREET - NIGHT" : "INT. PRIVATE OFFICE - NIGHT";
+
+  // Build a plausible conflict line from plan data or fallback
+  const conflictLine = conflict
+    ? conflict
+    : `The tension between ${heroine} and ${male1} reaches a breaking point.`;
+
+  // Build a scene-1 beat using the first key event if present
+  const beat1 = keyEvents[0]
+    ? `${keyEvents[0]}`
+    : `${heroine} faces an unexpected confrontation she cannot ignore.`;
+
+  // Scene 2 beat
+  const beat2 = keyEvents[1]
+    ? `${keyEvents[1]}`
+    : `${male1} makes a decision that changes everything.`;
+
+  // Closing line
+  const closingLine = isFinal
+    ? `${heroine} finally takes back control of her own story.`
+    : cliffhanger
+    ? cliffhanger
+    : `${heroine} knows the next move will define who she really is.`;
 
   return [
-    location,
+    loc1,
     "",
-    `${heroine.toUpperCase()}`,
-    "I won't let this spiral out of control.",
+    `${conflictLine}`,
     "",
-    `${male1.toUpperCase()}`,
-    "Then we move now, together. No more delays.",
+    heroineUpper,
+    "I'm not running from this. Not anymore.",
     "",
-    `${male2.toUpperCase()}`,
-    "Whatever happens next, I stay with you.",
+    male1Upper,
+    "Then stand your ground. I'll be right here.",
     "",
-    summaryLine,
+    `${beat1}`,
     "",
-    ending,
+    loc2,
+    "",
+    `${beat2}`,
+    "",
+    male2Upper,
+    "Whatever happens next — I'm with you.",
+    "",
+    heroineUpper,
+    "Then let's finish this.",
+    "",
+    `${closingLine}`,
   ].join("\n");
 }
 
@@ -2625,11 +2692,13 @@ app.post("/generate", requireAuth, async (req, res) => {
             : `[Episode ${ep} — no content]`;
 
         episodeText = finalizeEpisodeText(episodeText, ep, seriesNames);
-        // Phase 3 validation — detect main-trio name inconsistencies before Phase 2 canonicalization.
+        // Phase 3 validation — detect and FIX main-trio name inconsistencies before canonicalization.
         if (shouldRunNameValidation) {
           try {
             const mismatches = detectMainTrioNameMismatches(episodeText, seriesNames);
             if (mismatches.length > 0) {
+              // Apply corrections immediately (was log-only before — bug fix)
+              episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
               const report = await validateMainTrioNameConsistencyWithLLM({
                 episodeText,
                 names: seriesNames,
@@ -2697,6 +2766,7 @@ app.post("/generate", requireAuth, async (req, res) => {
                     seriesNames
                   );
                   if (mismatches.length > 0) {
+                    episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
                     const report = await validateMainTrioNameConsistencyWithLLM(
                       {
                         episodeText,
@@ -2772,6 +2842,7 @@ app.post("/generate", requireAuth, async (req, res) => {
                     seriesNames
                   );
                   if (mismatches.length > 0) {
+                    episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
                     const report = await validateMainTrioNameConsistencyWithLLM(
                       {
                         episodeText,
@@ -2812,7 +2883,7 @@ app.post("/generate", requireAuth, async (req, res) => {
           } catch (qErr) {
             console.error(`Quality retry failed for episode ${ep}:`, qErr);
           }
-          // Verification policy: one more targeted repair loop before fallback.
+          // Verification policy: one more targeted repair loop before second rescue.
           if (hasQualityCollapse(episodeText, seriesNames)) {
             const spanRepair2 = targetedRepairEpisodeText(episodeText, seriesNames);
             episodeText = spanRepair2.text;
@@ -2825,19 +2896,65 @@ app.post("/generate", requireAuth, async (req, res) => {
               pass: "verification_loop",
             });
           }
-          // Client-safe mode: if collapse remains after retry/repair, auto-heal with
-          // a deterministic anchored fallback episode instead of failing generation.
+          // Second rescue attempt: ultra-minimal prompt at very low temperature.
+          // This runs before the deterministic fallback to give the LLM one more chance
+          // to produce real screenplay content rather than a placeholder episode.
+          if (hasQualityCollapse(episodeText, seriesNames)) {
+            try {
+              const rescue2Content = buildCollapseRescueUserPrompt({
+                language: body.language || "EN",
+                genre,
+                totalEpisodes: episodeCount,
+                episodeNumber: ep,
+                logline,
+                names: seriesNames,
+                blueprint,
+              });
+              const rescue2 = await openai.chat.completions.create({
+                model: PLANNER_MODEL,
+                messages: [
+                  { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                  { role: "user", content: rescue2Content },
+                ],
+                max_tokens: 2048,
+                temperature: 0.15,
+                frequency_penalty: 1.2,
+                presence_penalty: 0.8,
+              });
+              const rescue2Raw = rescue2.choices?.[0]?.message?.content;
+              if (typeof rescue2Raw === "string" && rescue2Raw.trim()) {
+                const rescue2Text = finalizeEpisodeText(rescue2Raw.trim(), ep, seriesNames);
+                if (!hasQualityCollapse(rescue2Text, seriesNames)) {
+                  episodeText = rescue2Text;
+                  sendStreamLine(res, {
+                    type: "quality_gate",
+                    episode: ep,
+                    status: "second_rescue_succeeded",
+                  });
+                }
+              }
+            } catch (r2Err) {
+              console.error(`Second rescue attempt failed for episode ${ep}:`, r2Err);
+            }
+          }
+          // Last resort: deterministic fallback using blueprint plan data.
+          // Better than before — uses actual episode plan details for plausible content.
           if (hasQualityCollapse(episodeText, seriesNames)) {
             const fallbackSummary =
               episodeSummaries && episodeSummaries instanceof Map
                 ? episodeSummaries.get(ep)
                 : "";
+            const fallbackPlan =
+              blueprint && Array.isArray(blueprint.episodes)
+                ? blueprint.episodes.find((e) => e && e.episode === ep) || null
+                : null;
             const healed = buildCollapseSafeEpisodeFallback({
               episodeNumber: ep,
               totalEpisodes: episodeCount,
               names: seriesNames,
               genre,
               summary: fallbackSummary,
+              plan: fallbackPlan,
             });
             episodeText = finalizeEpisodeText(healed, ep, seriesNames);
             sendStreamLine(res, {
@@ -2926,6 +3043,7 @@ app.post("/generate", requireAuth, async (req, res) => {
                     seriesNames
                   );
                   if (mismatches.length > 0) {
+                    episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
                     const report = await validateMainTrioNameConsistencyWithLLM(
                       {
                         episodeText,
@@ -2986,6 +3104,7 @@ app.post("/generate", requireAuth, async (req, res) => {
                     seriesNames
                   );
                   if (mismatches.length > 0) {
+                    episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
                     const report = await validateMainTrioNameConsistencyWithLLM(
                       {
                         episodeText,
@@ -3054,6 +3173,7 @@ app.post("/generate", requireAuth, async (req, res) => {
                     seriesNames
                   );
                   if (mismatches.length > 0) {
+                    episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
                     const report = await validateMainTrioNameConsistencyWithLLM(
                       {
                         episodeText,
