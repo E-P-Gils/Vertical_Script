@@ -450,6 +450,20 @@
   width: 100%;
   padding-bottom: 1rem;
 }
+.vpn-notice {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--cream);
+  line-height: 1.35;
+  margin: 0 0 1rem;
+  text-shadow: 0 0 8px rgba(139, 32, 32, 0.2);
+}
+.vpn-notice-en {
+  margin: 0;
+}
+.vpn-notice-zh {
+  margin: 0.25rem 0 0;
+}
 .ip-note {
   font-size: 1rem;
   font-weight: 900;

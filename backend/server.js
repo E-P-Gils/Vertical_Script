@@ -1231,6 +1231,19 @@ const PROMPT_LEAK_LINE_PATTERNS = [
   /\bOutput\s+only\b.*\b(script|screenplay|content)\b/i,
   /\[\[\s*INTERNAL_CONTEXT_(?:BEGIN|END)\s*\]\]/i,
   /\[\[\s*DO_NOT_OUTPUT_INTERNAL_CONTEXT\s*\]\]/i,
+  /\[\[\s*STORY_STATE_(?:BEGIN|END)\s*\]\]/i,
+  /\[\[\s*DO_NOT_OUTPUT_STORY_STATE\s*\]\]/i,
+  /\btoken\s+limit\b/i,
+  /\bconversation\s+history\b/i,
+  /\bmemory\s+retention\b/i,
+  /\bsystem\s+messages?\b/i,
+  /\bformatting\s+conventions?\b/i,
+  /\bfont\s+size\s+style\b/i,
+  /\bpage\s+number\s+line\s+spacing\b/i,
+  /\binternal\s+context\s+markers?\b/i,
+  /\bexplicit\s+content\s+disclaimers?\b/i,
+  /\bcall-to-action\s+instructions?\b/i,
+  /\bindustry\s+formatting\b/i,
 ];
 
 function isMessyEpisodeDivider(line) {
@@ -1365,6 +1378,21 @@ function looksLikeSynonymVomit(text) {
   }
 
   return false;
+}
+
+function hasSentenceLevelMerges(text) {
+  if (!text || typeof text !== "string") return false;
+  // Detect collapsed sentence-like tokens, e.g. "Bloodspurtsoutwardashecollaps".
+  const words = text.split(/\s+/).filter(Boolean);
+  return words.some((w) => w.length > 25 && /^[A-Za-z]+$/.test(w));
+}
+
+function hasQualityCollapse(text, names = null) {
+  return (
+    looksLikeSynonymVomit(text) ||
+    looksLikeContextCollapse(text, names) ||
+    hasSentenceLevelMerges(text)
+  );
 }
 
 function buildNameAnchors(names) {
@@ -1667,8 +1695,8 @@ This is always ONE SINGLE SERIES told over many episodes. All  episodes in the r
 - The protagonists NEVER get replaced: do NOT switch to a new set of main characters mid-season. You may introduce supporting characters, but every episode must include the heroine and at least one of the two male leads, and the main plot must remain about this trio.
 
 CRITICAL BOUNDARY RULE (never violate):
-- The prompt may include INTERNAL CONTEXT sections and operational instructions wrapped in markers such as [[INTERNAL_CONTEXT_BEGIN]] ... [[INTERNAL_CONTEXT_END]].
-- These markers and their contents are PRIVATE scaffolding. NEVER reproduce marker text, instruction text, transition notes, or any meta-commentary in output.
+- The prompt may include STORY STATE sections wrapped in markers such as [[STORY_STATE_BEGIN]] ... [[STORY_STATE_END]].
+- These markers and their contents are private continuity scaffolding. NEVER reproduce marker text, instruction text, transition notes, or any meta-commentary in output.
 - Output ONLY screenplay content (scene headings, action, dialogue). No instructions, no notes, no boundary tokens.
 
 If the logline explicitly gives character names, you may align the provided HEROINE/MALE1/MALE2 tags with those names, but once the names are fixed you MUST keep them consistent in every episode.
@@ -2101,20 +2129,20 @@ function buildEpisodePromptText({
     lines.push("");
   }
 
-  // Dynamic programming / memo: pass the actual script of the previous episode(s)
+  // Continuity memo: pass previous episode state
   // so the model continues from the exact final line (critical for paid cliffhangers),
   // BUT do not allow the model to restage the exact same scene.
   if (ep > 1 && Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
     const toInclude = previousEpisodeStates.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
     const label = toInclude.length === 1 ? "PREVIOUS EPISODE STATE" : "PREVIOUS EPISODE STATES";
     lines.push("");
-    lines.push("[[DO_NOT_OUTPUT_INTERNAL_CONTEXT]]");
+    lines.push("[[DO_NOT_OUTPUT_STORY_STATE]]");
     lines.push(
-      `CONTINUATION REQUIREMENT (critical for this format): Below is structured state from the ${label}. Continue immediately from this state with no timeline reset.`
+      `CONTINUATION REQUIREMENT (critical for this format): Below is structured story state from the ${label}. Continue immediately from this state with no timeline reset.`
     );
     lines.push(`Do NOT restage previous beats; move story FORWARD with new consequences.`);
     lines.push("");
-    lines.push("[[INTERNAL_CONTEXT_BEGIN]]");
+    lines.push("[[STORY_STATE_BEGIN]]");
     toInclude.forEach((state, i) => {
       const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
       lines.push(`[[PREVIOUS_EPISODE_STATE ${which}]]`);
@@ -2124,10 +2152,10 @@ function buildEpisodePromptText({
       lines.push(`[[END_PREVIOUS_EPISODE_STATE ${which}]]`);
       lines.push("");
     });
-    lines.push("[[INTERNAL_CONTEXT_END]]");
+    lines.push("[[STORY_STATE_END]]");
     lines.push(
       `Now write screenplay content for EPISODE ${ep} only, continuing directly from story state above. ` +
-      `Do NOT output any INTERNAL_CONTEXT markers, instruction text, or transition notes.`
+      `Do NOT output any STORY_STATE markers, instruction text, or transition notes.`
     );
     lines.push("");
   }
@@ -2496,7 +2524,7 @@ app.post("/generate", requireAuth, async (req, res) => {
 
       try {
         let narrativeResetText = "";
-        const narrativeResetEpisodes = /superhero|sci[-.\s]?fi|science\s*fiction|fantasy|horror/i.test(
+        const narrativeResetEpisodes = /superhero|sci[-.\s]?fi|science\s*fiction|fantasy|horror|monster|werewolf/i.test(
           String(genre || "")
         )
           ? [10, 25, 45]
@@ -2638,7 +2666,7 @@ app.post("/generate", requireAuth, async (req, res) => {
 
         // Hard validation: enforce zero merged-words for credibility.
         // Retry once if any merged-word patterns remain after post-processing.
-        if (hasMergedWordIssues(episodeText)) {
+        if (hasMergedWordIssues(episodeText) || hasSentenceLevelMerges(episodeText)) {
           try {
             const spacingRetryContent =
               userContent +
@@ -2712,7 +2740,7 @@ app.post("/generate", requireAuth, async (req, res) => {
         }
 
         // Quality gate: prevent "synonym vomit" / context-collapse word-list runs.
-        if (looksLikeSynonymVomit(episodeText) || looksLikeContextCollapse(episodeText, seriesNames)) {
+        if (hasQualityCollapse(episodeText, seriesNames)) {
           try {
             const qualityRetryContent = buildCollapseRescueUserPrompt({
               language: body.language || "EN",
@@ -2785,7 +2813,7 @@ app.post("/generate", requireAuth, async (req, res) => {
             console.error(`Quality retry failed for episode ${ep}:`, qErr);
           }
           // Verification policy: one more targeted repair loop before fallback.
-          if (looksLikeSynonymVomit(episodeText) || looksLikeContextCollapse(episodeText, seriesNames)) {
+          if (hasQualityCollapse(episodeText, seriesNames)) {
             const spanRepair2 = targetedRepairEpisodeText(episodeText, seriesNames);
             episodeText = spanRepair2.text;
             sendStreamLine(res, {
@@ -2799,7 +2827,7 @@ app.post("/generate", requireAuth, async (req, res) => {
           }
           // Client-safe mode: if collapse remains after retry/repair, auto-heal with
           // a deterministic anchored fallback episode instead of failing generation.
-          if (looksLikeSynonymVomit(episodeText) || looksLikeContextCollapse(episodeText, seriesNames)) {
+          if (hasQualityCollapse(episodeText, seriesNames)) {
             const fallbackSummary =
               episodeSummaries && episodeSummaries instanceof Map
                 ? episodeSummaries.get(ep)

@@ -1028,6 +1028,10 @@ function App() {
       )}
 
       <footer className="footer">
+        <div className="vpn-notice">
+          <p className="vpn-notice-en">A VPN is required to access this service in China.</p>
+          <p className="vpn-notice-zh">在中国境内访问本服务需要使用 VPN。</p>
+        </div>
         <div className="ip-note">
           <p className="ip-note-en">
             Per our founding document, we will never claim ownership of the IP in scripts
