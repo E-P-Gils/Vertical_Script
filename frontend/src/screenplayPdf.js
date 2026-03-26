@@ -230,7 +230,10 @@ export async function buildScreenplayPdfBytes(script, variant = "en") {
 
   const isSceneHeading = (t) =>
     /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(t.trim()) ||
-    /^EPISODE\s+\d+/i.test(t.trim());
+    /^EPISODE\s+\d+/i.test(t.trim()) ||
+    // Safety net: Chinese episode headings (第1集, 第十集) in case the translator
+    // ignores the instruction to preserve "EPISODE N" in English.
+    /^第\s*\d+\s*集/.test(t.trim());
 
   const isCharacterLine = (t) => {
     const s = t.trim();

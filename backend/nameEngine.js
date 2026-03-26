@@ -329,6 +329,47 @@ export function getRandomCorporationName() {
 }
 
 /**
+ * Generate a pool of unique supporting character names (maleCount male + femaleCount female),
+ * avoiding first names already used for the main trio.
+ * @param {Set<string>} usedFirstNames - First names already claimed by the trio.
+ * @param {Set<string>} usedLastNames  - Last names already claimed by the trio.
+ * @param {number} maleCount
+ * @param {number} femaleCount
+ * @returns {{ male: string[], female: string[] }}
+ */
+function generateSupportingNames(usedFirstNames, usedLastNames, maleCount = 5, femaleCount = 5) {
+  const localUsedFirst = new Set(usedFirstNames);
+  const localUsedLast  = new Set(usedLastNames);
+
+  function nextFirst(gender) {
+    const pool = gender === "female" ? FIRST_FEMALE : FIRST_MALE;
+    let name = gender === "female"
+      ? pickRandom(pool)
+      : pickRandomNotBanned(pool, BANNED_FIRST_NAMES);
+    for (
+      let i = 0;
+      i < 60 && (localUsedFirst.has(name) || (gender !== "female" && BANNED_FIRST_NAMES.has(name)));
+      i++
+    ) {
+      name = gender === "female" ? pickRandom(pool) : pickRandomNotBanned(pool, BANNED_FIRST_NAMES);
+    }
+    localUsedFirst.add(name);
+    return name;
+  }
+
+  function nextLast() {
+    let name = pickRandom(LAST_NAMES);
+    for (let i = 0; i < 20 && localUsedLast.has(name); i++) name = pickRandom(LAST_NAMES);
+    localUsedLast.add(name);
+    return name;
+  }
+
+  const male   = Array.from({ length: maleCount },   () => `${nextFirst("male")} ${nextLast()}`);
+  const female = Array.from({ length: femaleCount },  () => `${nextFirst("female")} ${nextLast()}`);
+  return { male, female };
+}
+
+/**
  * Get a consistent set of three names for a series: heroine, cold CEO, warm friend.
  * Uses mix-and-match so names feel fresh but stay consistent for the run.
  * @param {string} [genre] - "WEREWOLF" or "werewolf" → use a random pack name as familyName; otherwise use a dynasty family name.
@@ -372,11 +413,16 @@ export function getSeriesNames(genre) {
   const allowCorporationNames = !isWerewolf && ["DRAMA", "ROMANCE", "CRIME", "ACTION"].includes(upperGenre);
   const corporationName = allowCorporationNames ? getRandomCorporationName() : null;
 
+  // Generate supporting cast names so the episode prompt can supply them to the model,
+  // preventing it from defaulting to recycled names like Victor, Ethan, Lance, etc.
+  const supportingNames = generateSupportingNames(usedFirstNames, usedLastNames, 5, 5);
+
   return {
     heroine: `${heroineFirst} ${last1}`,
     coldCeo: `${coldFirst} ${last2}`,
     warmFriend: `${warmFirst} ${last3}`,
     familyName,
+    supportingNames,
     ...(corporationName ? { corporationName } : {}),
     ...(isWerewolf && { packName: familyName }),
   };

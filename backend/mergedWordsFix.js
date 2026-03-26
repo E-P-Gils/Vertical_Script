@@ -61,7 +61,7 @@ const CHAINED_SPLIT_DENYLIST = new Set(
 
 const CHAINED_GLUE_SUFFIXES =
   "just|then|but|and|the|her|his|to|with|for|not|now|yet|so|" +
-  "while|when|before|after|into|onto|towards|toward|" +
+  "while|when|before|after|into|onto|towards|toward|something|" +
   "leaving|grabbing|turning|including|especially|because|although";
 
 const CHAINED_PHRASE_RE = new RegExp(`\\b([a-z]{4,})(${CHAINED_GLUE_SUFFIXES})\\b`, "g");

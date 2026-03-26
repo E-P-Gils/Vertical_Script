@@ -10,6 +10,7 @@ import OpenAI from "openai";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { getSeriesNames } from "./nameEngine.js";
+import { generateLogline, SUPPORTED_GENRES } from "./loglineEngine.js";
 import {
   updateCharacterNameRegistryFromEpisode,
   normalizeEpisodeCharacterNames,
@@ -1688,28 +1689,48 @@ You will receive ONE episode of an English script. Translate it into Simplified 
 Rules:
 - Output ONLY the translated script for this episode. No preamble, notes, or markdown.
 - Preserve line breaks and blank lines: the output should have the same paragraph structure as the input.
-- Keep scene headings in standard English abbreviations (INT., EXT., DAY, NIGHT, CONTINUED, CUT TO:, FADE IN/OUT, V.O., O.S., etc.).
+- Keep scene headings in standard English abbreviations (INT., EXT., DAY, NIGHT, CONTINUED, CUT TO:, FADE IN/OUT, V.O., O.S., etc.). You may translate the location name within a scene heading, but keep the INT./EXT. prefix and DAY/NIGHT suffix in English.
 - Keep CHARACTER NAMES in ALL CAPS exactly as in the source (same spelling). Translate dialogue, action lines, and parentheticals into natural Simplified Chinese.
+- CRITICAL — episode structure markers: keep the following lines in English exactly as they appear in the source. Do NOT translate, rephrase, or omit them:
+  • Lines that begin with "EPISODE" followed by a number (e.g. "EPISODE 1", "EPISODE 7") — copy verbatim.
+  • Lines that begin with "END EPISODE" followed by a number (e.g. "END EPISODE 1", "END EPISODE 7") — copy verbatim.
 - Preserve emotional tone and subtext of dialogue (make it sound natural spoken Chinese drama, not stiff or overly literal).
 - Do not add or remove scenes, lines, or episode markers.`;
 
-async function translateEpisodeScriptToChinese(episodeNumber, totalEpisodes, englishText) {
+async function translateEpisodeScriptToChinese(episodeNumber, totalEpisodes, englishText, { retries = 3, retryDelayMs = 4000 } = {}) {
   const src = safeStr(englishText);
   if (!src) return "";
-  const completion = await openai.chat.completions.create({
-    model: TRANSLATION_MODEL,
-    messages: [
-      { role: "system", content: SCRIPT_TRANSLATION_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: `This is episode ${episodeNumber} of ${totalEpisodes}.\n\n${src}`,
-      },
-    ],
-    max_tokens: 4096,
-    temperature: 0.35,
-  });
-  const out = completion.choices?.[0]?.message?.content;
-  return typeof out === "string" ? out.trim() : "";
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: TRANSLATION_MODEL,
+        messages: [
+          { role: "system", content: SCRIPT_TRANSLATION_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: `This is episode ${episodeNumber} of ${totalEpisodes}.\n\n${src}`,
+          },
+        ],
+        max_tokens: 4096,
+        temperature: 0.35,
+      });
+      const out = completion.choices?.[0]?.message?.content;
+      return typeof out === "string" ? out.trim() : "";
+    } catch (err) {
+      lastErr = err;
+      const isRateLimit = err?.status === 429 && !/insufficient_quota/i.test(err?.message || "");
+      // Only retry on transient rate limits, not hard quota or other errors
+      if (isRateLimit && attempt < retries) {
+        const delay = retryDelayMs * Math.pow(2, attempt);
+        console.warn(`Translation rate-limited on episode ${episodeNumber}, retrying in ${delay}ms (attempt ${attempt + 1}/${retries})…`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // Plain-text episode generation (no JSON parsing) ---------------------------
@@ -2082,6 +2103,18 @@ function buildEpisodePromptText({
       lines.push(
         `For finance/boardroom storylines use this corporation consistently: ${names.corporationName}.`
       );
+    }
+    // Pre-generated supporting cast pool — prevents the model defaulting to recycled names
+    if (names.supportingNames) {
+      const m = Array.isArray(names.supportingNames.male)   ? names.supportingNames.male.join(", ")   : "";
+      const f = Array.isArray(names.supportingNames.female) ? names.supportingNames.female.join(", ") : "";
+      if (m || f) {
+        lines.push("");
+        lines.push("SUPPORTING CHARACTER NAME POOL (use these for any new characters introduced in this episode):");
+        if (m) lines.push(`  Male supporting names: ${m}`);
+        if (f) lines.push(`  Female supporting names: ${f}`);
+        lines.push("  Do NOT default to Victor, Ethan, Lance, or other overused names. Draw from the pool above.");
+      }
     }
     if (!blueprint) {
       const fb = formatFallbackCharacterConstraints(names);
@@ -3277,35 +3310,35 @@ app.post("/generate", requireAuth, async (req, res) => {
       episodeScriptsMemo.length > 0;
     if (wantZh) {
       const total = episodeScriptsMemo.length;
+      let hardStop = false;
       for (let i = 0; i < total; i++) {
+        if (hardStop) break;
         const epNum = i + 1;
-        sendStreamLine(res, {
-          type: "translation_progress",
-          episode: epNum,
-          total,
-        });
         try {
-          const zh = await translateEpisodeScriptToChinese(
-            epNum,
-            total,
-            episodeScriptsMemo[i]
-          );
-          const text =
-            zh ||
-            `[Episode ${epNum} — translation produced no text; see English PDF.]`;
+          // sendStreamLine is inside the try so a connection drop is caught here
+          // instead of escaping to the outer catch and killing remaining episodes.
+          sendStreamLine(res, { type: "translation_progress", episode: epNum, total });
+          const zh = await translateEpisodeScriptToChinese(epNum, total, episodeScriptsMemo[i]);
+          const text = zh || `[Episode ${epNum} — translation produced no text; see English PDF.]`;
           sendStreamLine(res, { type: "episode_zh", episode: epNum, text });
         } catch (trErr) {
           console.error(`Chinese translation failed for episode ${epNum}:`, trErr);
           const msg = safeStr(trErr?.message) || "translation failed";
           const status = trErr?.status;
-          const isQuota = status === 429 || /429|quota/i.test(msg);
-          sendStreamLine(res, { type: "translation_error", episode: epNum, message: msg });
-          if (isQuota) break;
-          sendStreamLine(res, {
-            type: "episode_zh",
-            episode: epNum,
-            text: `[Episode ${epNum} — translation failed: ${msg}]`,
-          });
+          // Hard quota (account out of credits) — no point continuing
+          const isHardQuota = /insufficient_quota/i.test(msg) || (status === 429 && /quota/i.test(msg));
+          try {
+            sendStreamLine(res, { type: "translation_error", episode: epNum, message: msg });
+            sendStreamLine(res, {
+              type: "episode_zh",
+              episode: epNum,
+              text: `[Episode ${epNum} — translation failed: ${msg}]`,
+            });
+          } catch (_writeErr) {
+            // Client disconnected — nothing we can do, stop cleanly
+            hardStop = true;
+          }
+          if (isHardQuota) hardStop = true;
         }
       }
     }
@@ -3446,6 +3479,22 @@ app.get("/summaries", (req, res) => {
   const data = loadSummariesByGenre();
   const summaries = Array.isArray(data[genre]) ? data[genre] : [];
   res.json({ genre, summaries });
+});
+
+/** GET /logline/random?genre=Romance — procedurally generated logline (never repeats) */
+app.get("/logline/random", (req, res) => {
+  const genre = String(req.query.genre || "").trim() || "Romance";
+  try {
+    const logline = generateLogline(genre);
+    res.json({ genre, logline });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** GET /logline/genres — list supported genres for procedural generation */
+app.get("/logline/genres", (_req, res) => {
+  res.json({ genres: SUPPORTED_GENRES });
 });
 
 /** GET /summaries/random?genre=Romance — one random summary for that genre */
