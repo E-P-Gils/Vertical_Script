@@ -686,11 +686,30 @@ function formatRecapContext(recaps, episodeNumber) {
   if (!Array.isArray(recaps) || !recaps.length) return "";
   const prev = recaps
     .filter((r) => typeof r.episode === "number" && r.episode < episodeNumber)
-    .slice(-3);
+    .slice(-6); // expanded from -3
   if (!prev.length) return "";
   const lines = ["RECENT EPISODE RECAPS (actual story so far):"];
   for (const r of prev) {
     lines.push(`  Ep ${r.episode}: ${r.recap}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Compact full-series history — all recaps truncated to 90 chars each.
+ * Gives the model the complete story arc so it cannot "forget" events from earlier episodes.
+ * Only injected when ep > 3 (no history yet to speak of before then).
+ */
+function formatSeriesHistoryBlock(recaps, episodeNumber) {
+  if (!Array.isArray(recaps) || !recaps.length) return "";
+  const all = recaps
+    .filter((r) => typeof r.episode === "number" && r.episode < episodeNumber);
+  if (all.length < 3) return ""; // not enough history to be useful
+  const lines = [
+    "FULL SERIES HISTORY — every episode written so far (characters carry all of this forward; never contradict or reset):",
+  ];
+  for (const r of all) {
+    lines.push(`  Ep ${r.episode}: ${safeStr(r.recap).slice(0, 90)}`);
   }
   return lines.join("\n");
 }
@@ -718,30 +737,82 @@ function tagEpisodeEvents(text) {
   if (/gunshot|shots? fired|pulls? the trigger/.test(s)) add("gunfight");
   if (/storm\b|thunder|lightning/.test(s)) add("storm_atmosphere");
 
+  // Opening beat fingerprinting — check first ~600 chars so we tag the OPEN, not mid-episode action.
+  const opening = s.slice(0, 600);
+  if (
+    /\b(dock|beach|water.{0,20}edge|ocean.{0,15}scan|sonar device|notebook.{0,20}ocean|ocean.{0,20}notebook|water.{0,15}scan)\b/.test(opening)
+  ) add("dock_beach_scan_open");
+
+  // Skeptic dismissal beat — cold lead questioning whether threat/creature is real
+  if (/still chasing (ghosts?|shadows?|monsters?|those waves|sea monsters?|trouble|fairy tales?|your (monster|creature))/.test(s)) add("skeptic_dismissal");
+
+  // Creature/threat confirmed as real by direct witness
+  if (/it.s real|that.s real|confirmed.{0,30}(creature|monster|threat)|creature.{0,30}confirmed|everyone.{0,30}(saw|witnessed)|all three.{0,30}(saw|watched|confirmed)/.test(s)) add("threat_confirmed");
+
   return Array.from(tags);
 }
 
 function formatRecentEventConstraints(recaps, episodeNumber) {
   if (!Array.isArray(recaps) || !recaps.length) return "";
-  const prev = recaps
-    .filter((r) => typeof r.episode === "number" && r.episode < episodeNumber)
-    .slice(-3);
-  if (!prev.length) return "";
+  const allPrev = recaps.filter((r) => typeof r.episode === "number" && r.episode < episodeNumber);
+  const recent = allPrev.slice(-6); // expanded from -3
+  if (!recent.length) return "";
+
   const recentTags = new Set();
-  for (const r of prev) {
+  const dockScanEps = [];
+  const skepticEps = [];
+  for (const r of recent) {
     if (Array.isArray(r.tags)) {
       for (const t of r.tags) {
         if (t) recentTags.add(t);
       }
+      if (r.tags.includes("dock_beach_scan_open")) dockScanEps.push(r.episode);
+      if (r.tags.includes("skeptic_dismissal")) skepticEps.push(r.episode);
     }
   }
-  if (!recentTags.size) return "";
-  const tagList = Array.from(recentTags);
-  return (
-    "RECENT BIG SET-PIECES (avoid repeating as the main device this episode): " +
-    tagList.join(", ") +
-    "."
+
+  const parts = [];
+
+  // Standard big set-piece avoidance (exclude the new opening/relationship tags — handled separately)
+  const setpieceTags = Array.from(recentTags).filter(
+    (t) => !["dock_beach_scan_open", "skeptic_dismissal", "threat_confirmed"].includes(t)
   );
+  if (setpieceTags.length) {
+    parts.push(
+      "RECENT BIG SET-PIECES (avoid repeating as the main device this episode): " +
+      setpieceTags.join(", ") + "."
+    );
+  }
+
+  // Opening beat ban — if the dock/beach scan open has been used ≥2 times recently
+  if (dockScanEps.length >= 2) {
+    parts.push(
+      `OPENING BEAT BANNED: Do NOT open this episode with the heroine standing alone at the dock, beach, or water's edge scanning the ocean or checking equipment. ` +
+      `That exact beat was used in recent episodes (${dockScanEps.join(", ")}). ` +
+      `Start somewhere completely different — indoors, mid-action, mid-conversation, or from a secondary character's perspective.`
+    );
+  }
+
+  // Skeptic ban — if cold lead has already been dismissive recently
+  if (skepticEps.length >= 2) {
+    parts.push(
+      `DIALOGUE BEAT BANNED: Do NOT have the cold male lead open with "still chasing ghosts/shadows/monsters?" or any equivalent skeptic dismissal. ` +
+      `That line was used in episodes (${skepticEps.join(", ")}). He must respond differently — urgency, strategy, grudging respect, or a new conflict angle.`
+    );
+  }
+
+  // Locked confirmed facts — inject once threat has been directly witnessed
+  const threatConfirmedEp = allPrev.find((r) => Array.isArray(r.tags) && r.tags.includes("threat_confirmed"));
+  if (threatConfirmedEp) {
+    parts.push(
+      `LOCKED SERIES FACT (established in episode ${threatConfirmedEp.episode}, cannot be undone): ` +
+      `The threat/creature was directly witnessed and confirmed real by the main characters. ` +
+      `No character may question whether it exists or treat it as rumor/imagination from this point forward. ` +
+      `Reactions must be tactical, protective, or fear-based — NOT dismissive.`
+    );
+  }
+
+  return parts.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1762,6 +1833,7 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Use screenplay-style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
 - Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
 - Keep the episode focused, with 2–5 short scenes.
+- SETTING AND VARIETY (critical): If a THIS EPISODE'S PLAN is provided in the prompt, you MUST open in the setting_focus location listed there — do not substitute a different or more familiar location. Every episode in a 60-episode series must feel like it inhabits a distinct part of the world. Do not default to the same dock, beach, or lobby opening simply because it is comfortable. The season outline pre-planned a specific setting and conflict type for each episode — treat both as hard constraints, not suggestions.
 - Every episode should have a HOOK at the beginning. For early and middle episodes (when [EPISODE] is not within the last 5 of [EPISODES]), also end on a clear hook for the next episode—but keep them emotionally driven and grounded. Opening hooks should feel like a sharp emotional moment: an awkward intimacy beat, the heroine being subtly bullied or underestimated, a charged first encounter, or a small but vivid humiliation that makes us care. Closing hooks in these episodes should be light but addictive: a promise, a tease, a jealousy beat, a sudden confession or near-confession, or the hint of danger/competition around love or status.
 - Avoid graphic violence, gore, or long slapstick brawls. Do NOT ramble or list random objects, professions, or technical details; stay tightly focused on the characters, their feelings, and the immediate scene.
 - SPECIAL RULE FOR LATE EPISODES (when [EPISODE] is within the last 5 of [EPISODES]): progressively reduce unresolved threats and begin resolving major plot lines instead of opening new ones. Any end-of-episode hook in these late episodes should feel like the last steps toward closure (emotional decisions, consequences, or final preparations), not a brand-new danger, mystery, or villain.
@@ -1947,20 +2019,24 @@ function formatBlueprintContext(blueprint, episodeNumber) {
   const ep = Math.max(1, Math.min(episodeNumber, total));
   const lines = [];
 
-  if (ep > 1) {
-    lines.push("PREVIOUS EPISODES (already happened — continue from here):");
-    const start = Math.max(0, ep - 8);
-    for (let i = start; i < ep - 1; i++) {
-      const plan = blueprint.episodes[i];
-      if (plan && (plan.title || plan.main_conflict)) {
-        const title = plan.title || `Episode ${(plan.episode ?? i + 1)}`;
-        const oneLine = plan.main_conflict || plan.cliffhanger || "";
-        lines.push(`  Episode ${(plan.episode ?? i + 1)}: ${title}. ${oneLine}`);
-      }
-    }
-    lines.push("");
+  // ── FULL SEASON VARIETY MAP ────────────────────────────────────────────────
+  // Show the planned setting + conflict type for EVERY episode so the model
+  // can see the full diversity that was designed and never deviate from it.
+  // Format is compact: one short line per episode (~10-15 tokens total per line).
+  lines.push("FULL SEASON PLAN — setting and conflict type for every episode (MANDATORY — never substitute a different location or conflict type):");
+  for (let i = 0; i < blueprint.episodes.length; i++) {
+    const p = blueprint.episodes[i];
+    if (!p) continue;
+    const epNum = p.episode ?? i + 1;
+    const setting = p.setting_focus || "—";
+    const conflict = p.conflict_type || "—";
+    const emotional = p.emotional_focus || "";
+    const marker = epNum === ep ? " ◄ THIS EPISODE" : (epNum < ep ? " ✓ done" : "");
+    lines.push(`  Ep ${epNum}: setting=${setting} | conflict=${conflict}${emotional ? ` | emotion=${emotional}` : ""}${marker}`);
   }
+  lines.push("");
 
+  // ── CHARACTER ROLE CONSTRAINTS ─────────────────────────────────────────────
   if (Array.isArray(blueprint.characters) && blueprint.characters.length) {
     lines.push("CHARACTER ROLE CONSTRAINTS (do NOT break these):");
     for (const c of blueprint.characters) {
@@ -1981,26 +2057,46 @@ function formatBlueprintContext(blueprint, episodeNumber) {
     lines.push("");
   }
 
+  // ── PREVIOUS EPISODES SUMMARY (all past, not just last 8) ─────────────────
+  if (ep > 1) {
+    lines.push("PREVIOUS EPISODES — planned arc (already happened; continue from here):");
+    for (let i = 0; i < ep - 1; i++) {
+      const plan = blueprint.episodes[i];
+      if (plan && (plan.title || plan.main_conflict)) {
+        const epNum = plan.episode ?? i + 1;
+        const title = plan.title || `Episode ${epNum}`;
+        const conflict = plan.main_conflict || plan.cliffhanger || "";
+        const setting = plan.setting_focus ? ` [${plan.setting_focus}]` : "";
+        lines.push(`  Ep ${epNum}${setting}: ${title}. ${conflict}`);
+      }
+    }
+    lines.push("");
+  }
+
+  // ── CURRENT EPISODE PLAN ───────────────────────────────────────────────────
   const plan = blueprint.episodes[ep - 1];
   if (plan && typeof plan === "object") {
-    lines.push("THIS EPISODE'S PLAN (follow this beat for beat):");
+    lines.push("THIS EPISODE'S PLAN (follow this beat for beat — every field below is a hard constraint, not a suggestion):");
     lines.push(`  Title: ${plan.title || `Episode ${ep}`}`);
+    // setting_focus and emotional_focus were missing before — now explicitly enforced
+    if (plan.setting_focus) lines.push(`  Setting (REQUIRED — episode must be set here): ${plan.setting_focus}`);
+    if (plan.emotional_focus) lines.push(`  Emotional focus (REQUIRED — dominant emotional tone): ${plan.emotional_focus}`);
     if (plan.heroine_state) lines.push(`  Heroine state: ${plan.heroine_state}`);
-    if (plan.male1_state) lines.push(`  Male lead 1: ${plan.male1_state}`);
-    if (plan.male2_state) lines.push(`  Male lead 2: ${plan.male2_state}`);
+    if (plan.male1_state)   lines.push(`  Male lead 1 state: ${plan.male1_state}`);
+    if (plan.male2_state)   lines.push(`  Male lead 2 state: ${plan.male2_state}`);
     if (plan.main_conflict) lines.push(`  Main conflict: ${plan.main_conflict}`);
-    if (plan.hook_type) lines.push(`  Hook type: ${plan.hook_type}`);
+    if (plan.hook_type)     lines.push(`  Hook type: ${plan.hook_type}`);
     if (plan.conflict_type) lines.push(`  Conflict type: ${plan.conflict_type}`);
     if (plan.key_events && plan.key_events.length)
       lines.push(`  Key events: ${plan.key_events.join("; ")}`);
     if (plan.twist_or_reveal) lines.push(`  Twist/reveal: ${plan.twist_or_reveal}`);
-    if (plan.cliffhanger) lines.push(`  End on cliffhanger: ${plan.cliffhanger}`);
+    if (plan.cliffhanger)     lines.push(`  End on cliffhanger: ${plan.cliffhanger}`);
     if (Array.isArray(plan.micro_beats) && plan.micro_beats.length === 4) {
-      lines.push("  MICRO-STRUCTURE (you MUST follow this order exactly):");
-      lines.push(`    1) HOOK beat: ${plan.micro_beats[0]}`);
-      lines.push(`    2) CONFLICT beat: ${plan.micro_beats[1]}`);
-      lines.push(`    3) MINI-TWIST beat: ${plan.micro_beats[2]}`);
-      lines.push(`    4) CLIFFHANGER beat: ${plan.micro_beats[3]}`);
+      lines.push("  MICRO-STRUCTURE (follow this order exactly — these are the four required beats):");
+      lines.push(`    1) HOOK: ${plan.micro_beats[0]}`);
+      lines.push(`    2) CONFLICT: ${plan.micro_beats[1]}`);
+      lines.push(`    3) MINI-TWIST: ${plan.micro_beats[2]}`);
+      lines.push(`    4) CLIFFHANGER: ${plan.micro_beats[3]}`);
     }
   }
 
@@ -2008,7 +2104,7 @@ function formatBlueprintContext(blueprint, episodeNumber) {
 }
 
 // How many prior episodes to include in full for continuation (token budget).
-const PREVIOUS_EPISODES_IN_CONTEXT = 1;
+const PREVIOUS_EPISODES_IN_CONTEXT = 2;
 
 /** Minimal user prompt for collapse rescue — avoids resending the full context that triggered the failure. */
 function buildCollapseRescueUserPrompt({
@@ -2154,6 +2250,7 @@ function buildEpisodePromptText({
   }
 
   const blueprintContext = formatBlueprintContext(blueprint, ep);
+  const seriesHistory = ep > 3 ? formatSeriesHistoryBlock(recaps, ep) : "";
   const recapContext = narrativeResetText
     ? `NARRATIVE RESET CHECKPOINT:\n${narrativeResetText}`
     : trimContext
@@ -2161,7 +2258,7 @@ function buildEpisodePromptText({
         if (!Array.isArray(recaps) || !recaps.length) return "";
         const prev = recaps
           .filter((r) => typeof r.episode === "number" && r.episode < ep)
-          .slice(ep < 20 ? -3 : ep < 40 ? -2 : -1);
+          .slice(ep < 20 ? -6 : ep < 40 ? -5 : -4); // expanded from -3/-2/-1
         if (!prev.length) return "";
         const maxChars = ep < 20 ? 220 : ep < 40 ? 160 : 120;
         const compact = prev.map((r) => `Ep ${r.episode}: ${safeStr(r.recap).slice(0, maxChars)}`);
@@ -2174,15 +2271,19 @@ function buildEpisodePromptText({
       : null;
   const recentEvents = formatRecentEventConstraints(recaps, ep);
 
-  if (blueprintContext || recapContext || summaryText || recentEvents) {
+  if (blueprintContext || seriesHistory || recapContext || summaryText || recentEvents) {
     lines.push("");
     if (blueprintContext) lines.push(blueprintContext);
-    if (recapContext) {
+    if (seriesHistory) {
       if (blueprintContext) lines.push("");
+      lines.push(seriesHistory);
+    }
+    if (recapContext) {
+      if (blueprintContext || seriesHistory) lines.push("");
       lines.push(recapContext);
     }
     if (recentEvents) {
-      if (blueprintContext || recapContext) lines.push("");
+      if (blueprintContext || seriesHistory || recapContext) lines.push("");
       lines.push(recentEvents);
     }
     if (summaryText) {
