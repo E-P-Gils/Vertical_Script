@@ -2445,7 +2445,7 @@ function sendStreamLine(res, obj) {
   res.write(JSON.stringify(obj) + "\n");
 }
 
-function buildCollapseSafeEpisodeFallback({
+function buildCollapseSafeEpisodeFallbackSync({
   episodeNumber,
   totalEpisodes,
   names,
@@ -2520,6 +2520,73 @@ function buildCollapseSafeEpisodeFallback({
     "",
     `${closingLine}`,
   ].join("\n");
+}
+
+async function buildCollapseSafeEpisodeFallback(params) {
+  const { episodeNumber, totalEpisodes, names, genre, summary, plan } = params;
+  const heroine = safeStr(names?.heroine) || "the heroine";
+  const male1   = safeStr(names?.coldCeo) || "the male lead";
+  const male2   = safeStr(names?.warmFriend) || "the second lead";
+  const setting  = safeStr(plan?.setting_focus) || "an interior location";
+  const conflict = safeStr(plan?.main_conflict) || "a personal confrontation";
+  const microBeats = Array.isArray(plan?.micro_beats) ? plan.micro_beats.filter(Boolean) : [];
+  const keyEvents  = Array.isArray(plan?.key_events)  ? plan.key_events.filter(Boolean)  : [];
+  const cliffhanger = safeStr(plan?.cliffhanger);
+  const isFinal = episodeNumber === totalEpisodes;
+
+  const beatLines = microBeats.length
+    ? `Beats to hit:\n${microBeats.map((b) => `- ${b}`).join("\n")}`
+    : keyEvents.length
+    ? `Key events:\n${keyEvents.map((e) => `- ${e}`).join("\n")}`
+    : "";
+
+  const endingInstruction = isFinal
+    ? "This is the series finale — resolve the main arc with emotional closure."
+    : cliffhanger
+    ? `End with this hook: ${cliffhanger}`
+    : "End on an emotional hook that draws the viewer into the next episode.";
+
+  const userPrompt = [
+    `Write episode ${episodeNumber} of ${totalEpisodes} of a vertical drama series.`,
+    `Genre: ${genre || "drama"}`,
+    `Characters: ${heroine} (heroine), ${male1} (male lead 1), ${male2} (male lead 2)`,
+    `Setting: ${setting}`,
+    `Main conflict: ${conflict}`,
+    beatLines,
+    summary ? `Episode summary: ${summary}` : "",
+    endingInstruction,
+    "",
+    "Write a SHORT but COMPLETE screenplay episode (2–3 scenes). Rules:",
+    "- Use INT./EXT. scene headings (e.g. INT. LOCATION - DAY).",
+    "- Character name in ALL CAPS alone on its own line, then dialogue on the next line.",
+    "- Action/description: 1–2 short sentences per block.",
+    "- Do NOT output episode numbers, metadata, or commentary — screenplay content only.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: PLANNER_MODEL,
+      max_tokens: 900,
+      temperature: 0.72,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a vertical drama screenplay writer. Write compact, well-formatted screenplay scenes. Use proper INT./EXT. scene headings, ALL CAPS character cues on their own lines, natural dialogue, and keep action lines to 1–2 sentences. Output only screenplay content.",
+        },
+        { role: "user", content: userPrompt },
+      ],
+    });
+    const generated = safeStr(resp.choices?.[0]?.message?.content).trim();
+    if (generated.length > 200) return generated;
+  } catch (llmErr) {
+    console.error(`LLM fallback generation failed for episode ${episodeNumber}:`, llmErr?.message);
+  }
+
+  // Deterministic backstop when LLM call fails.
+  return buildCollapseSafeEpisodeFallbackSync(params);
 }
 
 function targetedCollapseSpanRepair(text, names) {
@@ -3082,7 +3149,7 @@ app.post("/generate", requireAuth, async (req, res) => {
               blueprint && Array.isArray(blueprint.episodes)
                 ? blueprint.episodes.find((e) => e && e.episode === ep) || null
                 : null;
-            const healed = buildCollapseSafeEpisodeFallback({
+            const healed = await buildCollapseSafeEpisodeFallback({
               episodeNumber: ep,
               totalEpisodes: episodeCount,
               names: seriesNames,

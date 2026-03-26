@@ -337,20 +337,38 @@ export function getRandomCorporationName() {
  * @param {number} femaleCount
  * @returns {{ male: string[], female: string[] }}
  */
+/** True if `candidate` shares a 4-char prefix with any name in `usedNames` (case-insensitive). */
+function tooSimilarToUsedName(candidate, usedNames) {
+  const c = candidate.toLowerCase();
+  for (const used of usedNames) {
+    const u = used.toLowerCase();
+    if (c.length >= 4 && u.length >= 4 && c.slice(0, 4) === u.slice(0, 4)) return true;
+    // Also catch one being a prefix of the other (e.g. "Elena" / "Eleanor")
+    const shorter = c.length <= u.length ? c : u;
+    const longer  = c.length <= u.length ? u : c;
+    if (shorter.length >= 4 && longer.startsWith(shorter)) return true;
+  }
+  return false;
+}
+
 function generateSupportingNames(usedFirstNames, usedLastNames, maleCount = 5, femaleCount = 5) {
   const localUsedFirst = new Set(usedFirstNames);
   const localUsedLast  = new Set(usedLastNames);
+
+  function isBadFirst(name, gender) {
+    if (localUsedFirst.has(name)) return true;
+    if (gender !== "female" && BANNED_FIRST_NAMES.has(name)) return true;
+    // Reject names that look confusingly similar to the main trio's first names.
+    if (tooSimilarToUsedName(name, usedFirstNames)) return true;
+    return false;
+  }
 
   function nextFirst(gender) {
     const pool = gender === "female" ? FIRST_FEMALE : FIRST_MALE;
     let name = gender === "female"
       ? pickRandom(pool)
       : pickRandomNotBanned(pool, BANNED_FIRST_NAMES);
-    for (
-      let i = 0;
-      i < 60 && (localUsedFirst.has(name) || (gender !== "female" && BANNED_FIRST_NAMES.has(name)));
-      i++
-    ) {
+    for (let i = 0; i < 60 && isBadFirst(name, gender); i++) {
       name = gender === "female" ? pickRandom(pool) : pickRandomNotBanned(pool, BANNED_FIRST_NAMES);
     }
     localUsedFirst.add(name);
