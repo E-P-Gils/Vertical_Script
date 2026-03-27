@@ -682,6 +682,32 @@ async function buildFullNarrativeReset(episodeRecaps, names, logline, episodeNum
   return safeStr(completion.choices?.[0]?.message?.content).slice(0, 2600);
 }
 
+/**
+ * Phase 1c — Format all prior episode opening fingerprints into a compact
+ * "EPISODE OPENING HISTORY" block injected into every episode prompt.
+ * Covers ALL previous episodes (not a sliding window) so patterns that
+ * haven't repeated in 10 episodes are still banned.
+ */
+function formatOpeningHistory(recaps, episodeNumber) {
+  if (!Array.isArray(recaps) || !recaps.length) return "";
+  const prev = recaps
+    .filter((r) => typeof r.episode === "number" && r.episode < episodeNumber && r.openingFingerprint)
+    .sort((a, b) => a.episode - b.episode);
+  if (!prev.length) return "";
+
+  const rows = prev.map((r) => {
+    const fp = r.openingFingerprint;
+    return `  Ep ${String(r.episode).padStart(2, " ")}: ${fp.location.slice(0, 40).padEnd(40, " ")} | ${fp.action.padEnd(22, " ")} | ${fp.dialogue_type}`;
+  });
+
+  return [
+    "EPISODE OPENING HISTORY — every prior episode's opening structure (location | first action | dialogue type).",
+    "You MUST write an opening that is structurally different from ALL entries below.",
+    "Different location, different first action, different dialogue type — the audience must never feel déjà vu:",
+    ...rows,
+  ].join("\n");
+}
+
 function formatRecapContext(recaps, episodeNumber) {
   if (!Array.isArray(recaps) || !recaps.length) return "";
   const prev = recaps
@@ -739,6 +765,226 @@ function extractOpeningBeat(text) {
   return beats.join(" ").slice(0, 220);
 }
 
+/**
+ * Phase 1a — Universal structured opening fingerprint.
+ * Extracts {location, action, dialogue_type} from any episode opening.
+ * Purely deterministic — no LLM, no genre-specific rules.
+ * Used in Phase 1b (stored on recap) and Phase 1c (injected into prompt).
+ */
+function extractOpeningFingerprint(text) {
+  const lines = safeStr(text)
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // ── Location ─────────────────────────────────────────────────────────────
+  // Find the first scene heading and strip formatting noise.
+  let location = "UNKNOWN";
+  for (const line of lines) {
+    if (/^(INT|EXT|INT\/EXT|EXT\/INT)[.\s]/i.test(line)) {
+      location = line
+        .replace(/^(INT|EXT|INT\/EXT|EXT\/INT)[.\s-]*/i, "")  // strip INT./EXT. prefix
+        .replace(/[-–—]\s*(DAY|NIGHT|DAWN|DUSK|MORNING|EVENING|AFTERNOON|CONTINUOUS|MOMENTS?\s+LATER|LATER)[^)]*$/i, "") // strip time-of-day suffix
+        .replace(/\s+\d+\s*$/, "")   // strip trailing episode/page numbers
+        .trim()
+        .toUpperCase()
+        .slice(0, 60);
+      break;
+    }
+  }
+
+  // ── Action ───────────────────────────────────────────────────────────────
+  // Collect the first 5 non-heading, non-cue, non-metadata lines as action lines.
+  const actionLines = [];
+  let pastHeading = false;
+  for (const line of lines) {
+    if (actionLines.length >= 5) break;
+    if (/^EPISODE\s+\d+/i.test(line) || /^END\s+(OF\s+)?EPISODE/i.test(line)) continue;
+    if (/^(INT|EXT|INT\/EXT|EXT\/INT)[.\s]/i.test(line)) { pastHeading = true; continue; }
+    if (!pastHeading) continue;
+    // Skip ALL CAPS character cue lines
+    if (/^[A-Z][A-Z0-9\s'.\-()]{0,50}$/.test(line) && line.length <= 55) continue;
+    // Skip parentheticals
+    if (/^\([^)]+\)$/.test(line)) continue;
+    // Skip dialogue (lines following a cue — heuristic: short, starts lower-case or quoted)
+    actionLines.push(line.toLowerCase());
+  }
+  const actionText = actionLines.join(" ");
+
+  let action = "other";
+  if (/\b(pores?\s+over|reads?|studies|studying|traces?\s+the|scrolls?\s+through|flips?\s+through|searches?\s+through|scans?\s+a\s+(page|document|letter|file)|poring\s+over)\b/.test(actionText))
+    action = "researching/reading";
+  else if (/\b(stands?\s+(at|by|near|over|before|in\s+front)|stands?\s+alone|standing\s+(at|by|over)|gazes?\s+at|stares?\s+at|looks?\s+(out|at|over))\b/.test(actionText))
+    action = "standing/observing";
+  else if (/\b(walks?\s+(briskly|along|toward|away|through)|strides?|paces?|moves?\s+(through|toward|along)|marches?|approaches?\s+(quietly|slowly|quickly))\b/.test(actionText))
+    action = "walking/moving";
+  else if (/\b(confronts?|blocks?\s+(her|his|their)\s+path|steps?\s+(in\s+front|between|forward\s+sharply)|faces?\s+each\s+other|squares?\s+off)\b/.test(actionText))
+    action = "confronting";
+  else if (/\b(fights?|attacks?|lunges?|rushes?|sprints?|runs?|escapes?|dodges?|strikes?|draws?\s+(a\s+)?(weapon|dagger|blade|sword|gun))\b/.test(actionText))
+    action = "fighting/action";
+  else if (/\b(sits?\s+(at|by|behind|down)|works?\s+at|types?|leans?\s+over|crouches?|kneels?)\b/.test(actionText))
+    action = "sitting/working";
+  else if (/\b(arrives?|enters?|steps?\s+in(side|to)?|emerges?|appears?\s+(at|from|in\s+the)|walks?\s+in|bursts?\s+(in|through))\b/.test(actionText))
+    action = "arriving/entering";
+  else if (/\b(waits?|lingers?|pauses?|hesitates?|remains?\s+(still|silent)|stands?\s+in\s+silence)\b/.test(actionText))
+    action = "waiting";
+
+  // ── Dialogue type ─────────────────────────────────────────────────────────
+  // Find the first dialogue line (line after an ALL CAPS cue).
+  let dialogueType = "none";
+  let lastWasCue = false;
+  for (const line of lines) {
+    const isCue = /^[A-Z][A-Z0-9\s'.\-()]{0,50}$/.test(line) && line.length <= 55 &&
+                  !/^(INT|EXT|INT\/EXT|EXT\/INT|EPISODE|END\s+EPISODE|FADE|CUT\s+TO|SMASH\s+TO)/i.test(line);
+    if (isCue) { lastWasCue = true; continue; }
+    if (/^\([^)]+\)$/.test(line)) continue; // parenthetical — keep lastWasCue
+    if (!lastWasCue) continue;
+
+    // We have first dialogue line
+    const d = line.toLowerCase();
+    if (/\b(still\s+chasing|you('re|\s+are)\s+(wasting|wrong|deluded|chasing)|that('s|\s+is)\s+(impossible|ridiculous|insane)|you\s+really\s+think|not\s+this\s+again|give\s+it\s+up|stop\s+chasing)\b/.test(d))
+      dialogueType = "skeptic_dismissal";
+    else if (/\b(be\s+careful|you('re|\s+are)\s+in\s+danger|stay\s+away|watch\s+your|they('re|\s+are)\s+(coming|watching)|it('s|\s+is)\s+not\s+safe|run\b|get\s+out)\b/.test(d))
+      dialogueType = "warning";
+    else if (/\b(missed\s+you|good\s+to\s+see|you('re|\s+are)\s+(back|here|finally)|i\s+was\s+looking\s+for\s+you|welcome\s+back|you\s+made\s+it)\b/.test(d))
+      dialogueType = "reunion";
+    else if (/\b(who\s+are\s+you|state\s+your|what\s+are\s+you\s+doing\s+here|why\s+are\s+you|what\s+do\s+you\s+want|you\s+shouldn't\s+be\s+here|unauthorized)\b/.test(d))
+      dialogueType = "challenge/confrontation";
+    else if (/\b(we\s+need\s+to|i\s+found\s+(something|it|a)|there('s|\s+is)\s+(a|something|someone)|the\s+(signal|readings?|data|creature|plan|mission))\b/.test(d))
+      dialogueType = "exposition";
+    else if (/\b(i\s+(love|need|can't\s+stop\s+thinking\s+about|can't\s+lose)|you\s+mean\s+everything|i\s+was\s+wrong\s+about\s+you)\b/.test(d))
+      dialogueType = "intimacy/emotional";
+    else if (d.trim().endsWith("?"))
+      dialogueType = "question";
+    else
+      dialogueType = "statement";
+    break;
+  }
+
+  return { location, action, dialogue_type: dialogueType };
+}
+
+/**
+ * Phase 2a — Structural similarity scorer for episode openings.
+ * Compares two fingerprints and returns a 0–1 score.
+ *
+ * Weights:
+ *   location     0.5  — most visible to the audience; same room = instant déjà vu
+ *   action       0.3  — same first beat feels like a reset even in a new location
+ *   dialogue_type 0.2 — same conversation opener compounds the repetition
+ *
+ * Location matching is fuzzy: strips numbers, articles, and directional words
+ * so "RESEARCH VESSEL DECK 3" and "RESEARCH VESSEL DECK" both score as the same place.
+ */
+function scoreOpeningSimilarity(fp1, fp2) {
+  if (!fp1 || !fp2) return 0;
+
+  // Normalise a location string to its essential noun phrase
+  const normLoc = (loc) =>
+    safeStr(loc)
+      .toUpperCase()
+      .replace(/\b(THE|A|AN|LOWER|UPPER|MAIN|INNER|OUTER|NORTH|SOUTH|EAST|WEST|OLD|NEW)\b/g, "")
+      .replace(/\b\d+\b/g, "")           // strip floor/room numbers
+      .replace(/[-–—]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const loc1 = normLoc(fp1.location);
+  const loc2 = normLoc(fp2.location);
+
+  // Exact match after normalisation
+  let locScore = 0;
+  if (loc1 === loc2 && loc1 !== "UNKNOWN") {
+    locScore = 1;
+  } else {
+    // Partial match: one location string contains the other's core word(s)
+    const words1 = new Set(loc1.split(/\s+/).filter((w) => w.length > 3));
+    const words2 = new Set(loc2.split(/\s+/).filter((w) => w.length > 3));
+    const shared = [...words1].filter((w) => words2.has(w)).length;
+    const minSize = Math.min(words1.size, words2.size);
+    if (minSize > 0) locScore = shared / minSize;  // 0.5 if half the words match
+  }
+
+  const actionScore = fp1.action === fp2.action && fp1.action !== "other" ? 1 : 0;
+  const dialogueScore =
+    fp1.dialogue_type === fp2.dialogue_type && fp1.dialogue_type !== "none" && fp1.dialogue_type !== "statement"
+      ? 1
+      : 0;
+
+  return locScore * 0.5 + actionScore * 0.3 + dialogueScore * 0.2;
+}
+
+/**
+ * Phase 2b — Best-match finder.
+ * Runs scoreOpeningSimilarity against every prior episode's stored fingerprint
+ * and returns the closest match: { score, episode, fingerprint } or null if
+ * no prior recaps have a fingerprint yet.
+ */
+function findMostSimilarPriorOpening(newFingerprint, recaps) {
+  if (!newFingerprint || !Array.isArray(recaps) || !recaps.length) return null;
+
+  let best = null;
+  for (const r of recaps) {
+    if (!r.openingFingerprint) continue;
+    const score = scoreOpeningSimilarity(newFingerprint, r.openingFingerprint);
+    if (best === null || score > best.score) {
+      best = { score, episode: r.episode, fingerprint: r.openingFingerprint };
+    }
+  }
+  return best;
+}
+
+/**
+ * Phase 3a — Blueprint setting match checker.
+ * Returns { match: boolean, confidence: 0–1, normalizedSetting: string }
+ *
+ * Fuzzy: blueprint says "royal throne room", fingerprint extracts "THRONE ROOM" → match.
+ * Strategy:
+ *   1. Normalise both strings (lowercase, strip articles/filler, split to keywords).
+ *   2. Count shared keywords with length > 3.
+ *   3. confidence = shared / total keywords in the blueprint setting (recall-oriented:
+ *      we only care whether the blueprint's key nouns appear in the opening location,
+ *      not whether every word in the location matches the blueprint).
+ *   4. match = confidence >= 0.5 OR any single "anchor word" (≥6 chars) appears in both.
+ */
+function blueprintSettingMatches(openingFingerprint, settingFocus) {
+  const empty = { match: true, confidence: 1, normalizedSetting: "" };
+  if (!settingFocus || typeof settingFocus !== "string") return empty;
+  if (!openingFingerprint || openingFingerprint.location === "UNKNOWN") return empty;
+
+  const STOP_WORDS = new Set([
+    "the", "a", "an", "and", "or", "of", "in", "at", "on", "near",
+    "inside", "outside", "with", "from", "into", "during", "main",
+    "upper", "lower", "inner", "outer", "old", "new", "grand", "royal",
+    "int", "ext",
+  ]);
+
+  const tokenize = (str) =>
+    str
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+
+  const settingTokens = tokenize(settingFocus);
+  const locationTokens = new Set(tokenize(openingFingerprint.location));
+
+  if (!settingTokens.length) return empty;
+
+  const shared = settingTokens.filter((w) => locationTokens.has(w));
+  const confidence = shared.length / settingTokens.length;
+
+  // Anchor word: any single keyword ≥ 6 chars present in both is sufficient for a match
+  // (e.g. "library", "throne", "harbour", "palace" are unambiguous anchors)
+  const hasAnchor = settingTokens.some((w) => w.length >= 6 && locationTokens.has(w));
+
+  return {
+    match: confidence >= 0.5 || hasAnchor,
+    confidence,
+    normalizedSetting: settingTokens.join(" "),
+  };
+}
+
 function tagEpisodeEvents(text) {
   const s = safeStr(text).toLowerCase();
   if (!s) return [];
@@ -764,8 +1010,14 @@ function tagEpisodeEvents(text) {
     /\b(dock|beach|water.{0,20}edge|ocean.{0,15}scan|sonar device|notebook.{0,20}ocean|ocean.{0,20}notebook|water.{0,15}scan)\b/.test(opening)
   ) add("dock_beach_scan_open");
 
-  // Skeptic dismissal beat — cold lead questioning whether threat/creature is real
-  if (/still chasing (ghosts?|shadows?|monsters?|those waves|sea monsters?|trouble|fairy tales?|your (monster|creature))/.test(s)) add("skeptic_dismissal");
+  // Library / archive / research-room opening — the most common fantasy/romance repeat pattern
+  if (
+    /\b(library|archive|royal\s+library|reading\s+room|scriptorium|record\s+room)\b/.test(opening) &&
+    /\b(shelf|shelves|bookshelf|bookshelves|tome|tomes|scroll|scrolls|ancient\s+book|dusty|parchment|spine)\b/.test(opening)
+  ) add("library_research_open");
+
+  // Skeptic dismissal beat — cold lead's lazy "still chasing ghosts" opener
+  if (/still\s+chasing\s+(ghosts?|shadows?|monsters?|those\s+waves|sea\s+monsters?|trouble|fairy\s+tales?|your\s+(monster|creature)|dust|old\s+secrets?|the\s+past)/.test(s)) add("skeptic_dismissal");
 
   // Creature/threat confirmed as real by direct witness
   if (/it.s real|that.s real|confirmed.{0,30}(creature|monster|threat)|creature.{0,30}confirmed|everyone.{0,30}(saw|witnessed)|all three.{0,30}(saw|watched|confirmed)/.test(s)) add("threat_confirmed");
@@ -792,12 +1044,15 @@ function formatRecentEventConstraints(recaps, episodeNumber) {
     }
   }
 
+  // All-time tag counts (not just recent window) for patterns that should NEVER repeat freely
+  const allTimeEpsWithTag = (tag) =>
+    allPrev.filter((r) => Array.isArray(r.tags) && r.tags.includes(tag)).map((r) => r.episode);
+
   const parts = [];
 
   // Standard big set-piece avoidance (exclude the new opening/relationship tags — handled separately)
-  const setpieceTags = Array.from(recentTags).filter(
-    (t) => !["dock_beach_scan_open", "skeptic_dismissal", "threat_confirmed"].includes(t)
-  );
+  const excludedTags = ["dock_beach_scan_open", "skeptic_dismissal", "threat_confirmed", "library_research_open"];
+  const setpieceTags = Array.from(recentTags).filter((t) => !excludedTags.includes(t));
   if (setpieceTags.length) {
     parts.push(
       "RECENT BIG SET-PIECES (avoid repeating as the main device this episode): " +
@@ -805,7 +1060,7 @@ function formatRecentEventConstraints(recaps, episodeNumber) {
     );
   }
 
-  // Opening beat ban — if the dock/beach scan open has been used ≥2 times recently
+  // Dock/beach scan ban — if used ≥2 times in the recent window
   if (dockScanEps.length >= 2) {
     parts.push(
       `OPENING BEAT BANNED: Do NOT open this episode with the heroine standing alone at the dock, beach, or water's edge scanning the ocean or checking equipment. ` +
@@ -814,11 +1069,29 @@ function formatRecentEventConstraints(recaps, episodeNumber) {
     );
   }
 
-  // Skeptic ban — if cold lead has already been dismissive recently
-  if (skepticEps.length >= 2) {
+  // Library/archive opening ban — ≥3 uses all-time is clearly a crutch; ban it hard
+  const libraryEpsAll = allTimeEpsWithTag("library_research_open");
+  if (libraryEpsAll.length >= 3) {
     parts.push(
-      `DIALOGUE BEAT BANNED: Do NOT have the cold male lead open with "still chasing ghosts/shadows/monsters?" or any equivalent skeptic dismissal. ` +
-      `That line was used in episodes (${skepticEps.join(", ")}). He must respond differently — urgency, strategy, grudging respect, or a new conflict angle.`
+      `OPENING LOCATION BANNED (library overused): The library, archive, or research room has been used as an episode opening ${libraryEpsAll.length} times (eps ${libraryEpsAll.slice(-5).join(", ")}). ` +
+      `Do NOT open this episode in any room full of books, scrolls, or tomes. ` +
+      `Choose a completely different location — outdoor setting, a battlefield, a court chamber, a personal room, a market, or a new location introduced by this episode's blueprint plan.`
+    );
+  } else if (libraryEpsAll.length >= 1) {
+    // Softer warning before the hard ban
+    parts.push(
+      `OPENING CAUTION: The library/archive has already been used as an opening setting in episode(s) ${libraryEpsAll.join(", ")}. ` +
+      `Strongly prefer a different opening location this episode.`
+    );
+  }
+
+  // Skeptic dismissal ban — "still chasing ghosts?" must NEVER repeat; ban after any single use
+  const skepticAllEps = allTimeEpsWithTag("skeptic_dismissal");
+  if (skepticAllEps.length >= 1) {
+    parts.push(
+      `DIALOGUE PERMANENTLY BANNED: Do NOT use any variation of "still chasing ghosts/shadows/monsters/ghosts in dusty books?" as the cold male lead's opening line. ` +
+      `That dismissive line was already used in episode(s) ${skepticAllEps.join(", ")} and must never appear again in this series. ` +
+      `He must open with something fresh — urgency, strategy, grudging respect, new information, or a direct challenge.`
     );
   }
 
@@ -2308,8 +2581,9 @@ function buildEpisodePromptText({
       ? episodeSummaries.get(ep)
       : null;
   const recentEvents = formatRecentEventConstraints(recaps, ep);
+  const openingHistory = ep > 1 ? formatOpeningHistory(recaps, ep) : "";
 
-  if (blueprintContext || seriesHistory || recapContext || summaryText || recentEvents) {
+  if (blueprintContext || seriesHistory || recapContext || summaryText || recentEvents || openingHistory) {
     lines.push("");
     if (blueprintContext) lines.push(blueprintContext);
     if (seriesHistory) {
@@ -2324,8 +2598,12 @@ function buildEpisodePromptText({
       if (blueprintContext || seriesHistory || recapContext) lines.push("");
       lines.push(recentEvents);
     }
+    if (openingHistory) {
+      if (blueprintContext || seriesHistory || recapContext || recentEvents) lines.push("");
+      lines.push(openingHistory);
+    }
     if (summaryText) {
-      if (blueprintContext || recapContext || recentEvents) lines.push("");
+      if (blueprintContext || recapContext || recentEvents || openingHistory) lines.push("");
       lines.push("THIS EPISODE'S SUMMARY (follow this beat for beat; do not invent new major subplots):");
       lines.push(summaryText);
     }
@@ -3322,6 +3600,131 @@ app.post("/generate", requireAuth, async (req, res) => {
           }
         }
 
+        // Phase 2c — Structural opening similarity gate.
+        // Compares the new episode's opening fingerprint against ALL prior episodes.
+        // Catches same-location / same-action repeats that sentence-level scoring misses
+        // (e.g. "ROYAL LIBRARY | researching/reading | skeptic_dismissal" every 4 episodes).
+        if (ep > 1 && episodeRecaps.length > 0) {
+          const newFp = extractOpeningFingerprint(episodeText);
+          const bestMatch = findMostSimilarPriorOpening(newFp, episodeRecaps);
+          const STRUCTURAL_THRESHOLD = 0.5; // location match alone hits 0.5; location+action hits 0.8
+          if (bestMatch && bestMatch.score >= STRUCTURAL_THRESHOLD) {
+            const matchedFp = bestMatch.fingerprint;
+            console.warn(
+              `Episode ${ep} opening structurally too close to ep ${bestMatch.episode} ` +
+              `(score ${bestMatch.score.toFixed(2)}): ${newFp.location} | ${newFp.action} | ${newFp.dialogue_type} — regenerating.`
+            );
+            const structuralRetryContent =
+              userContent +
+              `\n\nREWRITE REQUIRED — OPENING STRUCTURE REJECTED:\n` +
+              `This draft opened in "${newFp.location}" with a "${newFp.action}" beat, ` +
+              `which is structurally identical to episode ${bestMatch.episode} ` +
+              `("${matchedFp.location}" | "${matchedFp.action}" | "${matchedFp.dialogue_type}").\n` +
+              `You MUST rewrite the opening with:\n` +
+              `  1. A DIFFERENT location — not "${newFp.location}" or any location already listed in the EPISODE OPENING HISTORY above.\n` +
+              `  2. A DIFFERENT first action — not "${newFp.action}".\n` +
+              `  3. Continue the story's plot and stakes; do not reset to an earlier scene.\n` +
+              `The rest of the episode's story beats may remain the same — only the opening scene must change.`;
+            try {
+              const structuralRetry = await openai.chat.completions.create({
+                model: FINETUNED_MODEL,
+                messages: [
+                  { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                  { role: "user", content: structuralRetryContent },
+                ],
+                max_tokens: 2048,
+                temperature: 0.6,
+                frequency_penalty: 1.0,
+                presence_penalty: 0.7,
+              });
+              const structuralRetryRaw = structuralRetry.choices?.[0]?.message?.content;
+              if (typeof structuralRetryRaw === "string" && structuralRetryRaw.trim()) {
+                const retried = finalizeEpisodeText(structuralRetryRaw.trim(), ep, seriesNames);
+                // Only accept the retry if it actually changed the opening structure
+                const retriedFp = extractOpeningFingerprint(retried);
+                const retriedMatch = findMostSimilarPriorOpening(retriedFp, episodeRecaps);
+                if (!retriedMatch || retriedMatch.score < STRUCTURAL_THRESHOLD) {
+                  episodeText = retried;
+                  sendStreamLine(res, {
+                    type: "structural_retry",
+                    episode: ep,
+                    reason: `opening too similar to ep ${bestMatch.episode}`,
+                    old_location: newFp.location,
+                    new_location: retriedFp.location,
+                    score_before: bestMatch.score,
+                  });
+                } else {
+                  console.warn(
+                    `Episode ${ep} structural retry still too similar (score ${retriedMatch.score.toFixed(2)}) — keeping retry anyway as best available.`
+                  );
+                  episodeText = retried;
+                }
+              }
+            } catch (structuralRetryErr) {
+              console.warn(`Episode ${ep} structural retry failed:`, structuralRetryErr?.message || structuralRetryErr);
+            }
+          }
+        }
+
+        // Phase 3b — Blueprint setting enforcement gate.
+        // Only fires if the blueprint specifies a setting_focus for this episode
+        // AND the generated opening doesn't land in that location.
+        // Runs after Phase 2c so the latest episodeText is always checked.
+        {
+          const epPlan = blueprint?.episodes?.[ep - 1];
+          const requiredSetting = safeStr(epPlan?.setting_focus).trim();
+          if (requiredSetting) {
+            const currentFp = extractOpeningFingerprint(episodeText);
+            const settingCheck = blueprintSettingMatches(currentFp, requiredSetting);
+            if (!settingCheck.match) {
+              console.warn(
+                `Episode ${ep} blueprint setting mismatch: required "${requiredSetting}" ` +
+                `but opened in "${currentFp.location}" (confidence ${settingCheck.confidence.toFixed(2)}) — retrying.`
+              );
+              const blueprintRetryContent =
+                userContent +
+                `\n\nREWRITE REQUIRED — WRONG OPENING LOCATION:\n` +
+                `The season blueprint requires episode ${ep} to be set in: "${requiredSetting}".\n` +
+                `Your draft opened in "${currentFp.location}" instead.\n` +
+                `Rules for the rewrite:\n` +
+                `  1. Move the opening scene to "${requiredSetting}" — this is a hard constraint from the season plan.\n` +
+                `  2. Keep all story beats, plot developments, and character decisions the same.\n` +
+                `  3. Do NOT time-skip or introduce new subplots — only the opening location changes.\n` +
+                `  4. The rest of the episode after the opening scene may remain largely intact.`;
+              try {
+                const blueprintRetry = await openai.chat.completions.create({
+                  model: FINETUNED_MODEL,
+                  messages: [
+                    { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                    { role: "user", content: blueprintRetryContent },
+                  ],
+                  max_tokens: 2048,
+                  temperature: 0.5,
+                  frequency_penalty: 1.0,
+                  presence_penalty: 0.6,
+                });
+                const blueprintRetryRaw = blueprintRetry.choices?.[0]?.message?.content;
+                if (typeof blueprintRetryRaw === "string" && blueprintRetryRaw.trim()) {
+                  episodeText = finalizeEpisodeText(blueprintRetryRaw.trim(), ep, seriesNames);
+                  const retriedFp = extractOpeningFingerprint(episodeText);
+                  const retriedCheck = blueprintSettingMatches(retriedFp, requiredSetting);
+                  sendStreamLine(res, {
+                    type: "blueprint_setting_retry",
+                    episode: ep,
+                    required_setting: requiredSetting,
+                    original_location: currentFp.location,
+                    retried_location: retriedFp.location,
+                    match_after_retry: retriedCheck.match,
+                    confidence_after_retry: retriedCheck.confidence,
+                  });
+                }
+              } catch (blueprintRetryErr) {
+                console.warn(`Episode ${ep} blueprint setting retry failed:`, blueprintRetryErr?.message || blueprintRetryErr);
+              }
+            }
+          }
+        }
+
         // Hard safeguard: prevent the model from inventing/using "Victor" unless explicitly provided.
         if (!victorAllowed && includesWord(episodeText, "Victor")) {
           const replacement = pickReplacementNameForVictor();
@@ -3481,7 +3884,13 @@ app.post("/generate", requireAuth, async (req, res) => {
             text: episodeText,
           });
           if (recap) {
-            episodeRecaps.push({ episode: ep, recap, tags: eventTags, openingBeat: extractOpeningBeat(episodeText) });
+            episodeRecaps.push({
+              episode: ep,
+              recap,
+              tags: eventTags,
+              openingBeat: extractOpeningBeat(episodeText),
+              openingFingerprint: extractOpeningFingerprint(episodeText),
+            });
             sendStreamLine(res, {
               type: "recap",
               episode: ep,
