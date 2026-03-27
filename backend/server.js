@@ -718,6 +718,27 @@ function formatSeriesHistoryBlock(recaps, episodeNumber) {
 // Simple event tagging: detect big repeated set-pieces to steer away from.
 // ---------------------------------------------------------------------------
 
+/**
+ * Extracts the opening beat fingerprint of an episode:
+ * first scene heading + first 2-3 non-cue, non-metadata lines.
+ * Stored per recap so the model can be shown exactly what it used before.
+ */
+function extractOpeningBeat(text) {
+  const lines = safeStr(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const beats = [];
+  for (const line of lines) {
+    if (beats.length >= 3) break;
+    if (/^EPISODE\s+\d+/i.test(line)) continue;
+    if (/^END\s+(OF\s+)?EPISODE/i.test(line)) continue;
+    // Skip ALL CAPS character cue headers
+    if (/^[A-Z][A-Z0-9\s'\-]{1,40}$/.test(line) && !/[.!?,]/.test(line) && line.length <= 44) continue;
+    // Skip standalone parentheticals
+    if (/^\([^)]+\)$/.test(line)) continue;
+    beats.push(line);
+  }
+  return beats.join(" ").slice(0, 220);
+}
+
 function tagEpisodeEvents(text) {
   const s = safeStr(text).toLowerCase();
   if (!s) return [];
@@ -809,6 +830,23 @@ function formatRecentEventConstraints(recaps, episodeNumber) {
       `The threat/creature was directly witnessed and confirmed real by the main characters. ` +
       `No character may question whether it exists or treat it as rumor/imagination from this point forward. ` +
       `Reactions must be tactical, protective, or fear-based — NOT dismissive.`
+    );
+  }
+
+  // Explicit opening beat ban — show the model the actual text of recent episode openings
+  // so it cannot default to the same console/signal/approach structure episode after episode.
+  const openingBeats = allPrev
+    .slice(-10)
+    .filter((r) => r.openingBeat && typeof r.openingBeat === "string" && r.openingBeat.length > 20)
+    .map((r) => `  Ep ${r.episode}: "${r.openingBeat.slice(0, 160)}"`)
+    .filter(Boolean);
+  if (openingBeats.length >= 2) {
+    parts.push(
+      "FORBIDDEN OPENING STRUCTURES — the following are the ACTUAL OPENINGS already used in prior episodes.\n" +
+      "Do NOT start this episode with the same location, the same first character action, or the same beat type " +
+      "(e.g. character at a console/screen, signal/readings discussion, someone approaching from behind).\n" +
+      "Write an opening the audience has not seen before:\n" +
+      openingBeats.join("\n")
     );
   }
 
@@ -3209,16 +3247,26 @@ app.post("/generate", requireAuth, async (req, res) => {
           }
         }
 
-        // Phase 2: if this episode is too similar to the previous one, regenerate once with a stronger instruction.
+        // Phase 2: if this episode is too similar to any of the last 5 episodes, regenerate once.
+        // Checks last 5 (not just last 1) to catch every-3-episode structural loops
+        // (e.g. "heroine at console + signal discussion + creature alert" repeating non-consecutively).
         if (ep > 1 && episodeScriptsMemo.length > 0) {
-          const prevScript = episodeScriptsMemo[episodeScriptsMemo.length - 1];
-          const score = repetitionScore(episodeText, prevScript);
-          const blockDup = maxTailBlockOverlap(prevScript, episodeText);
+          const recentScripts = episodeScriptsMemo.slice(-5);
+          let maxScore = 0;
+          let maxBlockDup = 0;
+          for (const prev of recentScripts) {
+            const s = repetitionScore(episodeText, prev);
+            const b = maxTailBlockOverlap(prev, episodeText);
+            if (s > maxScore) maxScore = s;
+            if (b > maxBlockDup) maxBlockDup = b;
+          }
+          const score = maxScore;
+          const blockDup = maxBlockDup;
           const REPETITION_THRESHOLD = 0.35;
           const BLOCK_OVERLAP_MIN = 105;
           if (score > REPETITION_THRESHOLD || blockDup >= BLOCK_OVERLAP_MIN) {
             console.warn(
-              `Episode ${ep} repetition score ${score.toFixed(2)} / tail block ${blockDup} chars — regenerating with anti-repetition hint.`
+              `Episode ${ep} repetition score ${score.toFixed(2)} / tail block ${blockDup} chars (vs last 5 eps) — regenerating with anti-repetition hint.`
             );
             const retryContent =
               userContent +
@@ -3433,7 +3481,7 @@ app.post("/generate", requireAuth, async (req, res) => {
             text: episodeText,
           });
           if (recap) {
-            episodeRecaps.push({ episode: ep, recap, tags: eventTags });
+            episodeRecaps.push({ episode: ep, recap, tags: eventTags, openingBeat: extractOpeningBeat(episodeText) });
             sendStreamLine(res, {
               type: "recap",
               episode: ep,
