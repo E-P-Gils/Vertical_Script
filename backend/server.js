@@ -2464,6 +2464,7 @@ function buildEpisodePromptText({
   episodeSummaries,
   recaps,
   previousEpisodeStates = [],
+  previousEpisodeScripts = [],
   narrativeResetText = "",
   trimContext = ENABLE_TRIMMED_CONTEXT,
 }) {
@@ -2610,34 +2611,59 @@ function buildEpisodePromptText({
     lines.push("");
   }
 
-  // Continuity memo: pass previous episode state
-  // so the model continues from the exact final line (critical for paid cliffhangers),
-  // BUT do not allow the model to restage the exact same scene.
-  if (ep > 1 && Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
-    const toInclude = previousEpisodeStates.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
-    const label = toInclude.length === 1 ? "PREVIOUS EPISODE STATE" : "PREVIOUS EPISODE STATES";
+  // Continuity: inject the raw tail of the previous episode(s) so the model continues
+  // from the EXACT last moment on screen — not from an abstract summary.
+  // Raw tail text is the primary driver of scene variety: the model cannot reset to a
+  // familiar location because it is anchored to wherever the previous episode ended.
+  // Abstract state (location/ending/character_state) is kept as a supplementary note only.
+  if (ep > 1 && Array.isArray(previousEpisodeScripts) && previousEpisodeScripts.length > 0) {
+    const TAIL_LINES = 30;
+    const toInclude = previousEpisodeScripts.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
+    const label = toInclude.length === 1 ? "PREVIOUS EPISODE" : "PREVIOUS EPISODES";
     lines.push("");
-    lines.push("[[DO_NOT_OUTPUT_STORY_STATE]]");
     lines.push(
-      `CONTINUATION REQUIREMENT (critical for this format): Below is structured story state from the ${label}. Continue immediately from this state with no timeline reset.`
+      `CONTINUATION REQUIREMENT (critical for this format): The audience has just paid to see what happens next. ` +
+      `Below is the exact end of the ${label}. You MUST continue the story immediately from the next moment — ` +
+      `same scene, same characters, same emotional beat. Do not time-skip, change location, or restart; ` +
+      `pick up from the last line or action and continue.`
     );
-    lines.push(`Do NOT restage previous beats; move story FORWARD with new consequences.`);
+    lines.push(
+      `DO NOT restage the same key moments from the previous episode. ` +
+      `If you need to reference them, compress into one short recap line, then move FORWARD with new events.`
+    );
     lines.push("");
-    lines.push("[[STORY_STATE_BEGIN]]");
-    toInclude.forEach((state, i) => {
+    toInclude.forEach((script, i) => {
       const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
-      lines.push(`[[PREVIOUS_EPISODE_STATE ${which}]]`);
-      lines.push(`location: ${safeStr(state.location)}`);
-      lines.push(`ending: ${safeStr(state.ending)}`);
-      lines.push(`character_state: ${safeStr(state.character_state)}`);
-      lines.push(`[[END_PREVIOUS_EPISODE_STATE ${which}]]`);
+      const full = safeStr(script).trim();
+      const tail = full.split(/\r?\n/).slice(-TAIL_LINES).join("\n");
+      lines.push(`--- END OF ${which} ---`);
+      lines.push(tail);
+      lines.push(`--- END OF ${which} ---`);
       lines.push("");
     });
-    lines.push("[[STORY_STATE_END]]");
-    lines.push(
-      `Now write screenplay content for EPISODE ${ep} only, continuing directly from story state above. ` +
-      `Do NOT output any STORY_STATE markers, instruction text, or transition notes.`
-    );
+    // Supplementary: abstract state for character continuity (not the primary continuation signal)
+    if (Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
+      const states = previousEpisodeStates.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
+      const lastState = states[states.length - 1];
+      if (lastState && (lastState.character_state || lastState.ending)) {
+        lines.push("CHARACTER STATE ENTERING THIS EPISODE (supplementary — the tail text above takes priority):");
+        if (lastState.character_state) lines.push(`  character_state: ${safeStr(lastState.character_state)}`);
+        if (lastState.ending) lines.push(`  last_ending: ${safeStr(lastState.ending)}`);
+        lines.push("");
+      }
+    }
+    lines.push(`Write episode ${ep} now, continuing directly from the text above.`);
+    lines.push("");
+  } else if (ep > 1 && Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
+    // Fallback: no raw scripts available, use abstract state only
+    const toInclude = previousEpisodeStates.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
+    lines.push("");
+    lines.push(`CONTINUATION REQUIREMENT: Continue immediately from previous episode state with no timeline reset.`);
+    lines.push("");
+    toInclude.forEach((state, i) => {
+      const which = toInclude.length === 1 ? "PREVIOUS EPISODE" : `EPISODE ${ep - toInclude.length + i}`;
+      lines.push(`${which}: location=${safeStr(state.location)} | ending=${safeStr(state.ending)} | character_state=${safeStr(state.character_state)}`);
+    });
     lines.push("");
   }
 
@@ -3144,6 +3170,7 @@ app.post("/generate", requireAuth, async (req, res) => {
           episodeSummaries,
           recaps: episodeRecaps,
           previousEpisodeStates: episodeStateMemo,
+          previousEpisodeScripts: episodeScriptsMemo,
           narrativeResetText,
           trimContext: ENABLE_TRIMMED_CONTEXT,
         });
