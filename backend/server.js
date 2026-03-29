@@ -2415,7 +2415,7 @@ function formatBlueprintContext(blueprint, episodeNumber) {
 }
 
 // How many prior episodes to include in full for continuation (token budget).
-const PREVIOUS_EPISODES_IN_CONTEXT = 2;
+const PREVIOUS_EPISODES_IN_CONTEXT = 1;
 
 /** Minimal user prompt for collapse rescue — avoids resending the full context that triggered the failure. */
 function buildCollapseRescueUserPrompt({
@@ -2641,17 +2641,6 @@ function buildEpisodePromptText({
       lines.push(`--- END OF ${which} ---`);
       lines.push("");
     });
-    // Supplementary: abstract state for character continuity (not the primary continuation signal)
-    if (Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
-      const states = previousEpisodeStates.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
-      const lastState = states[states.length - 1];
-      if (lastState && (lastState.character_state || lastState.ending)) {
-        lines.push("CHARACTER STATE ENTERING THIS EPISODE (supplementary — the tail text above takes priority):");
-        if (lastState.character_state) lines.push(`  character_state: ${safeStr(lastState.character_state)}`);
-        if (lastState.ending) lines.push(`  last_ending: ${safeStr(lastState.ending)}`);
-        lines.push("");
-      }
-    }
     lines.push(`Write episode ${ep} now, continuing directly from the text above.`);
     lines.push("");
   } else if (ep > 1 && Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
