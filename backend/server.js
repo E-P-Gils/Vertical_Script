@@ -2111,6 +2111,43 @@ function repetitionScore(currentText, previousText) {
 }
 
 /**
+ * Find verbatim repeated phrases (8+ words) from currentText that appear in any of the priorTexts.
+ * Returns an array of unique matched phrase strings (up to 5 examples).
+ * This catches micro-level verbatim loops that dilute below the sentence-level repetitionScore threshold.
+ */
+function findVerbatimPhrases(currentText, priorTexts, minWords = 8) {
+  if (!currentText || !priorTexts || priorTexts.length === 0) return [];
+  const normalize = (t) =>
+    safeStr(t)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s']/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const words = normalize(currentText).split(" ").filter(Boolean);
+  if (words.length < minWords) return [];
+
+  // Build a set of all normalized prior text content for fast lookup
+  const priorNormalized = priorTexts.map((t) => normalize(safeStr(t)));
+
+  const matched = [];
+  const seen = new Set();
+
+  for (let i = 0; i <= words.length - minWords; i++) {
+    const phrase = words.slice(i, i + minWords).join(" ");
+    if (seen.has(phrase)) continue;
+    if (priorNormalized.some((prior) => prior.includes(phrase))) {
+      seen.add(phrase);
+      // Recover original-case version for the retry prompt
+      const idx = normalize(currentText).indexOf(phrase);
+      const original = idx >= 0 ? currentText.slice(idx, idx + phrase.length + 20).split(/\n/)[0].trim() : phrase;
+      matched.push(original.slice(0, 120));
+      if (matched.length >= 5) break;
+    }
+  }
+  return matched;
+}
+
+/**
  * Long verbatim overlap between the end of the previous episode and this draft
  * (models often re-paste the same POV / reaction block after a cliffhanger).
  */
@@ -3423,6 +3460,64 @@ app.post("/generate", requireAuth, async (req, res) => {
             : `[Episode ${ep} — no content]`;
 
         episodeText = finalizeEpisodeText(episodeText, ep, seriesNames);
+
+        // Repetition gate — fires immediately after generation before downstream gates
+        // bake repeated content in. Checks both sentence-level score AND verbatim phrases.
+        if (ep > 1 && episodeScriptsMemo.length > 0) {
+          const recentScripts = episodeScriptsMemo.slice(-5);
+          let maxScore = 0;
+          let maxBlockDup = 0;
+          for (const prev of recentScripts) {
+            const s = repetitionScore(episodeText, prev);
+            const b = maxTailBlockOverlap(prev, episodeText);
+            if (s > maxScore) maxScore = s;
+            if (b > maxBlockDup) maxBlockDup = b;
+          }
+          const verbatimMatches = findVerbatimPhrases(episodeText, recentScripts);
+          const REPETITION_THRESHOLD = 0.35;
+          const BLOCK_OVERLAP_MIN = 105;
+          const needsRetry = maxScore > REPETITION_THRESHOLD || maxBlockDup >= BLOCK_OVERLAP_MIN || verbatimMatches.length > 0;
+          if (needsRetry) {
+            const reason = verbatimMatches.length > 0
+              ? `verbatim phrases detected`
+              : `score ${maxScore.toFixed(2)} / block ${maxBlockDup}`;
+            console.warn(`Episode ${ep} repetition (${reason}) — regenerating.`);
+            let retryHint = "\n\nREWRITE REQUIREMENT: This draft repeated content from a prior episode. ";
+            if (verbatimMatches.length > 0) {
+              retryHint +=
+                "The following exact phrases from prior episodes must NOT appear in your output — rewrite every scene that contains them with entirely new dialogue, action, and beats:\n" +
+                verbatimMatches.map((p, i) => `  ${i + 1}. "${p}"`).join("\n") +
+                "\n";
+            }
+            retryHint += "Continue the timeline forward with new dialogue and action only. New scene energy, new information, new consequences.";
+            const retryContent = userContent + retryHint;
+            const retry = await openai.chat.completions.create({
+              model: FINETUNED_MODEL,
+              messages: [
+                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                { role: "user", content: retryContent },
+              ],
+              max_tokens: 2048,
+              temperature: 1.0,
+              frequency_penalty: 1.0,
+              presence_penalty: 0.6,
+            });
+            const retryRaw = retry.choices?.[0]?.message?.content;
+            if (typeof retryRaw === "string" && retryRaw.trim()) {
+              episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
+              if (shouldRunNameValidation) {
+                try {
+                  const mismatches = detectMainTrioNameMismatches(episodeText, seriesNames);
+                  if (mismatches.length > 0) episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
+                } catch (nvErr) {
+                  console.warn(`Name validation failed on repetition retry (ep ${ep}):`, nvErr?.message || nvErr);
+                }
+              }
+              episodeText = normalizeEpisodeCharacterNames(episodeText, CHARACTER_NAME_REGISTRY_PATH);
+            }
+          }
+        }
+
         // Phase 3 validation — detect and FIX main-trio name inconsistencies before canonicalization.
         if (shouldRunNameValidation) {
           try {
@@ -3694,81 +3789,6 @@ app.post("/generate", requireAuth, async (req, res) => {
               }
             } catch (anchorErr) {
               console.error(`Anchor rewrite failed for episode ${ep}:`, anchorErr);
-            }
-          }
-        }
-
-        // Phase 2: if this episode is too similar to any of the last 5 episodes, regenerate once.
-        // Checks last 5 (not just last 1) to catch every-3-episode structural loops
-        // (e.g. "heroine at console + signal discussion + creature alert" repeating non-consecutively).
-        if (ep > 1 && episodeScriptsMemo.length > 0) {
-          const recentScripts = episodeScriptsMemo.slice(-5);
-          let maxScore = 0;
-          let maxBlockDup = 0;
-          for (const prev of recentScripts) {
-            const s = repetitionScore(episodeText, prev);
-            const b = maxTailBlockOverlap(prev, episodeText);
-            if (s > maxScore) maxScore = s;
-            if (b > maxBlockDup) maxBlockDup = b;
-          }
-          const score = maxScore;
-          const blockDup = maxBlockDup;
-          const REPETITION_THRESHOLD = 0.35;
-          const BLOCK_OVERLAP_MIN = 105;
-          if (score > REPETITION_THRESHOLD || blockDup >= BLOCK_OVERLAP_MIN) {
-            console.warn(
-              `Episode ${ep} repetition score ${score.toFixed(2)} / tail block ${blockDup} chars (vs last 5 eps) — regenerating with anti-repetition hint.`
-            );
-            const retryContent =
-              userContent +
-              "\n\nREWRITE REQUIREMENT: This draft reused too much text from the prior episode (including repeated POV or reaction paragraphs). Remove ALL duplicated material from the previous episode’s ending. Continue the timeline forward with new dialogue and action only—no paste of the same beats, crowd shots, or “only one person unmoved” blocks. New scene energy, new information, new consequences.";
-            const retry = await openai.chat.completions.create({
-              model: FINETUNED_MODEL,
-              messages: [
-                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
-                { role: "user", content: retryContent },
-              ],
-              max_tokens: 2048,
-              temperature: 0.5,
-              frequency_penalty: 1.0,
-              presence_penalty: 0.6,
-            });
-            const retryRaw = retry.choices?.[0]?.message?.content;
-            if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
-              if (shouldRunNameValidation) {
-                try {
-                  const mismatches = detectMainTrioNameMismatches(
-                    episodeText,
-                    seriesNames
-                  );
-                  if (mismatches.length > 0) {
-                    episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
-                    const report = await validateMainTrioNameConsistencyWithLLM(
-                      {
-                        episodeText,
-                        names: seriesNames,
-                        episodeNumber: ep,
-                      }
-                    );
-                    if (report && report.ok === false) {
-                      console.warn(
-                        `Name consistency mismatches (episode ${ep}):`,
-                        report.mismatches || mismatches
-                      );
-                    }
-                  }
-                } catch (nvErr) {
-                  console.warn(
-                    `Name validation failed (episode ${ep}):`,
-                    nvErr?.message || nvErr
-                  );
-                }
-              }
-              episodeText = normalizeEpisodeCharacterNames(
-                episodeText,
-                CHARACTER_NAME_REGISTRY_PATH
-              );
             }
           }
         }
