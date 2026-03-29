@@ -1659,6 +1659,24 @@ const PROMPT_LEAK_LINE_PATTERNS = [
   /\bexplicit\s+content\s+disclaimers?\b/i,
   /\bcall-to-action\s+instructions?\b/i,
   /\bindustry\s+formatting\b/i,
+  // Blueprint / prompt structure headers
+  /\bCONTEXT\s+BUDGET\s+MODE\b/i,
+  /\bEDITORIAL\s+COURSE\s+CORRECTION\b/i,
+  /^BANNED\s+PATTERNS\s*:/i,
+  /^REQUIRED\s+ADVANCES\s*:/i,
+  /^FRESH\s+LOCATIONS\s*:/i,
+  /^NARRATIVE\s+STATE\s*:/i,
+  /\bTHIS\s+EPISODE'?S\s+PLAN\b/i,
+  /\bTHIS\s+EPISODE'?S\s+SUMMARY\b/i,
+  /\bMICRO[-\s]?STRUCTURE\b.*follow\s+this\s+order/i,
+  /\bUNIQUE\s+SCENE\s*\(REQUIRED\b/i,
+  /\bEPISODE\s+OPENING\s+HISTORY\b/i,
+  /\bSERIES\s+HISTORY\b/i,
+  /\bcharacter_state\s*:/i,
+  /\blast_ending\s*:/i,
+  /\brole\s*:\s*(heroine|cold_male|warm_male|protagonist)/i,
+  /\bSetting\s*\(REQUIRED\s*[—-]/i,
+  /\bEmotional\s+focus\s*\(REQUIRED\b/i,
 ];
 
 function isMessyEpisodeDivider(line) {
@@ -3447,7 +3465,7 @@ app.post("/generate", requireAuth, async (req, res) => {
               { role: "user", content: userContent },
             ],
             max_tokens: 2048,
-            temperature: 0.5,
+            temperature: 0.85,
             frequency_penalty: 1.0,
             presence_penalty: 0.6,
           });
