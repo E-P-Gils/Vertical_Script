@@ -2002,6 +2002,91 @@ Output:
 - Preserve mandatory screenplay line breaks: scene headings and character cues on their own lines; never concatenate a character name with dialogue or parentheticals on one line.
 - Do NOT add commentary or explanation—only the edited script.`;
 
+/**
+ * Post-generation duplicate detector.
+ * Scans every episode pair (not just adjacent) for structural and textual similarity.
+ * Returns an array of flagged pairs sorted by severity — highest score first.
+ *
+ * Two independent signals per pair:
+ *   structural  — scoreOpeningSimilarity() on stored opening fingerprints
+ *   text        — repetitionScore() on full episode body
+ *
+ * Thresholds:
+ *   structural >= 0.7  →  same location + same action (clear structural duplicate)
+ *   text       >= 0.35 →  35%+ sentence overlap (same-scene rewrite)
+ *   Either threshold alone is sufficient to flag the pair.
+ */
+function detectDuplicateEpisodes(scripts, recaps) {
+  const flags = [];
+  const n = scripts.length;
+  if (n < 2) return flags;
+
+  // Build a quick lookup: episode number → recap (for fingerprints)
+  const recapByEp = new Map();
+  for (const r of (recaps || [])) {
+    if (typeof r.episode === "number") recapByEp.set(r.episode, r);
+  }
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const epA = i + 1;
+      const epB = j + 1;
+
+      // Structural signal
+      const recA = recapByEp.get(epA);
+      const recB = recapByEp.get(epB);
+      const structuralScore =
+        recA?.openingFingerprint && recB?.openingFingerprint
+          ? scoreOpeningSimilarity(recA.openingFingerprint, recB.openingFingerprint)
+          : 0;
+
+      // Text signal (sentence overlap across full bodies)
+      const textScore = repetitionScore(scripts[i], scripts[j]);
+
+      const STRUCTURAL_FLAG = 0.7;
+      const TEXT_FLAG = 0.35;
+
+      if (structuralScore >= STRUCTURAL_FLAG || textScore >= TEXT_FLAG) {
+        const reasons = [];
+        if (structuralScore >= STRUCTURAL_FLAG) {
+          const fpA = recA?.openingFingerprint;
+          const fpB = recB?.openingFingerprint;
+          reasons.push(
+            `structural match: ${fpA?.location || "?"} | ${fpA?.action || "?"} → ` +
+            `${fpB?.location || "?"} | ${fpB?.action || "?"} (score ${structuralScore.toFixed(2)})`
+          );
+        }
+        if (textScore >= TEXT_FLAG) {
+          reasons.push(`text overlap ${(textScore * 100).toFixed(0)}% sentence match`);
+        }
+
+        flags.push({
+          ep_a: epA,
+          ep_b: epB,
+          structural_score: Math.round(structuralScore * 100) / 100,
+          text_score: Math.round(textScore * 100) / 100,
+          severity: structuralScore >= STRUCTURAL_FLAG && textScore >= TEXT_FLAG
+            ? "high"
+            : structuralScore >= 0.8 || textScore >= 0.5
+            ? "medium"
+            : "low",
+          reasons,
+        });
+      }
+    }
+  }
+
+  // Sort: high severity first, then by combined score descending
+  flags.sort((a, b) => {
+    const sevOrder = { high: 0, medium: 1, low: 2 };
+    if (sevOrder[a.severity] !== sevOrder[b.severity])
+      return sevOrder[a.severity] - sevOrder[b.severity];
+    return (b.structural_score + b.text_score) - (a.structural_score + a.text_score);
+  });
+
+  return flags;
+}
+
 // Simple repetition score between two episode scripts.
 // Splits into sentences, normalises, and computes overlap ratio.
 function repetitionScore(currentText, previousText) {
@@ -2415,7 +2500,7 @@ function formatBlueprintContext(blueprint, episodeNumber) {
 }
 
 // How many prior episodes to include in full for continuation (token budget).
-const PREVIOUS_EPISODES_IN_CONTEXT = 1;
+const PREVIOUS_EPISODES_IN_CONTEXT = 2;
 
 /** Minimal user prompt for collapse rescue — avoids resending the full context that triggered the failure. */
 function buildCollapseRescueUserPrompt({
@@ -2641,6 +2726,17 @@ function buildEpisodePromptText({
       lines.push(`--- END OF ${which} ---`);
       lines.push("");
     });
+    // Supplementary: abstract state for character continuity (not the primary continuation signal)
+    if (Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
+      const states = previousEpisodeStates.slice(-PREVIOUS_EPISODES_IN_CONTEXT);
+      const lastState = states[states.length - 1];
+      if (lastState && (lastState.character_state || lastState.ending)) {
+        lines.push("CHARACTER STATE ENTERING THIS EPISODE (supplementary — the tail text above takes priority):");
+        if (lastState.character_state) lines.push(`  character_state: ${safeStr(lastState.character_state)}`);
+        if (lastState.ending) lines.push(`  last_ending: ${safeStr(lastState.ending)}`);
+        lines.push("");
+      }
+    }
     lines.push(`Write episode ${ep} now, continuing directly from the text above.`);
     lines.push("");
   } else if (ep > 1 && Array.isArray(previousEpisodeStates) && previousEpisodeStates.length > 0) {
@@ -3428,47 +3524,6 @@ app.post("/generate", requireAuth, async (req, res) => {
               remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
               pass: "verification_loop",
             });
-          }
-          // Second rescue attempt: ultra-minimal prompt at very low temperature.
-          // This runs before the deterministic fallback to give the LLM one more chance
-          // to produce real screenplay content rather than a placeholder episode.
-          if (hasQualityCollapse(episodeText, seriesNames)) {
-            try {
-              const rescue2Content = buildCollapseRescueUserPrompt({
-                language: body.language || "EN",
-                genre,
-                totalEpisodes: episodeCount,
-                episodeNumber: ep,
-                logline,
-                names: seriesNames,
-                blueprint,
-              });
-              const rescue2 = await openai.chat.completions.create({
-                model: PLANNER_MODEL,
-                messages: [
-                  { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
-                  { role: "user", content: rescue2Content },
-                ],
-                max_tokens: 2048,
-                temperature: 0.15,
-                frequency_penalty: 1.2,
-                presence_penalty: 0.8,
-              });
-              const rescue2Raw = rescue2.choices?.[0]?.message?.content;
-              if (typeof rescue2Raw === "string" && rescue2Raw.trim()) {
-                const rescue2Text = finalizeEpisodeText(rescue2Raw.trim(), ep, seriesNames);
-                if (!hasQualityCollapse(rescue2Text, seriesNames)) {
-                  episodeText = rescue2Text;
-                  sendStreamLine(res, {
-                    type: "quality_gate",
-                    episode: ep,
-                    status: "second_rescue_succeeded",
-                  });
-                }
-              }
-            } catch (r2Err) {
-              console.error(`Second rescue attempt failed for episode ${ep}:`, r2Err);
-            }
           }
           // Last resort: deterministic fallback using blueprint plan data.
           // Better than before — uses actual episode plan details for plausible content.
