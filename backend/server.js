@@ -287,6 +287,7 @@ You must output a single JSON object (no other text, no markdown) with this exac
       "cliffhanger": "One sentence: how the episode ends to hook the next",
       "hook_type": "meet_cute | humiliation | danger | secret_overheard | other",
       "conflict_type": "family_pressure | money_business | social_status | secret_reveal | rival_scheme | romantic_tension | supernatural_danger | other",
+      "unique_scene": "One concrete, never-before-seen scene specific to this episode only. Name the exact location, the characters present, and the single most important thing that happens. This scene MUST appear in the episode and MUST NOT repeat anything from prior episodes.",
       "micro_beats": [
         "Hook beat: 1 short sentence describing the opening emotional moment (0–5 seconds).",
         "Conflict beat: 1–2 short sentences describing the main conflict for this episode (5–30 seconds).",
@@ -2487,6 +2488,7 @@ function formatBlueprintContext(blueprint, episodeNumber) {
       lines.push(`  Key events: ${plan.key_events.join("; ")}`);
     if (plan.twist_or_reveal) lines.push(`  Twist/reveal: ${plan.twist_or_reveal}`);
     if (plan.cliffhanger)     lines.push(`  End on cliffhanger: ${plan.cliffhanger}`);
+    if (plan.unique_scene)    lines.push(`  UNIQUE SCENE (REQUIRED — must appear, must be new, must not repeat any prior episode): ${plan.unique_scene}`);
     if (Array.isArray(plan.micro_beats) && plan.micro_beats.length === 4) {
       lines.push("  MICRO-STRUCTURE (follow this order exactly — these are the four required beats):");
       lines.push(`    1) HOOK: ${plan.micro_beats[0]}`);
@@ -2500,7 +2502,7 @@ function formatBlueprintContext(blueprint, episodeNumber) {
 }
 
 // How many prior episodes to include in full for continuation (token budget).
-const PREVIOUS_EPISODES_IN_CONTEXT = 2;
+const PREVIOUS_EPISODES_IN_CONTEXT = 1;
 
 /** Minimal user prompt for collapse rescue — avoids resending the full context that triggered the failure. */
 function buildCollapseRescueUserPrompt({
@@ -2537,6 +2539,72 @@ function buildCollapseRescueUserPrompt({
   return parts.join("\n\n");
 }
 
+/**
+ * Mid-batch review: after every 5 episodes, analyse the last batch and produce
+ * a course-correction brief injected into the next 5 episodes' prompts.
+ * Acts as the automated equivalent of a human editor reviewing and redirecting.
+ */
+async function runMidBatchReview({
+  batchStart,
+  batchEnd,
+  recaps,
+  genre,
+  seriesNames,
+  blueprint,
+}) {
+  const batchRecaps = recaps.filter(
+    (r) => r.episode >= batchStart && r.episode <= batchEnd
+  );
+  if (batchRecaps.length === 0) return "";
+
+  const recapBlock = batchRecaps
+    .map(
+      (r) =>
+        `Episode ${r.episode}: ${safeStr(r.recap).slice(0, 300)}` +
+        (r.openingFingerprint
+          ? ` [opening: ${r.openingFingerprint.location || "?"} | ${r.openingFingerprint.action || "?"} | ${r.openingFingerprint.dialogue_type || "?"}]`
+          : "")
+    )
+    .join("\n");
+
+  const nextBatchStart = batchEnd + 1;
+  const nextBatchEnd = batchEnd + 5;
+
+  const prompt =
+    `You are the script editor for a ${genre} vertical drama series.\n` +
+    `The series stars: heroine=${seriesNames.heroine}, cold lead=${seriesNames.coldCeo}, warm lead=${seriesNames.warmFriend}.\n\n` +
+    `EPISODES ${batchStart}–${batchEnd} JUST COMPLETED. Here are their summaries and opening structures:\n\n` +
+    `${recapBlock}\n\n` +
+    `Your job: produce a COURSE CORRECTION BRIEF for episodes ${nextBatchStart}–${nextBatchEnd}.\n\n` +
+    `The brief must contain exactly these four sections:\n` +
+    `BANNED PATTERNS: List 3–5 specific scene types, locations, or action beats that appeared in episodes ${batchStart}–${batchEnd} and must NOT be repeated in the next batch. Be specific (e.g. "carrying heroine out of a room", "training center lobby confrontation").\n` +
+    `REQUIRED ADVANCES: List 2–3 specific plot threads or character dynamics that MUST move forward in the next batch — name the characters and the unresolved tension.\n` +
+    `FRESH LOCATIONS: List 3 specific new locations (never used in this batch) where scenes should be set.\n` +
+    `NARRATIVE STATE: One paragraph describing exactly where each of the three leads stands emotionally and physically entering episode ${nextBatchStart}.\n\n` +
+    `Be concrete and specific. Do not be vague. Output only the four sections, no preamble.`;
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: PLANNER_MODEL,
+      max_tokens: 600,
+      temperature: 0.7,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a professional script editor. Produce concise, specific editorial briefs. No filler.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+    const brief = resp.choices?.[0]?.message?.content?.trim() || "";
+    return brief;
+  } catch (err) {
+    console.warn("Mid-batch review failed:", err?.message || err);
+    return "";
+  }
+}
+
 function buildEpisodePromptText({
   language,
   genre,
@@ -2552,6 +2620,7 @@ function buildEpisodePromptText({
   previousEpisodeScripts = [],
   narrativeResetText = "",
   trimContext = ENABLE_TRIMMED_CONTEXT,
+  courseCorrectionBrief = "",
 }) {
   const langTag = String(language || "EN").toUpperCase() === "ZH" ? "ZH" : "EN";
   const genreTag = String(genre || "Romance").trim() || "Romance";
@@ -2865,6 +2934,14 @@ function buildEpisodePromptText({
   lines.push(
     "Output formatting: blank line after each scene heading; each character cue (ALL CAPS name) on its own line with dialogue on the following line — never output glued cues like LUKESorry or LUKE(mocking)You."
   );
+
+  if (courseCorrectionBrief) {
+    lines.push("");
+    lines.push("EDITORIAL COURSE CORRECTION (from script editor review — treat every item below as a hard constraint for this episode):");
+    lines.push(courseCorrectionBrief);
+    lines.push("");
+  }
+
   return lines.join("\n");
 }
 
@@ -3208,6 +3285,8 @@ app.post("/generate", requireAuth, async (req, res) => {
     const episodeScriptsMemo = [];
     const episodeStateMemo = [];
     const narrativeResetMemo = new Map();
+    let courseCorrectionBrief = "";
+    const BATCH_SIZE = 5;
     const victorAllowed =
       includesWord(logline, "Victor") ||
       includesWord(seriesNames?.heroine, "Victor") ||
@@ -3216,6 +3295,28 @@ app.post("/generate", requireAuth, async (req, res) => {
 
     for (let ep = 1; ep <= episodeCount; ep++) {
       sendStreamLine(res, { type: "progress", episode: ep, total: episodeCount });
+
+      // Mid-batch review: after every BATCH_SIZE episodes, pause and analyse the
+      // completed batch before generating the next one. The resulting brief is
+      // injected into each of the next BATCH_SIZE episode prompts as hard constraints.
+      if (ep > 1 && (ep - 1) % BATCH_SIZE === 0 && episodeRecaps.length > 0) {
+        const batchEnd = ep - 1;
+        const batchStart = batchEnd - BATCH_SIZE + 1;
+        sendStreamLine(res, { type: "batch_review", episode: ep, batch_start: batchStart, batch_end: batchEnd, status: "reviewing" });
+        try {
+          courseCorrectionBrief = await runMidBatchReview({
+            batchStart,
+            batchEnd,
+            recaps: episodeRecaps,
+            genre,
+            seriesNames,
+            blueprint,
+          });
+          sendStreamLine(res, { type: "batch_review", episode: ep, status: "complete", brief_length: courseCorrectionBrief.length });
+        } catch (brErr) {
+          console.warn(`Mid-batch review failed at ep ${ep}:`, brErr?.message || brErr);
+        }
+      }
 
       try {
         let narrativeResetText = "";
@@ -3258,6 +3359,7 @@ app.post("/generate", requireAuth, async (req, res) => {
           previousEpisodeScripts: episodeScriptsMemo,
           narrativeResetText,
           trimContext: ENABLE_TRIMMED_CONTEXT,
+          courseCorrectionBrief,
         });
         sendStreamLine(res, {
           type: "prompt_metrics",
