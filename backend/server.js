@@ -60,6 +60,11 @@ const RECAP_MODEL =
 const TRANSLATION_MODEL =
   process.env.OPENAI_TRANSLATION_MODEL || PLANNER_MODEL;
 
+/** General-purpose generator model — used for main episode generation instead of the fine-tuned
+ *  model to avoid overfitting loops. Fine-tuned model acts as style advisor and corrective passer. */
+const GENERATOR_MODEL =
+  process.env.OPENAI_GENERATOR_MODEL || "gpt-4.1";
+
 const NAME_VALIDATION_MODEL =
   process.env.OPENAI_NAME_VALIDATION_MODEL || PLANNER_MODEL;
 const GENERATION_MODE = String(process.env.GENERATION_MODE || "single_pass").trim().toLowerCase();
@@ -460,6 +465,101 @@ function formatFallbackCharacterConstraints(names) {
     "",
   ];
   return lines.join("\n");
+}
+
+/**
+ * Calls the fine-tuned vdrama model once at generation start to produce a style guide
+ * specific to this logline: character voices, dialogue rhythm, pacing rules, and format
+ * conventions. The output is injected into GENERATOR_MODEL's system prompt for all 60 episodes.
+ */
+async function generateVdramaStyleGuide({ logline, names, genre }) {
+  const heroine = safeStr(names?.heroine) || "the heroine";
+  const male1   = safeStr(names?.coldCeo)  || "the cold lead";
+  const male2   = safeStr(names?.warmFriend) || "the warm lead";
+
+  const prompt =
+    `You are a vertical drama script expert. Based on the logline and characters below, ` +
+    `produce a STYLE GUIDE for a script writer generating this series.\n\n` +
+    `Genre: ${genre}\n` +
+    `Logline: ${safeStr(logline).slice(0, 800)}\n` +
+    `Characters: ${heroine} (heroine), ${male1} (cold lead), ${male2} (warm lead)\n\n` +
+    `The style guide must cover exactly these five sections — be specific and concrete:\n\n` +
+    `CHARACTER VOICES:\n` +
+    `- ${heroine}: describe her speech pattern, sentence length, typical emotional register\n` +
+    `- ${male1}: describe his speech pattern, formality level, how he expresses conflict\n` +
+    `- ${male2}: describe his speech pattern, warmth level, how he contrasts with ${male1}\n\n` +
+    `DIALOGUE RHYTHM: Describe the overall pacing — short punchy exchanges vs longer speeches, ` +
+    `how tension is built through dialogue, typical line length.\n\n` +
+    `SCENE PACING: How scenes open and close, typical scene length, when to cut vs linger.\n\n` +
+    `EMOTIONAL BEATS: The dominant emotional textures of this specific story — ` +
+    `what feelings should recur, what the audience should feel at the end of each episode.\n\n` +
+    `FORMAT RULES (non-negotiable for vertical drama):\n` +
+    `- Scene headings: INT./EXT. LOCATION — DAY/NIGHT on its own line\n` +
+    `- Character cues: ALL CAPS name on its own line, dialogue on the next line\n` +
+    `- Action lines: 1–2 sentences maximum, no long prose blocks\n` +
+    `- Each episode: opens with EPISODE N, closes with END EPISODE N\n` +
+    `- No chapter headings, no scene numbers, no (CONT'D) spam\n\n` +
+    `Output only the five sections above. No preamble or closing remarks.`;
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: FINETUNED_MODEL,
+      max_tokens: 700,
+      temperature: 0.4,
+      messages: [
+        {
+          role: "system",
+          content: "You are a vertical drama script expert. Produce concise, specific style guides.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+    return safeStr(resp.choices?.[0]?.message?.content).trim();
+  } catch (err) {
+    console.warn("VDrama style guide generation failed:", err?.message || err);
+    return "";
+  }
+}
+
+/**
+ * Calls PLANNER_MODEL once at generation start to produce genre-specific tone and atmosphere
+ * notes. Injected alongside the vdrama style guide into GENERATOR_MODEL's system prompt.
+ */
+async function generateGenreStyleNotes({ genre, logline }) {
+  const prompt =
+    `You are a script development consultant specialising in ${genre} drama.\n\n` +
+    `Logline: ${safeStr(logline).slice(0, 800)}\n\n` +
+    `Produce GENRE STYLE NOTES for a writer generating a 60-episode ${genre} vertical drama series. ` +
+    `Cover exactly these four sections:\n\n` +
+    `TONE & ATMOSPHERE: The dominant mood — gritty, glamorous, tense, romantic, dangerous, etc. ` +
+    `What should every scene feel like to a viewer?\n\n` +
+    `STAKES & CONFLICT: What kinds of conflict drive this genre forward? ` +
+    `What should the audience fear losing, and what should they want the heroine to gain?\n\n` +
+    `PACING CONVENTIONS: How fast should this genre move? ` +
+    `Where should episodes slow down (intimacy, revelation) vs accelerate (danger, betrayal)?\n\n` +
+    `WHAT TO AVOID: List 4–5 clichés or lazy patterns specific to ${genre} drama ` +
+    `that the writer must actively avoid — be specific (e.g. "don't resolve every threat with a fistfight", ` +
+    `"don't repeat the same rescue-from-danger beat more than twice").\n\n` +
+    `Output only the four sections. No preamble or closing remarks.`;
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: PLANNER_MODEL,
+      max_tokens: 500,
+      temperature: 0.5,
+      messages: [
+        {
+          role: "system",
+          content: "You are a script development consultant. Produce concise, specific genre notes.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+    return safeStr(resp.choices?.[0]?.message?.content).trim();
+  } catch (err) {
+    console.warn("Genre style notes generation failed:", err?.message || err);
+    return "";
+  }
 }
 
 async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tropes }) {
@@ -1778,6 +1878,27 @@ function lineHasCollapseLexicon(line) {
 }
 
 /**
+ * Phase 4a — Lightweight format gate for GENERATOR_MODEL output.
+ * Returns true if the text has the minimum structure of a valid vertical drama episode:
+ *   - At least one scene heading (INT./EXT.)
+ *   - At least two ALL CAPS character cue lines
+ *   - At least 25 non-empty lines (very short = truncated or malformed)
+ * Failures trigger one corrective reshape pass with FINETUNED_MODEL.
+ */
+function passesBasicFormatCheck(text) {
+  if (!text || typeof text !== "string") return false;
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 25) return false;
+  const hasSceneHeading = lines.some((l) => /^(INT|EXT|INT\/EXT|EXT\/INT)[.\s]/i.test(l));
+  if (!hasSceneHeading) return false;
+  const cueCandidates = lines.filter(
+    (l) => /^[A-Z][A-Z0-9 '.\-()]{1,50}$/.test(l) && l.length <= 55 &&
+           !/^(INT|EXT|INT\/EXT|EXT\/INT|EPISODE|END\s+EPISODE|FADE|CUT\s+TO|SMASH\s+TO)/i.test(l)
+  );
+  return cueCandidates.length >= 2;
+}
+
+/**
  * Detects "synonym vomit" / word-list drafts: long runs of punctuation-free
  * single words or huge adjective chains with no normal screenplay structure.
  */
@@ -2329,6 +2450,34 @@ STRUCTURE (critical — avoids broken exports):
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
 
+/**
+ * Builds the system prompt for GENERATOR_MODEL by combining:
+ * 1. The full EPISODE_TEXT_SYSTEM_PROMPT (all format + anti-repetition rules)
+ * 2. The vdrama style guide produced by the fine-tuned model for this logline
+ * 3. The genre style notes produced by the planner model for this genre
+ *
+ * Falls back to EPISODE_TEXT_SYSTEM_PROMPT alone if either guide is empty.
+ */
+function buildGeneratorSystemPrompt({ vdramaStyleGuide = "", genreStyleNotes = "" }) {
+  const sections = [EPISODE_TEXT_SYSTEM_PROMPT];
+
+  if (vdramaStyleGuide) {
+    sections.push(
+      "\n\n--- SERIES STYLE GUIDE (produced by vdrama specialist — follow these character voices and pacing rules for every episode) ---\n" +
+      vdramaStyleGuide
+    );
+  }
+
+  if (genreStyleNotes) {
+    sections.push(
+      "\n\n--- GENRE STYLE NOTES (produced by genre consultant — follow tone, stakes, and avoid-list for every episode) ---\n" +
+      genreStyleNotes
+    );
+  }
+
+  return sections.join("");
+}
+
 const EPISODE_PLAN_SYSTEM_PROMPT = `You are a TV episode planner.
 Return STRICT JSON only with this exact shape:
 {
@@ -2397,6 +2546,7 @@ async function generateEpisodeTextTwoPass({
   names,
   language,
   genre,
+  generatorSystemPrompt = "",
 }) {
   const planCompletion = await openai.chat.completions.create({
     model: PLANNER_MODEL,
@@ -2422,10 +2572,17 @@ async function generateEpisodeTextTwoPass({
     `CONTEXT:\n${userContent}\n\n` +
     `SCENE PLAN JSON:\n${JSON.stringify(plan, null, 2)}`;
 
+  // Use GENERATOR_MODEL for the render pass (primary generation, not corrective).
+  // Append style guides from generatorSystemPrompt if available.
+  const renderSystemPrompt = generatorSystemPrompt
+    ? EPISODE_RENDER_FROM_PLAN_SYSTEM_PROMPT + "\n\n" +
+      generatorSystemPrompt.slice(EPISODE_TEXT_SYSTEM_PROMPT.length)
+    : EPISODE_RENDER_FROM_PLAN_SYSTEM_PROMPT;
+
   const renderCompletion = await openai.chat.completions.create({
-    model: FINETUNED_MODEL,
+    model: GENERATOR_MODEL,
     messages: [
-      { role: "system", content: EPISODE_RENDER_FROM_PLAN_SYSTEM_PROMPT },
+      { role: "system", content: renderSystemPrompt },
       { role: "user", content: renderPrompt },
     ],
     max_tokens: 2048,
@@ -3337,6 +3494,30 @@ app.post("/generate", requireAuth, async (req, res) => {
       // We continue without a blueprint; episodes will still be generated using only the logline.
     }
 
+    // Generate style guides once before the episode loop.
+    // Both are run in parallel to save time; failures are non-fatal.
+    let vdramaStyleGuide = "";
+    let genreStyleNotes = "";
+    try {
+      sendStreamLine(res, { type: "style_guide", status: "generating" });
+      [vdramaStyleGuide, genreStyleNotes] = await Promise.all([
+        generateVdramaStyleGuide({ logline, names: seriesNames, genre }),
+        generateGenreStyleNotes({ logline, genre }),
+      ]);
+      sendStreamLine(res, {
+        type: "style_guide",
+        status: "complete",
+        vdrama_chars: vdramaStyleGuide.length,
+        genre_chars: genreStyleNotes.length,
+      });
+    } catch (sgErr) {
+      console.warn("Style guide generation failed:", sgErr?.message || sgErr);
+      sendStreamLine(res, { type: "style_guide", status: "failed" });
+    }
+
+    // Build the generator system prompt once — combines format rules + both style guides.
+    const generatorSystemPrompt = buildGeneratorSystemPrompt({ vdramaStyleGuide, genreStyleNotes });
+
     const episodeScriptsMemo = [];
     const episodeStateMemo = [];
     const narrativeResetMemo = new Map();
@@ -3435,6 +3616,7 @@ app.post("/generate", requireAuth, async (req, res) => {
               names: seriesNames,
               language: body.language || "EN",
               genre,
+              generatorSystemPrompt,
             });
             if (twoPass.ok) {
               rawContent = twoPass.text;
@@ -3459,9 +3641,9 @@ app.post("/generate", requireAuth, async (req, res) => {
         }
         if (!rawContent) {
           const completion = await openai.chat.completions.create({
-            model: FINETUNED_MODEL,
+            model: GENERATOR_MODEL,
             messages: [
-              { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+              { role: "system", content: generatorSystemPrompt },
               { role: "user", content: userContent },
             ],
             max_tokens: 2048,
@@ -3470,6 +3652,42 @@ app.post("/generate", requireAuth, async (req, res) => {
             presence_penalty: 0.6,
           });
           rawContent = completion.choices?.[0]?.message?.content || "";
+        }
+
+        // Phase 4a — Format gate: if GENERATOR_MODEL output lacks basic screenplay structure,
+        // do one corrective reshape pass with FINETUNED_MODEL before downstream processing.
+        if (rawContent && !passesBasicFormatCheck(rawContent)) {
+          try {
+            sendStreamLine(res, { type: "format_rescue", episode: ep, status: "start" });
+            const reshapePrompt =
+              `The following draft for Episode ${ep} is missing required vertical drama screenplay format ` +
+              `(scene headings, ALL CAPS character cues, or is too short). ` +
+              `Rewrite it in correct vertical drama format — preserve all story content and dialogue, ` +
+              `but fix structure: INT./EXT. scene headings, ALL CAPS character cue lines, ` +
+              `short action lines, EPISODE ${ep} header, END EPISODE ${ep} footer.\n\n` +
+              `DRAFT TO FIX:\n\n${rawContent}`;
+            const reshapeResp = await openai.chat.completions.create({
+              model: FINETUNED_MODEL,
+              messages: [
+                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                { role: "user", content: reshapePrompt },
+              ],
+              max_tokens: 2048,
+              temperature: 0.3,
+              frequency_penalty: 0.8,
+              presence_penalty: 0.3,
+            });
+            const reshaped = reshapeResp.choices?.[0]?.message?.content || "";
+            if (reshaped.trim() && passesBasicFormatCheck(reshaped)) {
+              rawContent = reshaped;
+              sendStreamLine(res, { type: "format_rescue", episode: ep, status: "success" });
+            } else {
+              sendStreamLine(res, { type: "format_rescue", episode: ep, status: "failed" });
+            }
+          } catch (reshapeErr) {
+            console.warn(`Phase 4a format rescue failed for ep ${ep}:`, reshapeErr?.message || reshapeErr);
+            sendStreamLine(res, { type: "format_rescue", episode: ep, status: "error" });
+          }
         }
 
         let episodeText =
