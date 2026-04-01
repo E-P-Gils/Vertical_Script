@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   buildScreenplayPdfBytes,
   prepareChineseScriptLikePdfInput,
@@ -9,6 +9,27 @@ import "./App.css";
 // If you run the backend locally, keep VITE_API_BASE unset and calls go to Vite's `/api` proxy.
 // If you want the hosted Render backend, set VITE_API_BASE to `https://vertical-script.onrender.com`.
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+
+function mapServerListRowToItem(row, prevItem) {
+  const created =
+    row.created_at instanceof Date
+      ? row.created_at.toISOString()
+      : String(row.created_at || prevItem?.createdAt || new Date().toISOString());
+  return {
+    id: row.id,
+    createdAt: created,
+    title: String(row.title || prevItem?.title || "Generated Script").trim() || "Generated Script",
+    genre: String(row.genre || prevItem?.genre || "").trim(),
+    summary: String(row.summary || prevItem?.summary || "").trim(),
+    englishText: prevItem?.englishText || "",
+    chineseText: prevItem?.chineseText || "",
+    generating: row.status === "generating",
+    status: row.status || prevItem?.status,
+    episodeDone: row.episode_done ?? prevItem?.episodeDone ?? 0,
+    episodeTarget: row.episode_target ?? prevItem?.episodeTarget ?? 60,
+    errorMessage: row.error_message ? String(row.error_message) : prevItem?.errorMessage || "",
+  };
+}
 
 function App() {
   const [modalOpen, setModalOpen] = useState(false);
@@ -75,6 +96,132 @@ function App() {
     }
   });
   const [activeScriptId, setActiveScriptId] = useState(null);
+  const pollIntervalRef = useRef(null);
+  const activeScriptIdRef = useRef(activeScriptId);
+
+  const clearBackgroundPoll = useCallback(() => {
+    if (pollIntervalRef.current != null) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+  }, []);
+
+  const scheduleProgressPoll = useCallback(
+    (scriptId) => {
+      if (!authToken || !scriptId) return;
+      clearBackgroundPoll();
+      pollIntervalRef.current = -1;
+
+      const applyPolledScript = (row) => {
+        const id = row.id;
+        const target = row.episode_target || 60;
+        setMyScripts((prev) =>
+          prev.map((it) =>
+            it.id === id
+              ? {
+                  ...it,
+                  englishText: row.english_text || "",
+                  chineseText: row.chinese_text || "",
+                  generating: row.status === "generating",
+                  status: row.status,
+                  episodeDone: row.episode_done ?? 0,
+                  episodeTarget: row.episode_target ?? it.episodeTarget ?? target,
+                  errorMessage: row.error_message ? String(row.error_message) : "",
+                }
+              : it
+          )
+        );
+        if (activeScriptIdRef.current === id) {
+          setScript(row.english_text || "");
+          setScriptZh(row.chinese_text || "");
+          if (row.status === "generating") {
+            setProgress({
+              episode: row.episode_done || 0,
+              total: row.episode_target || target,
+              phase: "generating",
+            });
+          }
+        }
+        return row.status;
+      };
+
+      const pollOnce = async () => {
+        try {
+          const pr = await fetch(`${API_BASE}/scripts/${encodeURIComponent(scriptId)}`, {
+            headers: { Authorization: `Bearer ${authToken}` },
+          });
+          if (!pr.ok) return;
+          const pd = await pr.json();
+          const row = pd.script;
+          if (!row) return;
+          const st = applyPolledScript(row);
+          if (st === "complete" || st === "failed") {
+            clearBackgroundPoll();
+            setProgress({ episode: 0, total: 0, phase: "generating" });
+            if (st === "failed") setError(row.error_message || "Generation failed");
+            else setModalOpen(false);
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+
+      void (async () => {
+        await pollOnce();
+        if (pollIntervalRef.current === -1) {
+          pollIntervalRef.current = setInterval(pollOnce, 4000);
+        }
+      })();
+    },
+    [authToken, clearBackgroundPoll]
+  );
+
+  useEffect(() => {
+    activeScriptIdRef.current = activeScriptId;
+  }, [activeScriptId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("myScripts", JSON.stringify(myScripts));
+    } catch {}
+  }, [myScripts]);
+
+  useEffect(() => {
+    if (authToken) setError("");
+  }, [authToken]);
+
+  useEffect(() => {
+    return () => clearBackgroundPoll();
+  }, []);
+
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/scripts`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!r.ok || cancelled) return;
+        const data = await r.json();
+        const rows = Array.isArray(data.scripts) ? data.scripts : [];
+        setMyScripts((prev) => {
+          const prevById = new Map(prev.map((x) => [x.id, x]));
+          const serverIds = new Set(rows.map((row) => row.id));
+          const fromServer = rows.map((row) => mapServerListRowToItem(row, prevById.get(row.id)));
+          const localOnly = prev.filter((p) => !serverIds.has(p.id));
+          return [...fromServer, ...localOnly].slice(0, 50);
+        });
+        const topGen = rows.find((r) => r.status === "generating");
+        if (topGen && !cancelled) scheduleProgressPoll(topGen.id);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, scheduleProgressPoll]);
 
   const wordCount = logline.trim() ? logline.trim().split(/\s+/).length : 0;
   const MIN_WORDS = 25;
@@ -86,16 +233,6 @@ function App() {
         Authorization: `Bearer ${authToken}`,
       }
     : {};
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("myScripts", JSON.stringify(myScripts));
-    } catch {}
-  }, [myScripts]);
-
-  useEffect(() => {
-    if (authToken) setError("");
-  }, [authToken]);
 
   const buildScriptTitle = (summaryText, genreName) => {
     const s = String(summaryText || "").trim();
@@ -270,6 +407,7 @@ function App() {
   };
 
   const handleLogout = () => {
+    clearBackgroundPoll();
     setAuthToken(null);
     try {
       localStorage.removeItem("authToken");
@@ -289,6 +427,78 @@ function App() {
     setEpisodeCountRequested(episodeCount);
     setProgress({ episode: 0, total: episodeCount, phase: "generating" });
     setLoading(true);
+    clearBackgroundPoll();
+
+    const bodyPayload = {
+      genre,
+      language: "EN",
+      episodeCount,
+      title: "Generated Script",
+      logline: logline.trim().slice(0, 1500),
+      translateToChinese: false,
+    };
+
+    if (authToken) {
+      let bgRes;
+      let bgData = {};
+      try {
+        bgRes = await fetch(`${API_BASE}/generate/background`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(bodyPayload),
+        });
+        bgData = await bgRes.json().catch(() => ({}));
+      } catch {
+        bgRes = { ok: false, status: 0 };
+      }
+
+      if (bgRes.ok && bgRes.status === 202 && bgData.scriptId) {
+        const scriptId = bgData.scriptId;
+        const title = buildScriptTitle(logline, genre);
+        const summary = logline.trim();
+        const newItem = {
+          id: scriptId,
+          createdAt: new Date().toISOString(),
+          title,
+          genre,
+          summary,
+          englishText: "",
+          chineseText: "",
+          generating: true,
+          status: "generating",
+          episodeDone: 0,
+          episodeTarget: episodeCount,
+          errorMessage: "",
+        };
+        setMyScripts((prev) => {
+          const rest = prev.filter((x) => x.id !== scriptId);
+          return [newItem, ...rest].slice(0, 50);
+        });
+        setActiveScriptId(scriptId);
+        setLoading(false);
+        scheduleProgressPoll(scriptId);
+        setModalOpen(false);
+        return;
+      }
+
+      const errMsg = String(bgData.error || "");
+      const tryStreamFallback =
+        bgRes.status === 503 && /Background generation requires/i.test(errMsg);
+      if (!tryStreamFallback) {
+        setLoading(false);
+        setProgress({ episode: 0, total: 0, phase: "generating" });
+        if (bgRes.status === 401 || bgRes.status === 403) {
+          setError("Please register and verify your email, then log in again.");
+        } else {
+          setError(errMsg || "Generation failed");
+        }
+        return;
+      }
+    }
+
     try {
       const res = await fetch(`${API_BASE}/generate`, {
         method: "POST",
@@ -296,14 +506,7 @@ function App() {
           "Content-Type": "application/json",
           ...authHeaders,
         },
-        body: JSON.stringify({
-          genre,
-          language: "EN",
-          episodeCount,
-          title: "Generated Script",
-          logline: logline.trim().slice(0, 1500),
-          translateToChinese: false,
-        }),
+        body: JSON.stringify(bodyPayload),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -772,8 +975,24 @@ function App() {
                             Summary / 摘要: {it.summary}
                           </div>
                         ) : null}
+                        {it.status === "generating" || it.generating ? (
+                          <div style={{ opacity: 0.9, fontSize: "0.85rem", marginTop: "0.35rem" }}>
+                            Generating in background / 后台生成中… {it.episodeDone ?? 0}/{it.episodeTarget ?? 60}
+                          </div>
+                        ) : null}
+                        {it.status === "failed" && it.errorMessage ? (
+                          <div className="error" style={{ marginTop: "0.35rem", fontSize: "0.85rem" }}>
+                            {it.errorMessage}
+                          </div>
+                        ) : null}
                       </div>
-                      <div style={{ opacity: isActive ? 1 : 0.75 }}>{it.chineseText ? "EN + ZH" : "EN only"}</div>
+                      <div style={{ opacity: isActive ? 1 : 0.75 }}>
+                        {it.status === "generating" || it.generating
+                          ? "…"
+                          : it.chineseText
+                            ? "EN + ZH"
+                            : "EN only"}
+                      </div>
                     </div>
                     <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
                       <button type="button" className="btn btn-secondary" onClick={() => loadScriptItem(it)}>
@@ -794,7 +1013,7 @@ function App() {
                             setDownloading(null);
                           }
                         }}
-                        disabled={downloading !== null}
+                        disabled={downloading !== null || !it.englishText?.trim()}
                       >
                         Download EN PDF
                       </button>

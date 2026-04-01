@@ -67,5 +67,26 @@ export async function initDb() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code_hash TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS saved_scripts (
+      id UUID PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL DEFAULT 'Generated Script',
+      genre TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      english_text TEXT NOT NULL DEFAULT '',
+      chinese_text TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'generating',
+      episode_target INTEGER NOT NULL DEFAULT 60,
+      episode_done INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_saved_scripts_user_updated ON saved_scripts (user_id, updated_at DESC);`
+  );
 }
 

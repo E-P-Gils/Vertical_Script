@@ -18,7 +18,15 @@ import {
 import { fixMergedWordIssuesPhase2, fixMergedWordIssuesPhase2Detailed } from "./mergedWordsFix.js";
 import { auditMergedWords } from "./mergedWordsAudit.js";
 import { initDb } from "./db.js";
-import { loginUser, registerUser, requireAuth, verifyEmailCode } from "./auth.js";
+import { loginUser, registerUser, requireAuth, verifyEmailCode, isJwtAuthEnabled } from "./auth.js";
+import {
+  createGeneratingScript,
+  updateScriptProgress,
+  markScriptFailed,
+  markScriptComplete,
+  getScriptForUser,
+  listScriptsForUser,
+} from "./scriptsStore.js";
 import { loadDynamicMergePatterns } from "./mergePatternRegistry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -3158,7 +3166,55 @@ function buildEpisodePromptText({
 }
 
 function sendStreamLine(res, obj) {
-  res.write(JSON.stringify(obj) + "\n");
+  if (!res || res.writableEnded) return;
+  try {
+    res.write(JSON.stringify(obj) + "\n");
+  } catch (_) {}
+}
+
+/** Same pipeline as streaming /generate, but writes are discarded (background jobs). */
+function createNoOpStreamResponse() {
+  return {
+    writableEnded: false,
+    destroyed: false,
+    headersSent: true,
+    socket: null,
+    setHeader() {},
+    flushHeaders() {},
+    status() {
+      return this;
+    },
+    write(_chunk, cb) {
+      if (typeof cb === "function") queueMicrotask(cb);
+      return true;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+  };
+}
+
+function joinEpisodeScriptsForStorage(scripts) {
+  if (!Array.isArray(scripts)) return "";
+  let full = "";
+  for (let i = 0; i < scripts.length; i++) {
+    const ep = i + 1;
+    const t = String(scripts[i] || "").trim();
+    const block = /^EPISODE\s+\d+/i.test(t) ? t : `EPISODE ${ep}\n\n${t}`;
+    full += (full ? "\n\n" : "") + block;
+  }
+  return full;
+}
+
+async function persistEpisodeProgress(persist, episodeScriptsMemo, episodeCount) {
+  if (!persist?.scriptId || !persist?.userId) return;
+  const full = joinEpisodeScriptsForStorage(episodeScriptsMemo);
+  await updateScriptProgress(persist.scriptId, persist.userId, {
+    english_text: full,
+    episode_done: episodeScriptsMemo.length,
+    episode_target: episodeCount,
+    status: "generating",
+  });
 }
 
 function buildCollapseSafeEpisodeFallbackSync({
@@ -3398,7 +3454,110 @@ app.post("/auth/login", (req, res) => loginUser(req, res));
 app.post("/auth/confirm-email", (req, res) => verifyEmailCode(req, res));
 
 app.post("/generate", requireAuth, async (req, res) => {
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  try {
+    await runSeasonGeneration(req.body || {}, res, null);
+  } catch (err) {
+    console.error("/generate:", err);
+    try {
+      if (!res.writableEnded) {
+        sendStreamLine(res, { type: "error", message: err.message || "Generation failed" });
+        sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });
+      }
+    } catch (_) {}
+  } finally {
+    try {
+      if (!res.writableEnded) res.end();
+    } catch (_) {}
+  }
+});
+
+app.post("/generate/background", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({
+      error: "Background generation requires AUTH_ENABLED=true and JWT_SECRET on the server.",
+    });
+  }
+  const userId = Number(req.auth?.sub);
+  if (!Number.isFinite(userId)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
   const body = req.body || {};
+  const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
+  const logline = safeStr(body.logline).slice(0, 1500);
+  const wordCount = logline ? logline.trim().split(/\s+/).filter(Boolean).length : 0;
+  const minWords = 25;
+  if (!logline || wordCount < minWords) {
+    return res.status(400).json({
+      error: `Summary must be at least ${minWords} words (currently ${wordCount}).`,
+    });
+  }
+  const genre = String(body.genre || "Romance").trim() || "Romance";
+  const title = safeStr(body.title).slice(0, 300) || "Generated Script";
+  let row;
+  try {
+    row = await createGeneratingScript({
+      userId,
+      title,
+      genre,
+      summary: logline.slice(0, 2000),
+      episodeTarget: episodeCount,
+    });
+  } catch (e) {
+    console.error("createGeneratingScript:", e);
+    return res.status(503).json({
+      error:
+        "Could not save script draft. Ensure DATABASE_URL is set and Postgres is reachable.",
+    });
+  }
+  res.status(202).json({ ok: true, scriptId: row.id, status: "generating" });
+  const persist = { scriptId: row.id, userId };
+  const noop = createNoOpStreamResponse();
+  setImmediate(() => {
+    runSeasonGeneration(body, noop, persist).catch(async (err) => {
+      console.error("Background runSeasonGeneration:", err);
+      try {
+        await markScriptFailed(persist.scriptId, persist.userId, String(err?.message || err));
+      } catch (_) {}
+    });
+  });
+});
+
+app.get("/scripts", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({ error: "Auth not enabled" });
+  }
+  const userId = Number(req.auth?.sub);
+  if (!Number.isFinite(userId)) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const rows = await listScriptsForUser(userId, 50);
+    return res.json({ scripts: rows });
+  } catch (e) {
+    console.error("listScriptsForUser:", e);
+    return res.status(500).json({ error: "Failed to list scripts" });
+  }
+});
+
+app.get("/scripts/:id", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({ error: "Auth not enabled" });
+  }
+  const userId = Number(req.auth?.sub);
+  if (!Number.isFinite(userId)) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const row = await getScriptForUser(req.params.id, userId);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    return res.json({ script: row });
+  } catch (e) {
+    console.error("getScriptForUser:", e);
+    return res.status(500).json({ error: "Failed to load script" });
+  }
+});
+
+async function runSeasonGeneration(body, res, persist) {
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
   let logline = safeStr(body.logline).slice(0, 1500);
   const genre = String(body.genre || "Romance").trim() || "Romance";
@@ -3410,20 +3569,24 @@ app.post("/generate", requireAuth, async (req, res) => {
   const wordCount = logline ? logline.trim().split(/\s+/).filter(Boolean).length : 0;
   const minWords = 25;
 
-  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders?.();
-
   try {
     if (!logline || wordCount < minWords) {
-      res.status(400);
+      if (typeof res.status === "function") res.status(400);
       sendStreamLine(res, {
         type: "error",
         message: `Summary must be at least ${minWords} words (currently ${wordCount}).`,
       });
       sendStreamLine(res, { type: "done" });
-      return res.end();
+      if (persist?.scriptId && persist?.userId) {
+        try {
+          await markScriptFailed(
+            persist.scriptId,
+            persist.userId,
+            `Summary must be at least ${minWords} words`
+          );
+        } catch (_) {}
+      }
+      return;
     }
 
     let genreBible = null;
@@ -4349,11 +4512,25 @@ app.post("/generate", requireAuth, async (req, res) => {
 
         episodeScriptsMemo.push(episodeText);
         sendStreamLine(res, { type: "episode", episode: ep, text: episodeText });
+        if (persist) {
+          try {
+            await persistEpisodeProgress(persist, episodeScriptsMemo, episodeCount);
+          } catch (pe) {
+            console.warn(`persist episode ${ep}:`, pe?.message || pe);
+          }
+        }
       } catch (epErr) {
         console.error(`Episode ${ep} error:`, epErr);
         const fallback = `[Episode ${ep} failed to generate.]`;
         episodeScriptsMemo.push(fallback);
         sendStreamLine(res, { type: "episode", episode: ep, text: fallback });
+        if (persist) {
+          try {
+            await persistEpisodeProgress(persist, episodeScriptsMemo, episodeCount);
+          } catch (pe) {
+            console.warn(`persist episode ${ep} (fallback):`, pe?.message || pe);
+          }
+        }
       }
     }
 
@@ -4362,6 +4539,7 @@ app.post("/generate", requireAuth, async (req, res) => {
       body.translateToChinese !== false &&
       lang !== "ZH" &&
       episodeScriptsMemo.length > 0;
+    const episodeZhMemo = [];
     if (wantZh) {
       const total = episodeScriptsMemo.length;
       let hardStop = false;
@@ -4374,6 +4552,7 @@ app.post("/generate", requireAuth, async (req, res) => {
           sendStreamLine(res, { type: "translation_progress", episode: epNum, total });
           const zh = await translateEpisodeScriptToChinese(epNum, total, episodeScriptsMemo[i]);
           const text = zh || `[Episode ${epNum} — translation produced no text; see English PDF.]`;
+          episodeZhMemo.push(text);
           sendStreamLine(res, { type: "episode_zh", episode: epNum, text });
         } catch (trErr) {
           console.error(`Chinese translation failed for episode ${epNum}:`, trErr);
@@ -4397,15 +4576,32 @@ app.post("/generate", requireAuth, async (req, res) => {
       }
     }
 
+    if (persist?.scriptId && persist?.userId) {
+      try {
+        const fullEn = joinEpisodeScriptsForStorage(episodeScriptsMemo);
+        const fullZh = wantZh && episodeZhMemo.length ? joinEpisodeScriptsForStorage(episodeZhMemo) : "";
+        await markScriptComplete(persist.scriptId, persist.userId, {
+          english_text: fullEn,
+          chinese_text: fullZh,
+          episode_done: episodeCount,
+        });
+      } catch (ce) {
+        console.warn("markScriptComplete:", ce?.message || ce);
+      }
+    }
+
     sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });
   } catch (err) {
     console.error(err);
     sendStreamLine(res, { type: "error", message: err.message || "Generation failed" });
     sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });
-  } finally {
-    res.end();
+    if (persist?.scriptId && persist?.userId) {
+      try {
+        await markScriptFailed(persist.scriptId, persist.userId, err.message || "Generation failed");
+      } catch (_) {}
+    }
   }
-});
+}
 
 function parseEpisodesFromEnglishScript(scriptText) {
   const raw = safeStr(scriptText);

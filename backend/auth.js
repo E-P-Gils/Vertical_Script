@@ -20,7 +20,7 @@ export function isAuthEnabled() {
   return AUTH_ENABLED;
 }
 
-function isJwtAuthEnabled() {
+export function isJwtAuthEnabled() {
   return AUTH_ENABLED && !!JWT_SECRET;
 }
 
