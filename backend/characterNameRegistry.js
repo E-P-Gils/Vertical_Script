@@ -153,6 +153,11 @@ function extractNameVariantsFromEpisodeText(episodeText) {
 let _cachedRegistryPath = null;
 let _cachedRegistry = null;
 
+export function clearCharacterNameRegistryCache() {
+  _cachedRegistryPath = null;
+  _cachedRegistry = null;
+}
+
 export function loadCharacterNameRegistry(registryPath) {
   if (!registryPath) return null;
   const abs = path.resolve(registryPath);
@@ -334,6 +339,7 @@ export async function updateCharacterNameRegistryFromEpisode({
   // Persist.
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2), "utf-8");
+  clearCharacterNameRegistryCache();
 
   return registry;
 }

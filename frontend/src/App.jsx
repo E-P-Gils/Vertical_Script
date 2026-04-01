@@ -48,7 +48,6 @@ function App() {
     "Werewolf",
   ];
   const [genre, setGenre] = useState("");
-  const [logline, setLogline] = useState("");
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({
     episode: 0,
@@ -60,7 +59,6 @@ function App() {
   const [scriptZh, setScriptZh] = useState("");
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(null);
-  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
   // Auth (optional; backend enables it via AUTH_ENABLED=true)
   const [authToken, setAuthToken] = useState(() => {
@@ -223,11 +221,6 @@ function App() {
     };
   }, [authToken, scheduleProgressPoll]);
 
-  const wordCount = logline.trim() ? logline.trim().split(/\s+/).length : 0;
-  const MIN_WORDS = 25;
-  const loglineUnderMin = wordCount > 0 && wordCount < MIN_WORDS;
-  const loglineOverLimit = wordCount > 250;
-
   const authHeaders = authToken
     ? {
         Authorization: `Bearer ${authToken}`,
@@ -274,24 +267,9 @@ function App() {
     setScript(item.englishText || "");
     setScriptZh(item.chineseText || "");
     setGenre(item.genre || "");
-    setLogline(item.summary || "");
     setActiveScriptId(item.id);
     setPage("generate");
     setModalOpen(false);
-  };
-
-  const handleSuggestRandomSummary = async () => {
-    setLoadingSuggestions(true);
-    try {
-      const r = await fetch(`${API_BASE}/summaries/random?genre=${encodeURIComponent(genre)}`);
-      if (r.ok) {
-        const data = await r.json();
-        if (data.summary) setLogline(data.summary);
-      }
-    } catch (_) {}
-    finally {
-      setLoadingSuggestions(false);
-    }
   };
 
   const handleRegister = async (e) => {
@@ -418,8 +396,7 @@ function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!genre || loglineOverLimit || loglineUnderMin) return;
-    if (!logline.trim()) return;
+    if (!genre) return;
     setError("");
     setScript("");
     setScriptZh("");
@@ -434,7 +411,6 @@ function App() {
       language: "EN",
       episodeCount,
       title: "Generated Script",
-      logline: logline.trim().slice(0, 1500),
       translateToChinese: false,
     };
 
@@ -457,8 +433,8 @@ function App() {
 
       if (bgRes.ok && bgRes.status === 202 && bgData.scriptId) {
         const scriptId = bgData.scriptId;
-        const title = buildScriptTitle(logline, genre);
-        const summary = logline.trim();
+        const summary = String(bgData.summary || "").trim();
+        const title = buildScriptTitle(summary, genre);
         const newItem = {
           id: scriptId,
           createdAt: new Date().toISOString(),
@@ -499,6 +475,7 @@ function App() {
       }
     }
 
+    let streamSummaryForPersist = "";
     try {
       const res = await fetch(`${API_BASE}/generate`, {
         method: "POST",
@@ -529,6 +506,8 @@ function App() {
             total: data.total || 60,
             phase: "generating",
           });
+        } else if (data.type === "preset_summary" && data.summary) {
+          streamSummaryForPersist = String(data.summary).trim();
         } else if (data.type === "translation_progress") {
           setProgress({
             episode: data.episode || 0,
@@ -556,7 +535,7 @@ function App() {
         } else if (data.type === "error") {
           setError(data.message || "Generation error");
         } else if (data.type === "done") {
-          persistGeneratedScript(fullScript, genre, logline);
+          persistGeneratedScript(fullScript, genre, streamSummaryForPersist);
           setModalOpen(false);
         }
       };
@@ -1296,7 +1275,6 @@ function App() {
                   value={genre}
                   onChange={(e) => {
                     setGenre(e.target.value);
-                    setLogline("");
                   }}
                 >
                   <option value="">— Select a genre / 请选择类型 —</option>
@@ -1324,35 +1302,14 @@ function App() {
                 </select>
               </label>
               {genre && (
-                <label className="field summary-field">
-                  <span>Summary / 摘要</span>
+                <div className="field summary-field preset-summary-note">
+                  <span>Preset story / 预设故事</span>
                   <p className="summary-hint">
-                    Write a short premise or generate one for this genre. /
-                    为本类型写一个简短故事梗概，或自动生成一个。
+                    Each time you generate, one curated preset summary for this genre is chosen
+                    automatically (you cannot enter your own). /
+                    每次点击生成时，系统会为本类型自动随机选择一条预设故事梗概（不可自定义输入）。
                   </p>
-                  <textarea
-                    value={logline}
-                    onChange={(e) => setLogline(e.target.value)}
-                    placeholder="A short premise or summary for your vertical (English only)… / 在此输入故事梗概（仅限英文）"
-                    rows={4}
-                    className={loglineOverLimit || loglineUnderMin ? "invalid" : ""}
-                  />
-                  <small className="word-count">
-                    {wordCount} words (min {MIN_WORDS}, max 250) / 单词（至少 {MIN_WORDS}，最多 250）
-                    {loglineOverLimit && " — over limit / 超出上限"}
-                    {loglineUnderMin && " — too short / 太短"}
-                  </small>
-                  <div className="summary-suggestions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-small"
-                      onClick={handleSuggestRandomSummary}
-                      disabled={loadingSuggestions}
-                    >
-                      {loadingSuggestions ? "…" : "Generate one / 随机生成一条"}
-                    </button>
-                  </div>
-                </label>
+                </div>
               )}
               {error && <p className="error">Error / 错误: {error}</p>}
               <div className="modal-actions">
@@ -1367,13 +1324,7 @@ function App() {
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={
-                    loading ||
-                    !genre ||
-                    !logline.trim() ||
-                    loglineUnderMin ||
-                    loglineOverLimit
-                  }
+                  disabled={loading || !genre}
                 >
                   {loading
                     ? progress.total > 0

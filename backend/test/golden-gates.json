@@ -1,0 +1,64 @@
+{
+  "description": "Expected decisions for deterministic gates (paired with goldenGates.test.mjs).",
+  "cases": [
+    {
+      "id": "format_empty",
+      "gate": "passesBasicFormatCheck",
+      "input": "",
+      "expect": false
+    },
+    {
+      "id": "format_short",
+      "gate": "passesBasicFormatCheck",
+      "input": "INT. A - DAY\n\nBOB\nHi.\n",
+      "expect": false
+    },
+    {
+      "id": "tags_skeptic_sorted",
+      "gate": "tagEpisodeEvents_sorted",
+      "input": "MARCUS\nStill chasing ghosts in dusty books?",
+      "expect": "skeptic_dismissal"
+    },
+    {
+      "id": "tags_dock_open_sorted",
+      "gate": "tagEpisodeEvents_sorted",
+      "input": "INT. BEACH - DAY\n\nShe walks to the water's edge and scans the ocean with her notebook.",
+      "expect": "dock_beach_scan_open"
+    },
+    {
+      "id": "collapse_word_run",
+      "gate": "hasQualityCollapse",
+      "input": "alpha\nbeta\ngamma\ndelta\nepsilon\n",
+      "expect": true,
+      "names": null
+    },
+    {
+      "id": "opening_sim_same_room_action",
+      "gate": "scoreOpeningSimilarity_rounded",
+      "fp1": {
+        "location": "HALL",
+        "action": "walking/moving",
+        "dialogue_type": "none"
+      },
+      "fp2": {
+        "location": "HALL",
+        "action": "walking/moving",
+        "dialogue_type": "none"
+      },
+      "expect": 0.8
+    },
+    {
+      "id": "rep_score_identical_sentence",
+      "gate": "repetitionScore_rounded",
+      "a": "INT. A - DAY. This is a unique long sentence for repetition testing only.",
+      "b": "INT. B - NIGHT. This is a unique long sentence for repetition testing only.",
+      "expect": 1
+    },
+    {
+      "id": "audit_lower_upper_merge",
+      "gate": "auditMergedWords_mergedTotal_atLeast",
+      "input": "He watchedTrevor leave the room quietly.",
+      "expect": 1
+    }
+  ]
+}

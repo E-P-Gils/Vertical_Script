@@ -14,6 +14,7 @@ import { generateLogline, SUPPORTED_GENRES } from "./loglineEngine.js";
 import {
   updateCharacterNameRegistryFromEpisode,
   normalizeEpisodeCharacterNames,
+  loadCharacterNameRegistry,
 } from "./characterNameRegistry.js";
 import { fixMergedWordIssuesPhase2, fixMergedWordIssuesPhase2Detailed } from "./mergedWordsFix.js";
 import { auditMergedWords } from "./mergedWordsAudit.js";
@@ -28,6 +29,16 @@ import {
   listScriptsForUser,
 } from "./scriptsStore.js";
 import { loadDynamicMergePatterns } from "./mergePatternRegistry.js";
+import {
+  structuralOpeningGateThreshold,
+  tagEpisodeEvents,
+  passesBasicFormatCheck,
+  hasQualityCollapse,
+  extractOpeningFingerprint,
+  findMostSimilarPriorOpening,
+  detectDuplicateEpisodes,
+  measureRepetitionAgainstRecent,
+} from "./episodeGatesCore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, "..");
@@ -75,8 +86,17 @@ const GENERATOR_MODEL =
 
 const NAME_VALIDATION_MODEL =
   process.env.OPENAI_NAME_VALIDATION_MODEL || PLANNER_MODEL;
-const GENERATION_MODE = String(process.env.GENERATION_MODE || "single_pass").trim().toLowerCase();
+const GENERATION_MODE = String(process.env.GENERATION_MODE || "two_pass").trim().toLowerCase();
 const ENABLE_TWO_PASS_EPISODE = GENERATION_MODE === "two_pass";
+/** Single-pass main writer (GENERATOR_MODEL): capped temp ≤ 0.7 to reduce drift vs two-pass render (~0.45). */
+const PRIMARY_EPISODE_TEMPERATURE = Math.min(
+  0.7,
+  Math.max(0.1, parseFloat(process.env.PRIMARY_EPISODE_TEMPERATURE || "0.6") || 0.6)
+);
+const PRIMARY_EPISODE_MAX_TOKENS = Math.max(
+  1024,
+  Math.min(4096, parseInt(process.env.PRIMARY_EPISODE_MAX_TOKENS || "2048", 10) || 2048)
+);
 const ENABLE_TRIMMED_CONTEXT =
   String(process.env.ENABLE_TRIMMED_CONTEXT || "true").trim().toLowerCase() !== "false";
 const CONTEXT_TAIL_LINES = Math.max(
@@ -86,6 +106,44 @@ const CONTEXT_TAIL_LINES = Math.max(
 const ANCHOR_ENFORCEMENT_MODE = String(process.env.ANCHOR_ENFORCEMENT_MODE || "warn")
   .trim()
   .toLowerCase(); // off | warn | enforce
+
+/** Opening-chunk embeddings vs prior episodes (semantic nearness beyond lexical repetition). */
+const EMBEDDING_MODEL =
+  process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+const ENABLE_EPISODE_EMBEDDING_GATE =
+  String(process.env.ENABLE_EPISODE_EMBEDDING_GATE || "true").trim().toLowerCase() !== "false";
+const EMBEDDING_SIMILARITY_THRESHOLD = Math.min(
+  0.995,
+  Math.max(0.5, parseFloat(process.env.EMBEDDING_SIMILARITY_THRESHOLD || "0.88") || 0.88)
+);
+const EMBEDDING_CHUNK_CHARS = Math.max(
+  400,
+  Math.min(8000, parseInt(process.env.EMBEDDING_CHUNK_CHARS || "2000", 10) || 2000)
+);
+
+/** Aligned with detectDuplicateEpisodes STRUCTURAL_FLAG (0.7) — opening fingerprint vs prior episodes. */
+const STRUCTURAL_OPENING_GATE_THRESHOLD = structuralOpeningGateThreshold();
+
+/** Bounded regen loops — verify trigger cleared after each attempt. */
+const MAX_REPETITION_REGEN_ATTEMPTS = Math.max(
+  1,
+  Math.min(6, parseInt(process.env.MAX_REPETITION_REGEN_ATTEMPTS || "3", 10) || 3)
+);
+const MAX_MERGED_WORD_REGEN_ATTEMPTS = Math.max(
+  1,
+  Math.min(6, parseInt(process.env.MAX_MERGED_WORD_REGEN_ATTEMPTS || "3", 10) || 3)
+);
+const MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS = Math.max(
+  1,
+  Math.min(6, parseInt(process.env.MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS || "3", 10) || 3)
+);
+
+const ENABLE_PLOT_CONTRACT_GATE =
+  String(process.env.ENABLE_PLOT_CONTRACT_GATE || "true").trim().toLowerCase() !== "false";
+const MAX_PLOT_CONTRACT_REGEN_ATTEMPTS = Math.max(
+  1,
+  Math.min(5, parseInt(process.env.MAX_PLOT_CONTRACT_REGEN_ATTEMPTS || "2", 10) || 2)
+);
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY in .env");
@@ -505,7 +563,7 @@ async function generateVdramaStyleGuide({ logline, names, genre }) {
     `- Scene headings: INT./EXT. LOCATION — DAY/NIGHT on its own line\n` +
     `- Character cues: ALL CAPS name on its own line, dialogue on the next line\n` +
     `- Action lines: 1–2 sentences maximum, no long prose blocks\n` +
-    `- Each episode: opens with EPISODE N, closes with END EPISODE N\n` +
+    `- Episode boundary lines ("EPISODE N" / "END EPISODE N") are NOT written by the model — the export pipeline adds them. Scripts start with the cold open or first INT./EXT. heading.\n` +
     `- No chapter headings, no scene numbers, no (CONT'D) spam\n\n` +
     `Output only the five sections above. No preamble or closing remarks.`;
 
@@ -874,173 +932,57 @@ function extractOpeningBeat(text) {
   return beats.join(" ").slice(0, 220);
 }
 
-/**
- * Phase 1a — Universal structured opening fingerprint.
- * Extracts {location, action, dialogue_type} from any episode opening.
- * Purely deterministic — no LLM, no genre-specific rules.
- * Used in Phase 1b (stored on recap) and Phase 1c (injected into prompt).
- */
-function extractOpeningFingerprint(text) {
-  const lines = safeStr(text)
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  // ── Location ─────────────────────────────────────────────────────────────
-  // Find the first scene heading and strip formatting noise.
-  let location = "UNKNOWN";
-  for (const line of lines) {
-    if (/^(INT|EXT|INT\/EXT|EXT\/INT)[.\s]/i.test(line)) {
-      location = line
-        .replace(/^(INT|EXT|INT\/EXT|EXT\/INT)[.\s-]*/i, "")  // strip INT./EXT. prefix
-        .replace(/[-–—]\s*(DAY|NIGHT|DAWN|DUSK|MORNING|EVENING|AFTERNOON|CONTINUOUS|MOMENTS?\s+LATER|LATER)[^)]*$/i, "") // strip time-of-day suffix
-        .replace(/\s+\d+\s*$/, "")   // strip trailing episode/page numbers
-        .trim()
-        .toUpperCase()
-        .slice(0, 60);
-      break;
-    }
+function cosineEmbeddingSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || !a.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
   }
-
-  // ── Action ───────────────────────────────────────────────────────────────
-  // Collect the first 5 non-heading, non-cue, non-metadata lines as action lines.
-  const actionLines = [];
-  let pastHeading = false;
-  for (const line of lines) {
-    if (actionLines.length >= 5) break;
-    if (/^EPISODE\s+\d+/i.test(line) || /^END\s+(OF\s+)?EPISODE/i.test(line)) continue;
-    if (/^(INT|EXT|INT\/EXT|EXT\/INT)[.\s]/i.test(line)) { pastHeading = true; continue; }
-    if (!pastHeading) continue;
-    // Skip ALL CAPS character cue lines
-    if (/^[A-Z][A-Z0-9\s'.\-()]{0,50}$/.test(line) && line.length <= 55) continue;
-    // Skip parentheticals
-    if (/^\([^)]+\)$/.test(line)) continue;
-    // Skip dialogue (lines following a cue — heuristic: short, starts lower-case or quoted)
-    actionLines.push(line.toLowerCase());
-  }
-  const actionText = actionLines.join(" ");
-
-  let action = "other";
-  if (/\b(pores?\s+over|reads?|studies|studying|traces?\s+the|scrolls?\s+through|flips?\s+through|searches?\s+through|scans?\s+a\s+(page|document|letter|file)|poring\s+over)\b/.test(actionText))
-    action = "researching/reading";
-  else if (/\b(stands?\s+(at|by|near|over|before|in\s+front)|stands?\s+alone|standing\s+(at|by|over)|gazes?\s+at|stares?\s+at|looks?\s+(out|at|over))\b/.test(actionText))
-    action = "standing/observing";
-  else if (/\b(walks?\s+(briskly|along|toward|away|through)|strides?|paces?|moves?\s+(through|toward|along)|marches?|approaches?\s+(quietly|slowly|quickly))\b/.test(actionText))
-    action = "walking/moving";
-  else if (/\b(confronts?|blocks?\s+(her|his|their)\s+path|steps?\s+(in\s+front|between|forward\s+sharply)|faces?\s+each\s+other|squares?\s+off)\b/.test(actionText))
-    action = "confronting";
-  else if (/\b(fights?|attacks?|lunges?|rushes?|sprints?|runs?|escapes?|dodges?|strikes?|draws?\s+(a\s+)?(weapon|dagger|blade|sword|gun))\b/.test(actionText))
-    action = "fighting/action";
-  else if (/\b(sits?\s+(at|by|behind|down)|works?\s+at|types?|leans?\s+over|crouches?|kneels?)\b/.test(actionText))
-    action = "sitting/working";
-  else if (/\b(arrives?|enters?|steps?\s+in(side|to)?|emerges?|appears?\s+(at|from|in\s+the)|walks?\s+in|bursts?\s+(in|through))\b/.test(actionText))
-    action = "arriving/entering";
-  else if (/\b(waits?|lingers?|pauses?|hesitates?|remains?\s+(still|silent)|stands?\s+in\s+silence)\b/.test(actionText))
-    action = "waiting";
-
-  // ── Dialogue type ─────────────────────────────────────────────────────────
-  // Find the first dialogue line (line after an ALL CAPS cue).
-  let dialogueType = "none";
-  let lastWasCue = false;
-  for (const line of lines) {
-    const isCue = /^[A-Z][A-Z0-9\s'.\-()]{0,50}$/.test(line) && line.length <= 55 &&
-                  !/^(INT|EXT|INT\/EXT|EXT\/INT|EPISODE|END\s+EPISODE|FADE|CUT\s+TO|SMASH\s+TO)/i.test(line);
-    if (isCue) { lastWasCue = true; continue; }
-    if (/^\([^)]+\)$/.test(line)) continue; // parenthetical — keep lastWasCue
-    if (!lastWasCue) continue;
-
-    // We have first dialogue line
-    const d = line.toLowerCase();
-    if (/\b(still\s+chasing|you('re|\s+are)\s+(wasting|wrong|deluded|chasing)|that('s|\s+is)\s+(impossible|ridiculous|insane)|you\s+really\s+think|not\s+this\s+again|give\s+it\s+up|stop\s+chasing)\b/.test(d))
-      dialogueType = "skeptic_dismissal";
-    else if (/\b(be\s+careful|you('re|\s+are)\s+in\s+danger|stay\s+away|watch\s+your|they('re|\s+are)\s+(coming|watching)|it('s|\s+is)\s+not\s+safe|run\b|get\s+out)\b/.test(d))
-      dialogueType = "warning";
-    else if (/\b(missed\s+you|good\s+to\s+see|you('re|\s+are)\s+(back|here|finally)|i\s+was\s+looking\s+for\s+you|welcome\s+back|you\s+made\s+it)\b/.test(d))
-      dialogueType = "reunion";
-    else if (/\b(who\s+are\s+you|state\s+your|what\s+are\s+you\s+doing\s+here|why\s+are\s+you|what\s+do\s+you\s+want|you\s+shouldn't\s+be\s+here|unauthorized)\b/.test(d))
-      dialogueType = "challenge/confrontation";
-    else if (/\b(we\s+need\s+to|i\s+found\s+(something|it|a)|there('s|\s+is)\s+(a|something|someone)|the\s+(signal|readings?|data|creature|plan|mission))\b/.test(d))
-      dialogueType = "exposition";
-    else if (/\b(i\s+(love|need|can't\s+stop\s+thinking\s+about|can't\s+lose)|you\s+mean\s+everything|i\s+was\s+wrong\s+about\s+you)\b/.test(d))
-      dialogueType = "intimacy/emotional";
-    else if (d.trim().endsWith("?"))
-      dialogueType = "question";
-    else
-      dialogueType = "statement";
-    break;
-  }
-
-  return { location, action, dialogue_type: dialogueType };
+  const den = Math.sqrt(na) * Math.sqrt(nb);
+  return den === 0 ? 0 : dot / den;
 }
 
-/**
- * Phase 2a — Structural similarity scorer for episode openings.
- * Compares two fingerprints and returns a 0–1 score.
- *
- * Weights:
- *   location     0.5  — most visible to the audience; same room = instant déjà vu
- *   action       0.3  — same first beat feels like a reset even in a new location
- *   dialogue_type 0.2 — same conversation opener compounds the repetition
- *
- * Location matching is fuzzy: strips numbers, articles, and directional words
- * so "RESEARCH VESSEL DECK 3" and "RESEARCH VESSEL DECK" both score as the same place.
- */
-function scoreOpeningSimilarity(fp1, fp2) {
-  if (!fp1 || !fp2) return 0;
-
-  // Normalise a location string to its essential noun phrase
-  const normLoc = (loc) =>
-    safeStr(loc)
-      .toUpperCase()
-      .replace(/\b(THE|A|AN|LOWER|UPPER|MAIN|INNER|OUTER|NORTH|SOUTH|EAST|WEST|OLD|NEW)\b/g, "")
-      .replace(/\b\d+\b/g, "")           // strip floor/room numbers
-      .replace(/[-–—]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  const loc1 = normLoc(fp1.location);
-  const loc2 = normLoc(fp2.location);
-
-  // Exact match after normalisation
-  let locScore = 0;
-  if (loc1 === loc2 && loc1 !== "UNKNOWN") {
-    locScore = 1;
-  } else {
-    // Partial match: one location string contains the other's core word(s)
-    const words1 = new Set(loc1.split(/\s+/).filter((w) => w.length > 3));
-    const words2 = new Set(loc2.split(/\s+/).filter((w) => w.length > 3));
-    const shared = [...words1].filter((w) => words2.has(w)).length;
-    const minSize = Math.min(words1.size, words2.size);
-    if (minSize > 0) locScore = shared / minSize;  // 0.5 if half the words match
-  }
-
-  const actionScore = fp1.action === fp2.action && fp1.action !== "other" ? 1 : 0;
-  const dialogueScore =
-    fp1.dialogue_type === fp2.dialogue_type && fp1.dialogue_type !== "none" && fp1.dialogue_type !== "statement"
-      ? 1
-      : 0;
-
-  return locScore * 0.5 + actionScore * 0.3 + dialogueScore * 0.2;
+function sliceTextForEpisodeEmbedding(text, maxChars) {
+  const t = safeStr(text).replace(/\r\n/g, "\n").trim();
+  if (!t) return "";
+  return t.slice(0, maxChars);
 }
 
-/**
- * Phase 2b — Best-match finder.
- * Runs scoreOpeningSimilarity against every prior episode's stored fingerprint
- * and returns the closest match: { score, episode, fingerprint } or null if
- * no prior recaps have a fingerprint yet.
- */
-function findMostSimilarPriorOpening(newFingerprint, recaps) {
-  if (!newFingerprint || !Array.isArray(recaps) || !recaps.length) return null;
+async function fetchEpisodeChunkEmbedding(chunk) {
+  const trimmed = safeStr(chunk).trim();
+  if (trimmed.length < 40) return null;
+  const input = trimmed.slice(0, 8191);
+  try {
+    const r = await openai.embeddings.create({
+      model: EMBEDDING_MODEL,
+      input,
+    });
+    const emb = r.data?.[0]?.embedding;
+    return Array.isArray(emb) ? emb : null;
+  } catch (e) {
+    console.warn("fetchEpisodeChunkEmbedding:", e?.message || e);
+    return null;
+  }
+}
 
-  let best = null;
-  for (const r of recaps) {
-    if (!r.openingFingerprint) continue;
-    const score = scoreOpeningSimilarity(newFingerprint, r.openingFingerprint);
-    if (best === null || score > best.score) {
-      best = { score, episode: r.episode, fingerprint: r.openingFingerprint };
+function bestPriorEmbeddingSimilarity(vec, priorEmbeddings) {
+  if (!vec || !Array.isArray(priorEmbeddings)) return { sim: 0, ep: 0 };
+  let bestSim = 0;
+  let bestEp = 0;
+  for (let i = 0; i < priorEmbeddings.length; i++) {
+    const prev = priorEmbeddings[i];
+    if (!prev) continue;
+    const sim = cosineEmbeddingSimilarity(vec, prev);
+    if (sim > bestSim) {
+      bestSim = sim;
+      bestEp = i + 1;
     }
   }
-  return best;
+  return { sim: bestSim, ep: bestEp };
 }
 
 /**
@@ -1092,46 +1034,6 @@ function blueprintSettingMatches(openingFingerprint, settingFocus) {
     confidence,
     normalizedSetting: settingTokens.join(" "),
   };
-}
-
-function tagEpisodeEvents(text) {
-  const s = safeStr(text).toLowerCase();
-  if (!s) return [];
-  const tags = new Set();
-  const add = (t) => tags.add(t);
-
-  if (/explosion|explode|blast|detonation|bomb\b/.test(s)) add("explosion");
-  if (/fire\b|flames?|burning/.test(s)) add("fire");
-  if (/elevator|lift shaft|freight elevator/.test(s)) add("elevator_scene");
-  if (/warehouse|abandoned factory|storage unit/.test(s)) add("warehouse_scene");
-  if (/kidnap|abduct|hostage|tied up|gagged/.test(s)) add("kidnapping");
-  if (/car chase|pursuit on the road|screech(es|ed) to a halt/.test(s))
-    add("car_chase");
-  if (/\bmonster\b|creature|shadow beast|werewolf/.test(s)) add("monster_attack");
-  if (/\bkiss(es|ed)?\b|their lips meet|press(es|ed) his lips/.test(s))
-    add("strong_kiss");
-  if (/gunshot|shots? fired|pulls? the trigger/.test(s)) add("gunfight");
-  if (/storm\b|thunder|lightning/.test(s)) add("storm_atmosphere");
-
-  // Opening beat fingerprinting — check first ~600 chars so we tag the OPEN, not mid-episode action.
-  const opening = s.slice(0, 600);
-  if (
-    /\b(dock|beach|water.{0,20}edge|ocean.{0,15}scan|sonar device|notebook.{0,20}ocean|ocean.{0,20}notebook|water.{0,15}scan)\b/.test(opening)
-  ) add("dock_beach_scan_open");
-
-  // Library / archive / research-room opening — the most common fantasy/romance repeat pattern
-  if (
-    /\b(library|archive|royal\s+library|reading\s+room|scriptorium|record\s+room)\b/.test(opening) &&
-    /\b(shelf|shelves|bookshelf|bookshelves|tome|tomes|scroll|scrolls|ancient\s+book|dusty|parchment|spine)\b/.test(opening)
-  ) add("library_research_open");
-
-  // Skeptic dismissal beat — cold lead's lazy "still chasing ghosts" opener
-  if (/still\s+chasing\s+(ghosts?|shadows?|monsters?|those\s+waves|sea\s+monsters?|trouble|fairy\s+tales?|your\s+(monster|creature)|dust|old\s+secrets?|the\s+past)/.test(s)) add("skeptic_dismissal");
-
-  // Creature/threat confirmed as real by direct witness
-  if (/it.s real|that.s real|confirmed.{0,30}(creature|monster|threat)|creature.{0,30}confirmed|everyone.{0,30}(saw|witnessed)|all three.{0,30}(saw|watched|confirmed)/.test(s)) add("threat_confirmed");
-
-  return Array.from(tags);
 }
 
 function formatRecentEventConstraints(recaps, episodeNumber) {
@@ -1373,6 +1275,186 @@ function extractCueBaseNameFromHeaderLine(line) {
   // Drop possessive for base-key matching.
   s = s.replace(/('S|'s)$/i, "").trimEnd();
   return s;
+}
+
+const PLOT_CONTRACT_HEAVY_TAGS = new Set([
+  "dock_beach_scan_open",
+  "skeptic_dismissal",
+  "library_research_open",
+]);
+
+function sortedTagSignature(tags) {
+  if (!Array.isArray(tags) || !tags.length) return "";
+  return [...new Set(tags)].sort().join("|");
+}
+
+function blueprintPlotKeywordProbe(plan) {
+  const mc = safeStr(plan?.main_conflict);
+  const ke = Array.isArray(plan?.key_events)
+    ? plan.key_events.map((x) => safeStr(x)).join(" ")
+    : safeStr(plan?.key_events);
+  const blob = `${mc} ${ke}`.toLowerCase();
+  const words = blob.match(/[a-z]{6,}/g) || [];
+  const stop = new Set([
+    "episode",
+    "because",
+    "however",
+    "another",
+    "something",
+    "nothing",
+    "everything",
+    "someone",
+    "against",
+    "through",
+    "between",
+    "reveals",
+    "discovers",
+    "confronts",
+    "realizes",
+    "finally",
+    "becomes",
+    "decides",
+    "attempts",
+    "promises",
+    "threatens",
+  ]);
+  const seen = new Set();
+  const candidates = [];
+  for (const w of words) {
+    if (seen.has(w)) continue;
+    seen.add(w);
+    if (stop.has(w)) continue;
+    candidates.push(w);
+  }
+  candidates.sort((a, b) => b.length - a.length);
+  return candidates.slice(0, 3);
+}
+
+function blueprintKeywordViolations(episodeText, plan) {
+  const violations = [];
+  if (!plan || typeof plan !== "object") return violations;
+  const top = blueprintPlotKeywordProbe(plan);
+  if (top.length < 2) return violations;
+  const body = safeStr(episodeText).toLowerCase();
+  const missing = top.filter((w) => !body.includes(w));
+  if (missing.length === top.length) {
+    violations.push(
+      `blueprint_keywords_absent: work the plan's vocabulary into the script (e.g. ${top.join(", ")})`
+    );
+  }
+  return violations;
+}
+
+function looksLikeSupportingPlotCueName(base) {
+  const t = safeStr(base);
+  if (t.length < 3 || t.length > 48) return false;
+  if (/^(INT|EXT|ANGLE|ON)\b/i.test(t)) return false;
+  return true;
+}
+
+function supportingCastCueViolations(episodeText, seriesNames, registryPath) {
+  const violations = [];
+  if (!episodeText || !seriesNames || !registryPath) return violations;
+  let registry = null;
+  try {
+    registry = loadCharacterNameRegistry(registryPath);
+  } catch (_) {
+    return violations;
+  }
+  if (!registry?.canonicalByKey) return violations;
+
+  const trioHeaders = new Set(
+    [seriesNames.heroine, seriesNames.coldCeo, seriesNames.warmFriend]
+      .filter(Boolean)
+      .map((n) => normalizeNameKeyLoose(n))
+  );
+
+  const cueLines = extractAllCapsCueLines(episodeText);
+  const seenCue = new Set();
+
+  for (const cueLine of cueLines) {
+    const base = extractCueBaseNameFromHeaderLine(cueLine);
+    if (!looksLikeSupportingPlotCueName(base)) continue;
+    const nk = normalizeNameKeyLoose(base);
+    if (!nk || trioHeaders.has(nk)) continue;
+
+    let bestH = "";
+    let bestSim = 0;
+    for (const entry of Object.values(registry.canonicalByKey)) {
+      const h = entry?.header;
+      if (!h) continue;
+      const sim = nameSimilarity(base, h);
+      if (sim > bestSim) {
+        bestSim = sim;
+        bestH = h;
+      }
+    }
+    if (bestSim < 0.88 || !bestH) continue;
+
+    const partsB = base.trim().split(/\s+/);
+    const partsH = bestH.trim().split(/\s+/);
+    const lastB = partsB.length ? partsB[partsB.length - 1].toUpperCase() : "";
+    const lastH = partsH.length ? partsH[partsH.length - 1].toUpperCase() : "";
+    if (lastB && lastH && lastB !== lastH) continue;
+
+    const normB = normalizeNameKeyLoose(base);
+    const normH = normalizeNameKeyLoose(bestH);
+    if (normB === normH) continue;
+
+    if (!seenCue.has(normB)) {
+      seenCue.add(normB);
+      violations.push(
+        `supporting_cast_cue_drift: cue "${base.trim()}" should match registry name "${bestH.trim()}"`
+      );
+    }
+  }
+  return violations;
+}
+
+function evaluatePlotContractViolations({
+  episodeNumber,
+  episodeText,
+  episodeRecaps,
+  blueprintPlan,
+  seriesNames,
+  registryPath,
+}) {
+  const violations = [];
+  const tags = tagEpisodeEvents(episodeText);
+  const sig = sortedTagSignature(tags);
+
+  if (episodeNumber > 1 && Array.isArray(episodeRecaps)) {
+    const prev = episodeRecaps.find((r) => r.episode === episodeNumber - 1);
+    const prevTags = Array.isArray(prev?.tags) ? prev.tags : [];
+    const prevSig = sortedTagSignature(prevTags);
+    if (sig && prevSig && sig === prevSig) {
+      violations.push(
+        `event_tags_duplicate_previous_episode: ${sig.replace(/\|/g, ", ")}`
+      );
+    }
+
+    const currHeavySet = new Set(tags.filter((t) => PLOT_CONTRACT_HEAVY_TAGS.has(t)));
+    if (currHeavySet.size) {
+      let streak = 0;
+      for (let back = 1; back <= 5; back++) {
+        const r = episodeRecaps.find((x) => x.episode === episodeNumber - back);
+        const prevT = new Set(Array.isArray(r?.tags) ? r.tags : []);
+        const shared = [...currHeavySet].some((t) => prevT.has(t));
+        if (shared) streak++;
+        else break;
+      }
+      if (streak >= 2) {
+        violations.push(
+          `heavy_event_tag_streak: opening/structural beat(s) ${[...currHeavySet].join(", ")} repeat across too many consecutive episodes`
+        );
+      }
+    }
+  }
+
+  violations.push(...blueprintKeywordViolations(episodeText, blueprintPlan));
+  violations.push(...supportingCastCueViolations(episodeText, seriesNames, registryPath));
+
+  return { violations, tags };
 }
 
 function detectMainTrioNameMismatches(episodeText, names) {
@@ -1874,143 +1956,6 @@ function finalizeEpisodeText(text, episodeNumber, names = null) {
     .trim()}\n\nEND EPISODE ${episodeNumber}`;
 }
 
-/** Collapse detection: technical word-vomit vs philosophical / abstract prose (thin-genre failures). */
-const COLLAPSE_TECH_LEXICON =
-  /\b(geology|chemistry|physics|quantum|blockchain|algorithm|nucleosynthesis|pharmacogenomics|ontology|epistemology|topology|astrophysics|biochemistry)\b/i;
-
-const COLLAPSE_ABSTRACT_LEXICON =
-  /\b(forevermore|eternity|destiny|cosmos|existence|metaphysics|consciousness|transcend(?:s|ed|ing)?|infinite|eternal|universal|omnipotent|inevitably|perpetually|ceaselessly|endlessly|boundless|immutable|wholeheartedly|willingly|embraced)\b/i;
-
-function lineHasCollapseLexicon(line) {
-  return COLLAPSE_TECH_LEXICON.test(line) || COLLAPSE_ABSTRACT_LEXICON.test(line);
-}
-
-/**
- * Phase 4a — Lightweight format gate for GENERATOR_MODEL output.
- * Returns true if the text has the minimum structure of a valid vertical drama episode:
- *   - At least one scene heading (INT./EXT.)
- *   - At least two ALL CAPS character cue lines
- *   - At least 25 non-empty lines (very short = truncated or malformed)
- * Failures trigger one corrective reshape pass with FINETUNED_MODEL.
- */
-function passesBasicFormatCheck(text) {
-  if (!text || typeof text !== "string") return false;
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 25) return false;
-  const hasSceneHeading = lines.some((l) => /^(INT|EXT|INT\/EXT|EXT\/INT)[.\s]/i.test(l));
-  if (!hasSceneHeading) return false;
-  const cueCandidates = lines.filter(
-    (l) => /^[A-Z][A-Z0-9 '.\-()]{1,50}$/.test(l) && l.length <= 55 &&
-           !/^(INT|EXT|INT\/EXT|EXT\/INT|EPISODE|END\s+EPISODE|FADE|CUT\s+TO|SMASH\s+TO)/i.test(l)
-  );
-  return cueCandidates.length >= 2;
-}
-
-/**
- * Detects "synonym vomit" / word-list drafts: long runs of punctuation-free
- * single words or huge adjective chains with no normal screenplay structure.
- */
-function looksLikeSynonymVomit(text) {
-  if (!text || typeof text !== "string") return false;
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) return false;
-
-  // 1) Run of punctuation-free single-word lines.
-  let run = 0;
-  let maxRun = 0;
-  for (const line of lines) {
-    const hasPunct = /[.!?;,:]/.test(line);
-    const isSingleWord = /^[A-Za-z][A-Za-z'-]{2,}$/.test(line);
-    if (!hasPunct && isSingleWord) {
-      run += 1;
-      if (run > maxRun) maxRun = run;
-    } else {
-      run = 0;
-    }
-  }
-  if (maxRun >= 5) return true;
-
-  // 2) Extremely long punctuation-free word chains.
-  for (const line of lines) {
-    if (/[.!?;,:]/.test(line)) continue;
-    const words = line.split(/\s+/).filter(Boolean);
-    if (words.length >= 12 && words.every((w) => /^[A-Za-z][A-Za-z'-]{1,}$/.test(w))) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function hasSentenceLevelMerges(text) {
-  if (!text || typeof text !== "string") return false;
-  // Detect collapsed sentence-like tokens, e.g. "Bloodspurtsoutwardashecollaps".
-  const words = text.split(/\s+/).filter(Boolean);
-  return words.some((w) => w.length > 25 && /^[A-Za-z]+$/.test(w));
-}
-
-function hasQualityCollapse(text, names = null) {
-  return (
-    looksLikeSynonymVomit(text) ||
-    looksLikeContextCollapse(text, names) ||
-    hasSentenceLevelMerges(text)
-  );
-}
-
-function buildNameAnchors(names) {
-  const anchors = [];
-  const pushParts = (full) => {
-    const s = safeStr(full).trim();
-    if (!s) return;
-    anchors.push(s);
-    const parts = s.split(/\s+/).filter(Boolean);
-    if (parts[0]) anchors.push(parts[0]);
-    if (parts.length > 1 && parts[parts.length - 1]) anchors.push(parts[parts.length - 1]);
-  };
-  pushParts(names?.heroine);
-  pushParts(names?.coldCeo);
-  pushParts(names?.warmFriend);
-  return Array.from(new Set(anchors.map((x) => x.toLowerCase())));
-}
-
-function looksLikeContextCollapse(text, names) {
-  const raw = safeStr(text);
-  if (!raw) return false;
-  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) return false;
-
-  const nameAnchors = buildNameAnchors(names);
-  let run = 0;
-  let maxRun = 0;
-  for (const line of lines) {
-    const isScene = /^(INT\.|EXT\.|INT\/EXT\.|EXT\/INT\.)/i.test(line);
-    const isCue = /^[A-Z][A-Z0-9 '\-]{1,30}$/.test(line) && !/^(EPISODE|END EPISODE|FADE|CUT)/i.test(line);
-    const hasName = nameAnchors.some((n) => n && new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(line));
-    const words = line.split(/\s+/).filter(Boolean);
-    const longListLike =
-      words.length >= 10 && (line.includes(",") || line.includes(";")) && !/[.!?]$/.test(line);
-    const anchor = isScene || isCue || hasName || words.length <= 5;
-    const lexiconHeavy = lineHasCollapseLexicon(line) && words.length >= 8;
-    if (!anchor && (longListLike || words.length >= 12 || lexiconHeavy)) {
-      run += 1;
-      if (run > maxRun) maxRun = run;
-    } else {
-      run = 0;
-    }
-  }
-  if (maxRun >= 3) return true;
-
-  // Secondary guard: one giant abstract run line.
-  return lines.some((line) => {
-    const words = line.split(/\s+/).filter(Boolean);
-    return (
-      (words.length >= 28 || (lineHasCollapseLexicon(line) && words.length >= 12)) &&
-      !/^(INT\.|EXT\.)/i.test(line) &&
-      !/[.!?]/.test(line)
-    );
-  });
-}
-
 function splitScenesForAnchorValidation(text) {
   const lines = safeStr(text).split(/\r?\n/);
   const scenes = [];
@@ -2150,179 +2095,6 @@ Output:
 - Preserve mandatory screenplay line breaks: scene headings and character cues on their own lines; never concatenate a character name with dialogue or parentheticals on one line.
 - Do NOT add commentary or explanation—only the edited script.`;
 
-/**
- * Post-generation duplicate detector.
- * Scans every episode pair (not just adjacent) for structural and textual similarity.
- * Returns an array of flagged pairs sorted by severity — highest score first.
- *
- * Two independent signals per pair:
- *   structural  — scoreOpeningSimilarity() on stored opening fingerprints
- *   text        — repetitionScore() on full episode body
- *
- * Thresholds:
- *   structural >= 0.7  →  same location + same action (clear structural duplicate)
- *   text       >= 0.35 →  35%+ sentence overlap (same-scene rewrite)
- *   Either threshold alone is sufficient to flag the pair.
- */
-function detectDuplicateEpisodes(scripts, recaps) {
-  const flags = [];
-  const n = scripts.length;
-  if (n < 2) return flags;
-
-  // Build a quick lookup: episode number → recap (for fingerprints)
-  const recapByEp = new Map();
-  for (const r of (recaps || [])) {
-    if (typeof r.episode === "number") recapByEp.set(r.episode, r);
-  }
-
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      const epA = i + 1;
-      const epB = j + 1;
-
-      // Structural signal
-      const recA = recapByEp.get(epA);
-      const recB = recapByEp.get(epB);
-      const structuralScore =
-        recA?.openingFingerprint && recB?.openingFingerprint
-          ? scoreOpeningSimilarity(recA.openingFingerprint, recB.openingFingerprint)
-          : 0;
-
-      // Text signal (sentence overlap across full bodies)
-      const textScore = repetitionScore(scripts[i], scripts[j]);
-
-      const STRUCTURAL_FLAG = 0.7;
-      const TEXT_FLAG = 0.35;
-
-      if (structuralScore >= STRUCTURAL_FLAG || textScore >= TEXT_FLAG) {
-        const reasons = [];
-        if (structuralScore >= STRUCTURAL_FLAG) {
-          const fpA = recA?.openingFingerprint;
-          const fpB = recB?.openingFingerprint;
-          reasons.push(
-            `structural match: ${fpA?.location || "?"} | ${fpA?.action || "?"} → ` +
-            `${fpB?.location || "?"} | ${fpB?.action || "?"} (score ${structuralScore.toFixed(2)})`
-          );
-        }
-        if (textScore >= TEXT_FLAG) {
-          reasons.push(`text overlap ${(textScore * 100).toFixed(0)}% sentence match`);
-        }
-
-        flags.push({
-          ep_a: epA,
-          ep_b: epB,
-          structural_score: Math.round(structuralScore * 100) / 100,
-          text_score: Math.round(textScore * 100) / 100,
-          severity: structuralScore >= STRUCTURAL_FLAG && textScore >= TEXT_FLAG
-            ? "high"
-            : structuralScore >= 0.8 || textScore >= 0.5
-            ? "medium"
-            : "low",
-          reasons,
-        });
-      }
-    }
-  }
-
-  // Sort: high severity first, then by combined score descending
-  flags.sort((a, b) => {
-    const sevOrder = { high: 0, medium: 1, low: 2 };
-    if (sevOrder[a.severity] !== sevOrder[b.severity])
-      return sevOrder[a.severity] - sevOrder[b.severity];
-    return (b.structural_score + b.text_score) - (a.structural_score + a.text_score);
-  });
-
-  return flags;
-}
-
-// Simple repetition score between two episode scripts.
-// Splits into sentences, normalises, and computes overlap ratio.
-function repetitionScore(currentText, previousText) {
-  if (!currentText || !previousText) return 0;
-  const splitSentences = (txt) =>
-    txt
-      .split(/[\.\?!\n]+/g)
-      .map((s) => s.trim().toLowerCase())
-      .filter((s) => s.length > 20);
-
-  const curSentences = splitSentences(currentText);
-  const prevSentences = splitSentences(previousText);
-  if (!curSentences.length || !prevSentences.length) return 0;
-
-  const prevSet = new Set(prevSentences);
-  let overlap = 0;
-  for (const s of curSentences) {
-    if (prevSet.has(s)) overlap += 1;
-  }
-  return overlap / curSentences.length;
-}
-
-/**
- * Find verbatim repeated phrases (8+ words) from currentText that appear in any of the priorTexts.
- * Returns an array of unique matched phrase strings (up to 5 examples).
- * This catches micro-level verbatim loops that dilute below the sentence-level repetitionScore threshold.
- */
-function findVerbatimPhrases(currentText, priorTexts, minWords = 8) {
-  if (!currentText || !priorTexts || priorTexts.length === 0) return [];
-  const normalize = (t) =>
-    safeStr(t)
-      .toLowerCase()
-      .replace(/[^a-z0-9\s']/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-  const words = normalize(currentText).split(" ").filter(Boolean);
-  if (words.length < minWords) return [];
-
-  // Build a set of all normalized prior text content for fast lookup
-  const priorNormalized = priorTexts.map((t) => normalize(safeStr(t)));
-
-  const matched = [];
-  const seen = new Set();
-
-  for (let i = 0; i <= words.length - minWords; i++) {
-    const phrase = words.slice(i, i + minWords).join(" ");
-    if (seen.has(phrase)) continue;
-    if (priorNormalized.some((prior) => prior.includes(phrase))) {
-      seen.add(phrase);
-      // Recover original-case version for the retry prompt
-      const idx = normalize(currentText).indexOf(phrase);
-      const original = idx >= 0 ? currentText.slice(idx, idx + phrase.length + 20).split(/\n/)[0].trim() : phrase;
-      matched.push(original.slice(0, 120));
-      if (matched.length >= 5) break;
-    }
-  }
-  return matched;
-}
-
-/**
- * Long verbatim overlap between the end of the previous episode and this draft
- * (models often re-paste the same POV / reaction block after a cliffhanger).
- */
-function maxTailBlockOverlap(prevText, curText) {
-  if (!prevText || !curText) return 0;
-  const norm = (t) =>
-    t
-      .replace(/\r\n/g, "\n")
-      .replace(/[\u00A0\u2000-\u200B\uFEFF]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-  const p = norm(prevText);
-  const c = norm(curText);
-  if (p.length < 120 || c.length < 80) return 0;
-  const tail = p.slice(-2400);
-  let best = 0;
-  const minLen = 95;
-  const maxLen = Math.min(720, tail.length);
-  for (let len = maxLen; len >= minLen; len -= 30) {
-    for (let start = Math.max(0, tail.length - 1100); start <= tail.length - len; start += 40) {
-      const block = tail.slice(start, start + len);
-      if (block.length < minLen) continue;
-      if (c.includes(block)) best = Math.max(best, block.length);
-    }
-  }
-  return best;
-}
-
 function parseBlocksFromContent(content) {
   const raw = (content || "").trim();
   const jsonMatch = raw.match(/\s*(\[[\s\S]*\])\s*$/);
@@ -2453,7 +2225,8 @@ SCREENPLAY LINE BREAKS (mandatory — parsers and PDF layout depend on this):
 - Transitions (FADE OUT., CUT TO:, etc.) go on their own line with a blank line before and after when they separate major beats.
 
 STRUCTURE (critical — avoids broken exports):
-- Do NOT output lines like "EPISODE 7" or "END OF EPISODE". The pipeline already knows the episode index and adds headings when saving. Start with your cold open or the first INT./EXT. scene heading.
+- Do NOT output lines like "EPISODE 7" or "END OF EPISODE". The pipeline already knows the episode index and adds canonical "EPISODE n" / "END EPISODE n" wrappers when saving. Start with your cold open or the first INT./EXT. scene heading.
+- Format-rescue, finetuned retries, and generator fallbacks MUST follow this same rule — never add synthetic boundary lines to "fix" format; correct scene headings and cues only.
 - Write exactly ONE episode per response: never stack multiple "EPISODE N" sections or sneak in the next episode’s beats after an "END OF EPISODE" marker.
 
 Output only script text for that episode. Do NOT output JSON, arrays, or any extra commentary.`;
@@ -3487,15 +3260,13 @@ app.post("/generate/background", requireAuth, async (req, res) => {
   }
   const body = req.body || {};
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
-  const logline = safeStr(body.logline).slice(0, 1500);
-  const wordCount = logline ? logline.trim().split(/\s+/).filter(Boolean).length : 0;
-  const minWords = 25;
-  if (!logline || wordCount < minWords) {
-    return res.status(400).json({
-      error: `Summary must be at least ${minWords} words (currently ${wordCount}).`,
+  const genre = String(body.genre || "Romance").trim() || "Romance";
+  const logline = pickRandomPresetSummary(genre);
+  if (!logline) {
+    return res.status(500).json({
+      error: "No preset summary available for this genre.",
     });
   }
-  const genre = String(body.genre || "Romance").trim() || "Romance";
   const title = safeStr(body.title).slice(0, 300) || "Generated Script";
   let row;
   try {
@@ -3513,11 +3284,17 @@ app.post("/generate/background", requireAuth, async (req, res) => {
         "Could not save script draft. Ensure DATABASE_URL is set and Postgres is reachable.",
     });
   }
-  res.status(202).json({ ok: true, scriptId: row.id, status: "generating" });
+  res.status(202).json({
+    ok: true,
+    scriptId: row.id,
+    status: "generating",
+    summary: logline,
+  });
   const persist = { scriptId: row.id, userId };
   const noop = createNoOpStreamResponse();
+  const bodyWithPreset = { ...body, logline, __serverPresetLogline: logline };
   setImmediate(() => {
-    runSeasonGeneration(body, noop, persist).catch(async (err) => {
+    runSeasonGeneration(bodyWithPreset, noop, persist).catch(async (err) => {
       console.error("Background runSeasonGeneration:", err);
       try {
         await markScriptFailed(persist.scriptId, persist.userId, String(err?.message || err));
@@ -3559,8 +3336,13 @@ app.get("/scripts/:id", requireAuth, async (req, res) => {
 
 async function runSeasonGeneration(body, res, persist) {
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
-  let logline = safeStr(body.logline).slice(0, 1500);
   const genre = String(body.genre || "Romance").trim() || "Romance";
+  const presetLocked =
+    persist?.scriptId && persist?.userId
+      ? safeStr(body.__serverPresetLogline).slice(0, 1500)
+      : "";
+  let logline = presetLocked || pickRandomPresetSummary(genre);
+  logline = safeStr(logline).slice(0, 1500);
   const seriesNames = getSeriesNames(genre);
   const generationLangTag = String(body.language || "EN").toUpperCase();
   const shouldRunNameValidation = generationLangTag !== "ZH";
@@ -3574,7 +3356,7 @@ async function runSeasonGeneration(body, res, persist) {
       if (typeof res.status === "function") res.status(400);
       sendStreamLine(res, {
         type: "error",
-        message: `Summary must be at least ${minWords} words (currently ${wordCount}).`,
+        message: `Preset summary unavailable or too short for ${genre}.`,
       });
       sendStreamLine(res, { type: "done" });
       if (persist?.scriptId && persist?.userId) {
@@ -3582,7 +3364,7 @@ async function runSeasonGeneration(body, res, persist) {
           await markScriptFailed(
             persist.scriptId,
             persist.userId,
-            `Summary must be at least ${minWords} words`
+            "Preset summary unavailable or too short"
           );
         } catch (_) {}
       }
@@ -3606,6 +3388,8 @@ async function runSeasonGeneration(body, res, persist) {
         sendStreamLine(res, { type: "logline_normalized", ok: false });
       }
     }
+
+    sendStreamLine(res, { type: "preset_summary", summary: logline });
 
     let blueprint = null;
     let episodeSummaries = null;
@@ -3682,6 +3466,8 @@ async function runSeasonGeneration(body, res, persist) {
     const generatorSystemPrompt = buildGeneratorSystemPrompt({ vdramaStyleGuide, genreStyleNotes });
 
     const episodeScriptsMemo = [];
+    /** @type {(number[]|null)[]} Parallel to episodeScriptsMemo when embedding gate is on. */
+    const episodeEmbeddingMemo = [];
     const episodeStateMemo = [];
     const narrativeResetMemo = new Map();
     let courseCorrectionBrief = "";
@@ -3767,6 +3553,8 @@ async function runSeasonGeneration(body, res, persist) {
           approx_tokens: estimatePromptTokens(userContent),
           trim_context: ENABLE_TRIMMED_CONTEXT,
           mode: ENABLE_TWO_PASS_EPISODE ? "two_pass" : "single_pass",
+          primary_episode_temperature: PRIMARY_EPISODE_TEMPERATURE,
+          primary_episode_max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
         });
 
         let rawContent = "";
@@ -3809,8 +3597,8 @@ async function runSeasonGeneration(body, res, persist) {
               { role: "system", content: generatorSystemPrompt },
               { role: "user", content: userContent },
             ],
-            max_tokens: 2048,
-            temperature: 0.85,
+            max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
+            temperature: PRIMARY_EPISODE_TEMPERATURE,
             frequency_penalty: 1.0,
             presence_penalty: 0.6,
           });
@@ -3826,8 +3614,8 @@ async function runSeasonGeneration(body, res, persist) {
               `The following draft for Episode ${ep} is missing required vertical drama screenplay format ` +
               `(scene headings, ALL CAPS character cues, or is too short). ` +
               `Rewrite it in correct vertical drama format — preserve all story content and dialogue, ` +
-              `but fix structure: INT./EXT. scene headings, ALL CAPS character cue lines, ` +
-              `short action lines, EPISODE ${ep} header, END EPISODE ${ep} footer.\n\n` +
+              `but fix structure: INT./EXT. scene headings, ALL CAPS character cue lines, short action lines. ` +
+              `Do NOT add "EPISODE ${ep}" or "END EPISODE ${ep}" (or END OF EPISODE) — the pipeline injects those; start with cold open or first scene heading.\n\n` +
               `DRAFT TO FIX:\n\n${rawContent}`;
             const reshapeResp = await openai.chat.completions.create({
               model: FINETUNED_MODEL,
@@ -3860,59 +3648,99 @@ async function runSeasonGeneration(body, res, persist) {
 
         episodeText = finalizeEpisodeText(episodeText, ep, seriesNames);
 
-        // Repetition gate — fires immediately after generation before downstream gates
-        // bake repeated content in. Checks both sentence-level score AND verbatim phrases.
+        // Repetition gate — verified bounded regen (re-check after each attempt).
         if (ep > 1 && episodeScriptsMemo.length > 0) {
           const recentScripts = episodeScriptsMemo.slice(-5);
-          let maxScore = 0;
-          let maxBlockDup = 0;
-          for (const prev of recentScripts) {
-            const s = repetitionScore(episodeText, prev);
-            const b = maxTailBlockOverlap(prev, episodeText);
-            if (s > maxScore) maxScore = s;
-            if (b > maxBlockDup) maxBlockDup = b;
-          }
-          const verbatimMatches = findVerbatimPhrases(episodeText, recentScripts);
-          const REPETITION_THRESHOLD = 0.35;
-          const BLOCK_OVERLAP_MIN = 105;
-          const needsRetry = maxScore > REPETITION_THRESHOLD || maxBlockDup >= BLOCK_OVERLAP_MIN || verbatimMatches.length > 0;
-          if (needsRetry) {
-            const reason = verbatimMatches.length > 0
-              ? `verbatim phrases detected`
-              : `score ${maxScore.toFixed(2)} / block ${maxBlockDup}`;
-            console.warn(`Episode ${ep} repetition (${reason}) — regenerating.`);
-            let retryHint = "\n\nREWRITE REQUIREMENT: This draft repeated content from a prior episode. ";
-            if (verbatimMatches.length > 0) {
-              retryHint +=
-                "The following exact phrases from prior episodes must NOT appear in your output — rewrite every scene that contains them with entirely new dialogue, action, and beats:\n" +
-                verbatimMatches.map((p, i) => `  ${i + 1}. "${p}"`).join("\n") +
-                "\n";
-            }
-            retryHint += "Continue the timeline forward with new dialogue and action only. New scene energy, new information, new consequences.";
-            const retryContent = userContent + retryHint;
-            const retry = await openai.chat.completions.create({
-              model: FINETUNED_MODEL,
-              messages: [
-                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
-                { role: "user", content: retryContent },
-              ],
-              max_tokens: 2048,
-              temperature: 1.0,
-              frequency_penalty: 1.0,
-              presence_penalty: 0.6,
+          let repMetrics = measureRepetitionAgainstRecent(episodeText, recentScripts);
+          if (repMetrics.needsRetry) {
+            const reason0 =
+              repMetrics.verbatimMatches.length > 0
+                ? "verbatim phrases detected"
+                : `score ${repMetrics.maxScore.toFixed(2)} / block ${repMetrics.maxBlockDup}`;
+            console.warn(`Episode ${ep} repetition (${reason0}) — regenerating (up to ${MAX_REPETITION_REGEN_ATTEMPTS} attempts).`);
+            sendStreamLine(res, {
+              type: "repetition_gate",
+              episode: ep,
+              phase: "initial",
+              max_score: repMetrics.maxScore,
+              block_dup: repMetrics.maxBlockDup,
+              verbatim_count: repMetrics.verbatimMatches.length,
             });
-            const retryRaw = retry.choices?.[0]?.message?.content;
-            if (typeof retryRaw === "string" && retryRaw.trim()) {
-              episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
-              if (shouldRunNameValidation) {
-                try {
-                  const mismatches = detectMainTrioNameMismatches(episodeText, seriesNames);
-                  if (mismatches.length > 0) episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
-                } catch (nvErr) {
-                  console.warn(`Name validation failed on repetition retry (ep ${ep}):`, nvErr?.message || nvErr);
-                }
+            for (let attempt = 1; attempt <= MAX_REPETITION_REGEN_ATTEMPTS && repMetrics.needsRetry; attempt++) {
+              const vm = repMetrics.verbatimMatches;
+              let retryHint = "\n\nREWRITE REQUIREMENT: This draft repeated content from a prior episode. ";
+              if (attempt > 1) {
+                retryHint += `(Attempt ${attempt}/${MAX_REPETITION_REGEN_ATTEMPTS}) The last rewrite STILL matched repetition checks — change scenes and lines more aggressively.\n`;
               }
-              episodeText = normalizeEpisodeCharacterNames(episodeText, CHARACTER_NAME_REGISTRY_PATH);
+              if (vm.length > 0) {
+                retryHint +=
+                  "The following exact phrases from prior episodes must NOT appear in your output — rewrite every scene that contains them with entirely new dialogue, action, and beats:\n" +
+                  vm.map((p, i) => `  ${i + 1}. "${p}"`).join("\n") +
+                  "\n";
+              }
+              retryHint +=
+                "Continue the timeline forward with new dialogue and action only. New scene energy, new information, new consequences.";
+              const retryContent = userContent + retryHint;
+              const temp = Math.max(0.35, 1.0 - (attempt - 1) * 0.28);
+              try {
+                const retry = await openai.chat.completions.create({
+                  model: FINETUNED_MODEL,
+                  messages: [
+                    { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                    { role: "user", content: retryContent },
+                  ],
+                  max_tokens: 2048,
+                  temperature: temp,
+                  frequency_penalty: 1.0,
+                  presence_penalty: 0.6,
+                });
+                const retryRaw = retry.choices?.[0]?.message?.content;
+                if (typeof retryRaw === "string" && retryRaw.trim()) {
+                  episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
+                  if (shouldRunNameValidation) {
+                    try {
+                      const mismatches = detectMainTrioNameMismatches(episodeText, seriesNames);
+                      if (mismatches.length > 0) {
+                        episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
+                      }
+                    } catch (nvErr) {
+                      console.warn(
+                        `Name validation failed on repetition retry (ep ${ep}):`,
+                        nvErr?.message || nvErr
+                      );
+                    }
+                  }
+                  episodeText = normalizeEpisodeCharacterNames(
+                    episodeText,
+                    CHARACTER_NAME_REGISTRY_PATH
+                  );
+                  repMetrics = measureRepetitionAgainstRecent(episodeText, recentScripts);
+                  sendStreamLine(res, {
+                    type: "repetition_gate",
+                    episode: ep,
+                    attempt,
+                    temperature: temp,
+                    still_repeats: repMetrics.needsRetry,
+                    max_score: repMetrics.maxScore,
+                    block_dup: repMetrics.maxBlockDup,
+                    verbatim_count: repMetrics.verbatimMatches.length,
+                  });
+                }
+              } catch (repErr) {
+                console.warn(`Episode ${ep} repetition regen attempt ${attempt} failed:`, repErr?.message || repErr);
+                break;
+              }
+            }
+            if (repMetrics.needsRetry) {
+              console.warn(
+                `Episode ${ep}: repetition still flagged after ${MAX_REPETITION_REGEN_ATTEMPTS} attempt(s) — keeping last draft.`
+              );
+              sendStreamLine(res, {
+                type: "repetition_gate",
+                episode: ep,
+                phase: "exhausted",
+                still_repeats: true,
+              });
             }
           }
         }
@@ -3958,47 +3786,160 @@ async function runSeasonGeneration(body, res, persist) {
           });
         }
 
-        // Hard validation: enforce zero merged-words for credibility.
-        // Retry once if any merged-word patterns remain after post-processing.
-        if (hasMergedWordIssues(episodeText) || hasSentenceLevelMerges(episodeText)) {
-          try {
+        // Hard validation: merged words — bounded regen with verification after each attempt.
+        try {
+          for (let attempt = 1; attempt <= MAX_MERGED_WORD_REGEN_ATTEMPTS; attempt++) {
+            const stillMerged =
+              hasMergedWordIssues(episodeText) || hasSentenceLevelMerges(episodeText);
+            if (!stillMerged) break;
             const spacingRetryContent =
               userContent +
+              (attempt > 1
+                ? `\n\n(Attempt ${attempt}/${MAX_MERGED_WORD_REGEN_ATTEMPTS}) The previous reply still contained merged/glued words.\n`
+                : "") +
               "\n\nCRITICAL FORMAT VALIDATION (do not fail this):\n" +
               "- The output MUST contain NO merged/glued words.\n" +
               "- Every English word must be separated by exactly ONE space.\n" +
               "- Do NOT remove spaces after punctuation (e.g. \".Next\" is invalid; must be \". Next\").\n" +
               "- Do NOT glue a character cue to dialogue (e.g. \"LUCAS(speaking)\" or \"LUCASHello\" is invalid).\n" +
               "- Before returning, scan the output for any pattern where a word is immediately followed by another word with no space.\n";
+            const temp = Math.max(0.12, 0.32 - (attempt - 1) * 0.08);
+            const model = attempt >= MAX_MERGED_WORD_REGEN_ATTEMPTS ? GENERATOR_MODEL : FINETUNED_MODEL;
+            const sys =
+              attempt >= MAX_MERGED_WORD_REGEN_ATTEMPTS
+                ? generatorSystemPrompt
+                : EPISODE_TEXT_SYSTEM_PROMPT;
             const retry = await openai.chat.completions.create({
-              model: FINETUNED_MODEL,
+              model,
               messages: [
-                { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                { role: "system", content: sys },
                 { role: "user", content: spacingRetryContent },
               ],
               max_tokens: 2048,
-              temperature: 0.3,
+              temperature: temp,
               frequency_penalty: 1.0,
               presence_penalty: 0.4,
             });
             const retryRaw = retry.choices?.[0]?.message?.content;
-            if (typeof retryRaw === "string" && retryRaw.trim()) {
+            if (typeof retryRaw !== "string" || !retryRaw.trim()) break;
+            episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
+            if (shouldRunNameValidation) {
+              try {
+                const mismatches = detectMainTrioNameMismatches(episodeText, seriesNames);
+                if (mismatches.length > 0) {
+                  episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
+                  const report = await validateMainTrioNameConsistencyWithLLM({
+                    episodeText,
+                    names: seriesNames,
+                    episodeNumber: ep,
+                  });
+                  if (report && report.ok === false) {
+                    console.warn(
+                      `Name consistency mismatches (episode ${ep}):`,
+                      report.mismatches || mismatches
+                    );
+                  }
+                }
+              } catch (nvErr) {
+                console.warn(`Name validation failed (episode ${ep}):`, nvErr?.message || nvErr);
+              }
+            }
+            episodeText = normalizeEpisodeCharacterNames(
+              episodeText,
+              CHARACTER_NAME_REGISTRY_PATH
+            );
+            const spanRepair = targetedRepairEpisodeText(episodeText, seriesNames);
+            episodeText = spanRepair.text;
+            const mergedAfter =
+              hasMergedWordIssues(episodeText) || hasSentenceLevelMerges(episodeText);
+            sendStreamLine(res, {
+              type: "merged_word_retry",
+              episode: ep,
+              attempt,
+              model,
+              temperature: temp,
+              still_merged: mergedAfter,
+              span_repairs_applied: spanRepair.spanRepairsApplied,
+              remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
+            });
+          }
+          if (hasMergedWordIssues(episodeText) || hasSentenceLevelMerges(episodeText)) {
+            console.warn(
+              `Episode ${ep}: merged-word issues remain after ${MAX_MERGED_WORD_REGEN_ATTEMPTS} attempt(s).`
+            );
+            sendStreamLine(res, {
+              type: "merged_word_retry",
+              episode: ep,
+              phase: "exhausted",
+              still_merged: true,
+            });
+          }
+        } catch (sErr) {
+          console.error(`Merged-word spacing retry failed for episode ${ep}:`, sErr);
+        }
+
+        if (ENABLE_PLOT_CONTRACT_GATE) {
+          try {
+            const epPlan =
+              blueprint && Array.isArray(blueprint.episodes)
+                ? blueprint.episodes.find((e) => e && e.episode === ep) ||
+                  blueprint.episodes[ep - 1] ||
+                  null
+                : null;
+            let plotCheck = evaluatePlotContractViolations({
+              episodeNumber: ep,
+              episodeText,
+              episodeRecaps,
+              blueprintPlan: epPlan,
+              seriesNames,
+              registryPath: CHARACTER_NAME_REGISTRY_PATH,
+            });
+            for (
+              let pAttempt = 1;
+              pAttempt <= MAX_PLOT_CONTRACT_REGEN_ATTEMPTS && plotCheck.violations.length;
+              pAttempt++
+            ) {
+              sendStreamLine(res, {
+                type: "plot_contract",
+                episode: ep,
+                attempt: pAttempt,
+                violations: plotCheck.violations,
+              });
+              const hint =
+                "\n\nPLOT CONTRACT — machine checks failed; rewrite so ALL items below are satisfied:\n" +
+                plotCheck.violations.map((v, i) => `${i + 1}. ${v}`).join("\n") +
+                "\n\nKeep the same story intent, cast, and blueprint; only fix what the checklist flags.";
+              const temp = Math.max(0.15, 0.35 - (pAttempt - 1) * 0.08);
+              const model =
+                pAttempt >= MAX_PLOT_CONTRACT_REGEN_ATTEMPTS ? GENERATOR_MODEL : FINETUNED_MODEL;
+              const sys =
+                pAttempt >= MAX_PLOT_CONTRACT_REGEN_ATTEMPTS
+                  ? generatorSystemPrompt
+                  : EPISODE_TEXT_SYSTEM_PROMPT;
+              const retry = await openai.chat.completions.create({
+                model,
+                messages: [
+                  { role: "system", content: sys },
+                  { role: "user", content: userContent + hint },
+                ],
+                max_tokens: 2048,
+                temperature: temp,
+                frequency_penalty: 1.0,
+                presence_penalty: 0.4,
+              });
+              const retryRaw = retry.choices?.[0]?.message?.content;
+              if (typeof retryRaw !== "string" || !retryRaw.trim()) break;
               episodeText = finalizeEpisodeText(retryRaw.trim(), ep, seriesNames);
               if (shouldRunNameValidation) {
                 try {
-                  const mismatches = detectMainTrioNameMismatches(
-                    episodeText,
-                    seriesNames
-                  );
+                  const mismatches = detectMainTrioNameMismatches(episodeText, seriesNames);
                   if (mismatches.length > 0) {
                     episodeText = applyMainTrioNameCorrections(episodeText, mismatches);
-                    const report = await validateMainTrioNameConsistencyWithLLM(
-                      {
-                        episodeText,
-                        names: seriesNames,
-                        episodeNumber: ep,
-                      }
-                    );
+                    const report = await validateMainTrioNameConsistencyWithLLM({
+                      episodeText,
+                      names: seriesNames,
+                      episodeNumber: ep,
+                    });
                     if (report && report.ok === false) {
                       console.warn(
                         `Name consistency mismatches (episode ${ep}):`,
@@ -4007,30 +3948,46 @@ async function runSeasonGeneration(body, res, persist) {
                     }
                   }
                 } catch (nvErr) {
-                  console.warn(
-                    `Name validation failed (episode ${ep}):`,
-                    nvErr?.message || nvErr
-                  );
+                  console.warn(`Name validation failed (episode ${ep}):`, nvErr?.message || nvErr);
                 }
               }
               episodeText = normalizeEpisodeCharacterNames(
                 episodeText,
                 CHARACTER_NAME_REGISTRY_PATH
               );
-              {
-                const spanRepair = targetedRepairEpisodeText(episodeText, seriesNames);
-                episodeText = spanRepair.text;
-                sendStreamLine(res, {
-                  type: "span_repair",
-                  episode: ep,
-                  span_repairs_applied: spanRepair.spanRepairsApplied,
-                  repair_types: spanRepair.repairTypes,
-                  remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
-                });
-              }
+              const spanRepairPc = targetedRepairEpisodeText(episodeText, seriesNames);
+              episodeText = spanRepairPc.text;
+              sendStreamLine(res, {
+                type: "span_repair",
+                episode: ep,
+                phase: "plot_contract",
+                span_repairs_applied: spanRepairPc.spanRepairsApplied,
+                repair_types: spanRepairPc.repairTypes,
+                remaining_merge_count: auditMergedWords(episodeText).totals.mergedTotal,
+              });
+              plotCheck = evaluatePlotContractViolations({
+                episodeNumber: ep,
+                episodeText,
+                episodeRecaps,
+                blueprintPlan: epPlan,
+                seriesNames,
+                registryPath: CHARACTER_NAME_REGISTRY_PATH,
+              });
             }
-          } catch (sErr) {
-            console.error(`Merged-word spacing retry failed for episode ${ep}:`, sErr);
+            if (plotCheck.violations.length) {
+              console.warn(
+                `Episode ${ep}: plot contract still violated after ${MAX_PLOT_CONTRACT_REGEN_ATTEMPTS} attempt(s):`,
+                plotCheck.violations
+              );
+              sendStreamLine(res, {
+                type: "plot_contract",
+                episode: ep,
+                phase: "exhausted",
+                violations: plotCheck.violations,
+              });
+            }
+          } catch (plotErr) {
+            console.error(`Plot contract gate failed (episode ${ep}):`, plotErr);
           }
         }
 
@@ -4199,61 +4156,98 @@ async function runSeasonGeneration(body, res, persist) {
         if (ep > 1 && episodeRecaps.length > 0) {
           const newFp = extractOpeningFingerprint(episodeText);
           const bestMatch = findMostSimilarPriorOpening(newFp, episodeRecaps);
-          const STRUCTURAL_THRESHOLD = 0.5; // location match alone hits 0.5; location+action hits 0.8
-          if (bestMatch && bestMatch.score >= STRUCTURAL_THRESHOLD) {
+          if (bestMatch && bestMatch.score >= STRUCTURAL_OPENING_GATE_THRESHOLD) {
             const matchedFp = bestMatch.fingerprint;
+            const textBeforeStructuralGate = episodeText;
             console.warn(
               `Episode ${ep} opening structurally too close to ep ${bestMatch.episode} ` +
-              `(score ${bestMatch.score.toFixed(2)}): ${newFp.location} | ${newFp.action} | ${newFp.dialogue_type} — regenerating.`
+              `(score ${bestMatch.score.toFixed(2)} ≥ ${STRUCTURAL_OPENING_GATE_THRESHOLD}): ` +
+              `${newFp.location} | ${newFp.action} | ${newFp.dialogue_type} — regenerating.`
             );
-            const structuralRetryContent =
-              userContent +
-              `\n\nREWRITE REQUIRED — OPENING STRUCTURE REJECTED:\n` +
-              `This draft opened in "${newFp.location}" with a "${newFp.action}" beat, ` +
-              `which is structurally identical to episode ${bestMatch.episode} ` +
-              `("${matchedFp.location}" | "${matchedFp.action}" | "${matchedFp.dialogue_type}").\n` +
-              `You MUST rewrite the opening with:\n` +
-              `  1. A DIFFERENT location — not "${newFp.location}" or any location already listed in the EPISODE OPENING HISTORY above.\n` +
-              `  2. A DIFFERENT first action — not "${newFp.action}".\n` +
-              `  3. Continue the story's plot and stakes; do not reset to an earlier scene.\n` +
-              `The rest of the episode's story beats may remain the same — only the opening scene must change.`;
+            const buildStructuralRetryUser = (fp, attemptNum) => {
+              let body =
+                userContent +
+                `\n\nREWRITE REQUIRED — OPENING STRUCTURE REJECTED:\n` +
+                `This draft opened in "${fp.location}" with a "${fp.action}" beat, ` +
+                `which is structurally too close to episode ${bestMatch.episode} ` +
+                `("${matchedFp.location}" | "${matchedFp.action}" | "${matchedFp.dialogue_type}").\n` +
+                `You MUST rewrite the opening with:\n` +
+                `  1. A DIFFERENT location — not "${fp.location}" or any location already listed in the EPISODE OPENING HISTORY above.\n` +
+                `  2. A DIFFERENT first action — not "${fp.action}".\n` +
+                `  3. Continue the story's plot and stakes; do not reset to an earlier scene.\n` +
+                `The rest of the episode's story beats may remain the same — only the opening scene must change.`;
+              if (attemptNum === 2) {
+                body +=
+                  `\n\nSECOND ATTEMPT (required): The first rewrite still matched prior-episode opening structure ` +
+                  `(threshold ${STRUCTURAL_OPENING_GATE_THRESHOLD}). ` +
+                  `Pick a radically different first scene heading and first on-screen beat — not "${fp.location}" / "${fp.action}".`;
+              }
+              return body;
+            };
+
+            let structuralAccepted = false;
+            let lastFailedFp = newFp;
             try {
-              const structuralRetry = await openai.chat.completions.create({
-                model: FINETUNED_MODEL,
-                messages: [
-                  { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
-                  { role: "user", content: structuralRetryContent },
-                ],
-                max_tokens: 2048,
-                temperature: 0.6,
-                frequency_penalty: 1.0,
-                presence_penalty: 0.7,
-              });
-              const structuralRetryRaw = structuralRetry.choices?.[0]?.message?.content;
-              if (typeof structuralRetryRaw === "string" && structuralRetryRaw.trim()) {
+              for (let attempt = 1; attempt <= 2 && !structuralAccepted; attempt++) {
+                const structuralRetry = await openai.chat.completions.create({
+                  model: attempt === 1 ? FINETUNED_MODEL : GENERATOR_MODEL,
+                  messages: [
+                    {
+                      role: "system",
+                      content:
+                        attempt === 1 ? EPISODE_TEXT_SYSTEM_PROMPT : generatorSystemPrompt,
+                    },
+                    { role: "user", content: buildStructuralRetryUser(lastFailedFp, attempt) },
+                  ],
+                  max_tokens: 2048,
+                  temperature: attempt === 1 ? 0.55 : 0.35,
+                  frequency_penalty: 1.0,
+                  presence_penalty: attempt === 1 ? 0.7 : 0.65,
+                });
+                const structuralRetryRaw = structuralRetry.choices?.[0]?.message?.content;
+                if (typeof structuralRetryRaw !== "string" || !structuralRetryRaw.trim()) continue;
                 const retried = finalizeEpisodeText(structuralRetryRaw.trim(), ep, seriesNames);
-                // Only accept the retry if it actually changed the opening structure
                 const retriedFp = extractOpeningFingerprint(retried);
                 const retriedMatch = findMostSimilarPriorOpening(retriedFp, episodeRecaps);
-                if (!retriedMatch || retriedMatch.score < STRUCTURAL_THRESHOLD) {
+                if (!retriedMatch || retriedMatch.score < STRUCTURAL_OPENING_GATE_THRESHOLD) {
                   episodeText = retried;
+                  structuralAccepted = true;
                   sendStreamLine(res, {
                     type: "structural_retry",
                     episode: ep,
+                    attempt,
                     reason: `opening too similar to ep ${bestMatch.episode}`,
                     old_location: newFp.location,
                     new_location: retriedFp.location,
                     score_before: bestMatch.score,
+                    threshold: STRUCTURAL_OPENING_GATE_THRESHOLD,
                   });
                 } else {
+                  lastFailedFp = retriedFp;
                   console.warn(
-                    `Episode ${ep} structural retry still too similar (score ${retriedMatch.score.toFixed(2)}) — keeping retry anyway as best available.`
+                    `Episode ${ep} structural attempt ${attempt} still too similar ` +
+                    `(score ${retriedMatch.score.toFixed(2)} vs ep ${retriedMatch.episode})`
                   );
-                  episodeText = retried;
                 }
               }
             } catch (structuralRetryErr) {
               console.warn(`Episode ${ep} structural retry failed:`, structuralRetryErr?.message || structuralRetryErr);
+            }
+
+            if (!structuralAccepted) {
+              episodeText = textBeforeStructuralGate;
+              console.warn(
+                `Episode ${ep}: both structural rewrites failed threshold ${STRUCTURAL_OPENING_GATE_THRESHOLD} — reverted to pre-gate draft.`
+              );
+              sendStreamLine(res, {
+                type: "structural_retry",
+                episode: ep,
+                status: "reverted",
+                reason: `both attempts still ≥ ${STRUCTURAL_OPENING_GATE_THRESHOLD} similar to a prior opening`,
+                compared_to_episode: bestMatch.episode,
+                score_before: bestMatch.score,
+                threshold: STRUCTURAL_OPENING_GATE_THRESHOLD,
+              });
             }
           }
         }
@@ -4266,15 +4260,36 @@ async function runSeasonGeneration(body, res, persist) {
           const epPlan = blueprint?.episodes?.[ep - 1];
           const requiredSetting = safeStr(epPlan?.setting_focus).trim();
           if (requiredSetting) {
-            const currentFp = extractOpeningFingerprint(episodeText);
-            const settingCheck = blueprintSettingMatches(currentFp, requiredSetting);
-            if (!settingCheck.match) {
+            let originalLocationLogged = null;
+            for (let attempt = 1; attempt <= MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS; attempt++) {
+              const currentFp = extractOpeningFingerprint(episodeText);
+              const settingCheck = blueprintSettingMatches(currentFp, requiredSetting);
+              if (settingCheck.match) {
+                if (attempt > 1) {
+                  sendStreamLine(res, {
+                    type: "blueprint_setting_retry",
+                    episode: ep,
+                    phase: "cleared",
+                    attempt,
+                    required_setting: requiredSetting,
+                    retried_location: currentFp.location,
+                    confidence: settingCheck.confidence,
+                  });
+                }
+                break;
+              }
+              if (originalLocationLogged === null) originalLocationLogged = currentFp.location;
               console.warn(
-                `Episode ${ep} blueprint setting mismatch: required "${requiredSetting}" ` +
-                `but opened in "${currentFp.location}" (confidence ${settingCheck.confidence.toFixed(2)}) — retrying.`
+                `Episode ${ep} blueprint setting mismatch (attempt ${attempt}/${MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS}): ` +
+                `required "${requiredSetting}" but opened in "${currentFp.location}" ` +
+                `(confidence ${settingCheck.confidence.toFixed(2)}).`
               );
               const blueprintRetryContent =
                 userContent +
+                (attempt > 1
+                  ? `\n\n(Attempt ${attempt}/${MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS}) The last rewrite still opened in "${currentFp.location}". ` +
+                    `The FIRST scene heading must establish "${requiredSetting}".\n`
+                  : "") +
                 `\n\nREWRITE REQUIRED — WRONG OPENING LOCATION:\n` +
                 `The season blueprint requires episode ${ep} to be set in: "${requiredSetting}".\n` +
                 `Your draft opened in "${currentFp.location}" instead.\n` +
@@ -4284,35 +4299,58 @@ async function runSeasonGeneration(body, res, persist) {
                 `  3. Do NOT time-skip or introduce new subplots — only the opening location changes.\n` +
                 `  4. The rest of the episode after the opening scene may remain largely intact.`;
               try {
+                const useGen = attempt >= MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS;
                 const blueprintRetry = await openai.chat.completions.create({
-                  model: FINETUNED_MODEL,
+                  model: useGen ? GENERATOR_MODEL : FINETUNED_MODEL,
                   messages: [
-                    { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                    {
+                      role: "system",
+                      content: useGen ? generatorSystemPrompt : EPISODE_TEXT_SYSTEM_PROMPT,
+                    },
                     { role: "user", content: blueprintRetryContent },
                   ],
                   max_tokens: 2048,
-                  temperature: 0.5,
+                  temperature: Math.max(0.22, 0.52 - (attempt - 1) * 0.12),
                   frequency_penalty: 1.0,
                   presence_penalty: 0.6,
                 });
                 const blueprintRetryRaw = blueprintRetry.choices?.[0]?.message?.content;
-                if (typeof blueprintRetryRaw === "string" && blueprintRetryRaw.trim()) {
-                  episodeText = finalizeEpisodeText(blueprintRetryRaw.trim(), ep, seriesNames);
-                  const retriedFp = extractOpeningFingerprint(episodeText);
-                  const retriedCheck = blueprintSettingMatches(retriedFp, requiredSetting);
-                  sendStreamLine(res, {
-                    type: "blueprint_setting_retry",
-                    episode: ep,
-                    required_setting: requiredSetting,
-                    original_location: currentFp.location,
-                    retried_location: retriedFp.location,
-                    match_after_retry: retriedCheck.match,
-                    confidence_after_retry: retriedCheck.confidence,
-                  });
-                }
+                if (typeof blueprintRetryRaw !== "string" || !blueprintRetryRaw.trim()) break;
+                episodeText = finalizeEpisodeText(blueprintRetryRaw.trim(), ep, seriesNames);
+                const retriedFp = extractOpeningFingerprint(episodeText);
+                const retriedCheck = blueprintSettingMatches(retriedFp, requiredSetting);
+                sendStreamLine(res, {
+                  type: "blueprint_setting_retry",
+                  episode: ep,
+                  attempt,
+                  required_setting: requiredSetting,
+                  original_location: originalLocationLogged,
+                  retried_location: retriedFp.location,
+                  match_after_retry: retriedCheck.match,
+                  confidence_after_retry: retriedCheck.confidence,
+                });
               } catch (blueprintRetryErr) {
-                console.warn(`Episode ${ep} blueprint setting retry failed:`, blueprintRetryErr?.message || blueprintRetryErr);
+                console.warn(
+                  `Episode ${ep} blueprint setting retry failed:`,
+                  blueprintRetryErr?.message || blueprintRetryErr
+                );
+                break;
               }
+            }
+            const finalFp = extractOpeningFingerprint(episodeText);
+            const finalCheck = blueprintSettingMatches(finalFp, requiredSetting);
+            if (!finalCheck.match) {
+              console.warn(
+                `Episode ${ep}: blueprint setting still unmatched after up to ${MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS} attempt(s).`
+              );
+              sendStreamLine(res, {
+                type: "blueprint_setting_retry",
+                episode: ep,
+                phase: "exhausted",
+                required_setting: requiredSetting,
+                last_location: finalFp.location,
+                confidence: finalCheck.confidence,
+              });
             }
           }
         }
@@ -4385,9 +4423,6 @@ async function runSeasonGeneration(body, res, persist) {
           }
         }
 
-        // Tag big events in this episode for future anti-repetition guidance.
-        const eventTags = tagEpisodeEvents(episodeText);
-
         // Final-episode pass: lightly edit the ending away from cliffhangers into true resolution.
         if (ep === episodeCount && typeof episodeText === "string" && episodeText.trim()) {
           try {
@@ -4453,6 +4488,186 @@ async function runSeasonGeneration(body, res, persist) {
         if (!victorAllowed && includesWord(episodeText, "Victor")) {
           episodeText = episodeText.replace(/\bVictor\b/g, pickReplacementNameForVictor());
         }
+
+        // Phase 2 — Embedding similarity on early-episode chunk vs all prior episodes (semantic nearness).
+        if (ENABLE_EPISODE_EMBEDDING_GATE && OPENAI_API_KEY) {
+          const chunk = sliceTextForEpisodeEmbedding(episodeText, EMBEDDING_CHUNK_CHARS);
+          let vec = chunk.length >= 80 ? await fetchEpisodeChunkEmbedding(chunk) : null;
+          if (ep > 1 && vec && episodeEmbeddingMemo.length === episodeScriptsMemo.length) {
+            const { sim, ep: nearEp } = bestPriorEmbeddingSimilarity(vec, episodeEmbeddingMemo);
+            if (sim >= EMBEDDING_SIMILARITY_THRESHOLD) {
+              sendStreamLine(res, {
+                type: "embedding_similarity_gate",
+                episode: ep,
+                similar_to_episode: nearEp,
+                similarity: Math.round(sim * 1000) / 1000,
+                threshold: EMBEDDING_SIMILARITY_THRESHOLD,
+                status: "regenerating",
+              });
+              const embedHint =
+                `\n\nSEMANTIC OPENING REJECTION (embedding cosine ${sim.toFixed(3)} ≥ ${EMBEDDING_SIMILARITY_THRESHOLD} vs episode ${nearEp}):\n` +
+                "Your early scenes read as the same situation and emotional beat as that episode, even with different wording. " +
+                "Rewrite the COMPLETE episode: change setting, sensory details, conflict frame, and dialogue moves while advancing the plot and keeping the same main cast names.";
+              try {
+                const embResp = await openai.chat.completions.create({
+                  model: GENERATOR_MODEL,
+                  messages: [
+                    { role: "system", content: generatorSystemPrompt },
+                    { role: "user", content: userContent + embedHint },
+                  ],
+                  max_tokens: 2048,
+                  temperature: 0.55,
+                  frequency_penalty: 1.0,
+                  presence_penalty: 0.6,
+                });
+                const embRaw = embResp.choices?.[0]?.message?.content;
+                if (typeof embRaw === "string" && embRaw.trim()) {
+                  episodeText = finalizeEpisodeText(embRaw.trim(), ep, seriesNames);
+                  episodeText = normalizeEpisodeCharacterNames(
+                    episodeText,
+                    CHARACTER_NAME_REGISTRY_PATH
+                  );
+                  const spanEmb = targetedRepairEpisodeText(episodeText, seriesNames);
+                  episodeText = spanEmb.text;
+                  if (!victorAllowed && includesWord(episodeText, "Victor")) {
+                    episodeText = episodeText.replace(/\bVictor\b/g, pickReplacementNameForVictor());
+                  }
+                  const chunk2 = sliceTextForEpisodeEmbedding(episodeText, EMBEDDING_CHUNK_CHARS);
+                  const vec2 =
+                    chunk2.length >= 80 ? await fetchEpisodeChunkEmbedding(chunk2) : null;
+                  const check2 = bestPriorEmbeddingSimilarity(vec2, episodeEmbeddingMemo);
+                  sendStreamLine(res, {
+                    type: "embedding_similarity_gate",
+                    episode: ep,
+                    phase: "post_regen",
+                    similar_to_episode: check2.ep,
+                    similarity: Math.round(check2.sim * 1000) / 1000,
+                    cleared: check2.sim < EMBEDDING_SIMILARITY_THRESHOLD,
+                  });
+                  vec = vec2;
+                }
+              } catch (embGateErr) {
+                console.warn(
+                  `Episode ${ep} embedding-gate regen failed:`,
+                  embGateErr?.message || embGateErr
+                );
+                sendStreamLine(res, {
+                  type: "embedding_similarity_gate",
+                  episode: ep,
+                  phase: "regen_error",
+                  message: String(embGateErr?.message || embGateErr),
+                });
+              }
+            }
+          }
+          episodeEmbeddingMemo.push(vec);
+        }
+
+        // Global duplicate audit (pairwise structural + text) — incremental season check each episode.
+        if (ep > 1 && episodeScriptsMemo.length > 0) {
+          const provisionalRecap = {
+            episode: ep,
+            openingFingerprint: extractOpeningFingerprint(episodeText),
+            recap: "",
+            tags: [],
+          };
+          const augmentedRecaps = [...episodeRecaps, provisionalRecap];
+          const allScripts = [...episodeScriptsMemo, episodeText];
+          const dupFlags = detectDuplicateEpisodes(allScripts, augmentedRecaps);
+          const relevant = dupFlags.filter((f) => f.ep_a === ep || f.ep_b === ep);
+          if (relevant.length) {
+            sendStreamLine(res, {
+              type: "duplicate_audit",
+              episode: ep,
+              flag_count: relevant.length,
+              pairs: relevant.map((f) => ({
+                ep_a: f.ep_a,
+                ep_b: f.ep_b,
+                severity: f.severity,
+                structural_score: f.structural_score,
+                text_score: f.text_score,
+                reasons: f.reasons,
+              })),
+            });
+            const healHint =
+              "\n\nGLOBAL DUPLICATE AUDIT — FULL EPISODE REWRITE REQUIRED:\n" +
+              "Season-level comparison flagged this episode as too similar to another (opening structure and/or full-text overlap).\n" +
+              relevant
+                .map(
+                  (f, i) =>
+                    `${i + 1}. Episodes ${f.ep_a} & ${f.ep_b} [${f.severity}] — ${f.reasons.join("; ")}`
+                )
+                .join("\n") +
+              "\n\nRewrite the COMPLETE episode: new scenes, new dialogue, new blocking. " +
+              "Keep continuity (same tagged main cast, story moves forward, no reset) but do not echo the paired episode’s shape or lines.";
+            let healed = false;
+            try {
+              const healResp = await openai.chat.completions.create({
+                model: FINETUNED_MODEL,
+                messages: [
+                  { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+                  { role: "user", content: userContent + healHint },
+                ],
+                max_tokens: 2048,
+                temperature: 0.45,
+                frequency_penalty: 1.0,
+                presence_penalty: 0.65,
+              });
+              const healRaw = healResp.choices?.[0]?.message?.content;
+              if (typeof healRaw === "string" && healRaw.trim()) {
+                episodeText = finalizeEpisodeText(healRaw.trim(), ep, seriesNames);
+                episodeText = normalizeEpisodeCharacterNames(
+                  episodeText,
+                  CHARACTER_NAME_REGISTRY_PATH
+                );
+                const spanHeal = targetedRepairEpisodeText(episodeText, seriesNames);
+                episodeText = spanHeal.text;
+                const prov2 = {
+                  episode: ep,
+                  openingFingerprint: extractOpeningFingerprint(episodeText),
+                  recap: "",
+                  tags: [],
+                };
+                const rec2 = [...episodeRecaps, prov2];
+                const scripts2 = [...episodeScriptsMemo, episodeText];
+                const dupAfter = detectDuplicateEpisodes(scripts2, rec2).filter(
+                  (f) => f.ep_a === ep || f.ep_b === ep
+                );
+                healed = dupAfter.length === 0;
+                sendStreamLine(res, {
+                  type: "duplicate_audit",
+                  episode: ep,
+                  phase: "post_heal",
+                  flag_count: dupAfter.length,
+                  cleared: healed,
+                  pairs: dupAfter.map((f) => ({
+                    ep_a: f.ep_a,
+                    ep_b: f.ep_b,
+                    severity: f.severity,
+                    structural_score: f.structural_score,
+                    text_score: f.text_score,
+                  })),
+                });
+                if (!healed) {
+                  console.warn(
+                    `Episode ${ep}: duplicate audit still flags ${dupAfter.length} pair(s) after heal — keeping healed draft.`
+                  );
+                }
+              }
+            } catch (dupHealErr) {
+              console.warn(`Episode ${ep} duplicate heal failed:`, dupHealErr?.message || dupHealErr);
+              sendStreamLine(res, {
+                type: "duplicate_audit",
+                episode: ep,
+                phase: "heal_error",
+                message: String(dupHealErr?.message || dupHealErr),
+              });
+            }
+          }
+        }
+
+        // Tag big events in this episode for future anti-repetition guidance (after all text edits).
+        const eventTags = tagEpisodeEvents(episodeText);
 
         // Phase 1: audit character cue name variants and keep a registry on disk.
         try {
@@ -4523,6 +4738,9 @@ async function runSeasonGeneration(body, res, persist) {
         console.error(`Episode ${ep} error:`, epErr);
         const fallback = `[Episode ${ep} failed to generate.]`;
         episodeScriptsMemo.push(fallback);
+        if (ENABLE_EPISODE_EMBEDDING_GATE && OPENAI_API_KEY) {
+          episodeEmbeddingMemo.push(null);
+        }
         sendStreamLine(res, { type: "episode", episode: ep, text: fallback });
         if (persist) {
           try {
@@ -4713,6 +4931,23 @@ function loadSummariesByGenre() {
   }
 }
 
+/** Random preset for genre: JSON list if present, else procedural generateLogline. */
+function pickRandomPresetSummary(genre) {
+  const g = String(genre || "").trim() || "Romance";
+  const data = loadSummariesByGenre();
+  const list = Array.isArray(data[g]) ? data[g] : [];
+  let summary = list.length > 0 ? list[Math.floor(Math.random() * list.length)] : "";
+  summary = safeStr(summary).trim();
+  if (!summary) {
+    try {
+      summary = generateLogline(g);
+    } catch (_) {
+      summary = "";
+    }
+  }
+  return safeStr(summary).trim().slice(0, 1500);
+}
+
 function loadEndingsByGenre() {
   try {
     const raw = fs.readFileSync(ENDINGS_PATH, "utf8");
@@ -4747,12 +4982,10 @@ app.get("/logline/genres", (_req, res) => {
   res.json({ genres: SUPPORTED_GENRES });
 });
 
-/** GET /summaries/random?genre=Romance — one random summary for that genre */
+/** GET /summaries/random?genre=Romance — one random preset summary for that genre */
 app.get("/summaries/random", (req, res) => {
   const genre = String(req.query.genre || "").trim() || "Romance";
-  const data = loadSummariesByGenre();
-  const list = Array.isArray(data[genre]) ? data[genre] : [];
-  const summary = list.length > 0 ? list[Math.floor(Math.random() * list.length)] : "";
+  const summary = pickRandomPresetSummary(genre);
   res.json({ genre, summary });
 });
 

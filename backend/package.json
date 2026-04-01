@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/goldenGates.test.mjs",
     "dev": "node --watch server.js",
     "audit:prompt-leaks": "node promptLeakAudit.js",
     "audit:merge-corpus": "node mergeCorpusAudit.js",
