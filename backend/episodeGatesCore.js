@@ -45,7 +45,7 @@ const COLLAPSE_TECH_LEXICON =
 const COLLAPSE_ABSTRACT_LEXICON =
   /\b(forevermore|eternity|destiny|cosmos|existence|metaphysics|consciousness|transcend(?:s|ed|ing)?|infinite|eternal|universal|omnipotent|inevitably|perpetually|ceaselessly|endlessly|boundless|immutable|wholeheartedly|willingly|embraced)\b/i;
 
-function lineHasCollapseLexicon(line) {
+export function lineHasCollapseLexicon(line) {
   return COLLAPSE_TECH_LEXICON.test(line) || COLLAPSE_ABSTRACT_LEXICON.test(line);
 }
 
@@ -161,7 +161,7 @@ function looksLikeCommaSpamLine(text) {
   });
 }
 
-function buildNameAnchors(names) {
+export function buildNameAnchors(names) {
   const anchors = [];
   const pushParts = (full) => {
     const s = safeStr(full).trim();

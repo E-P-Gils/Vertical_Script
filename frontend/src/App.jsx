@@ -1302,14 +1302,10 @@ function App() {
                 </select>
               </label>
               {genre && (
-                <div className="field summary-field preset-summary-note">
-                  <span>Preset story / 预设故事</span>
-                  <p className="summary-hint">
-                    Each time you generate, one curated preset summary for this genre is chosen
-                    automatically (you cannot enter your own). /
-                    每次点击生成时，系统会为本类型自动随机选择一条预设故事梗概（不可自定义输入）。
-                  </p>
-                </div>
+                <p className="summary-hint" style={{ marginTop: "0.5rem" }}>
+                  A full 60-episode vertical script will be generated in your chosen genre. /
+                  将根据您所选类型生成完整的 60 集垂直剧本。
+                </p>
               )}
               {error && <p className="error">Error / 错误: {error}</p>}
               <div className="modal-actions">

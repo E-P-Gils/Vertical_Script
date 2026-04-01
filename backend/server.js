@@ -38,6 +38,8 @@ import {
   findMostSimilarPriorOpening,
   detectDuplicateEpisodes,
   measureRepetitionAgainstRecent,
+  buildNameAnchors,
+  lineHasCollapseLexicon,
 } from "./episodeGatesCore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
