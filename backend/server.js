@@ -461,15 +461,61 @@ function buildBlueprintPrompt({ logline, names, genre, episodeCount, tropes }) {
   return lines.filter(Boolean).join("\n");
 }
 
-function parseBlueprintFromContent(content) {
-  const raw = (content || "").trim();
-  const objMatch = raw.match(/\{[\s\S]*\}/);
-  if (!objMatch) return null;
-  try {
-    return JSON.parse(objMatch[0]);
-  } catch (_) {
-    return null;
+/** First `{` … matching `}` outside of JSON strings (avoids greedy-regex mistakes). */
+function extractFirstBalancedJsonObject(text) {
+  const s = String(text || "").trim();
+  const start = s.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === "\\") {
+        escape = true;
+        continue;
+      }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
   }
+  return null;
+}
+
+function parseBlueprintFromContent(content) {
+  let raw = (content || "").trim();
+  raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+  const candidates = [];
+  const balanced = extractFirstBalancedJsonObject(raw);
+  if (balanced) candidates.push(balanced);
+  const greedy = raw.match(/\{[\s\S]*\}/);
+  if (greedy && greedy[0] !== balanced) candidates.push(greedy[0]);
+  if (!candidates.length && raw.startsWith("{")) candidates.push(raw);
+
+  for (const cand of candidates) {
+    if (!cand) continue;
+    try {
+      const parsed = JSON.parse(cand);
+      if (parsed && Array.isArray(parsed.episodes) && parsed.episodes.length > 0) return parsed;
+    } catch (_) {
+      /* try next candidate */
+    }
+  }
+  return null;
 }
 
 /**
@@ -633,37 +679,81 @@ async function generateGenreStyleNotes({ genre, logline }) {
 }
 
 async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tropes }) {
-  const userContent = buildBlueprintPrompt({
+  const total = Math.max(1, Math.min(120, episodeCount || 60));
+  const userContentBase = buildBlueprintPrompt({
     logline,
     names,
     genre,
-    episodeCount,
+    episodeCount: total,
     tropes,
   });
 
-  const completion = await openai.chat.completions.create({
-    model: PLANNER_MODEL,
-    messages: [
-      { role: "system", content: BLUEPRINT_SYSTEM_PROMPT },
-      { role: "user", content: userContent },
-    ],
-    max_tokens: 4096,
-    temperature: 0.6,
-    frequency_penalty: 0.7,
-    presence_penalty: 0.1,
-  });
+  // 60-episode blueprints are large; 4096 tokens often truncates mid-JSON and breaks parsing.
+  const blueprintMaxTokens = Math.min(16384, Math.max(8192, total * 150));
 
-  const rawContent = completion.choices?.[0]?.message?.content;
-  const content =
-    typeof rawContent === "string" && rawContent.trim()
-      ? rawContent.trim()
-      : "";
-  const blueprint = parseBlueprintFromContent(content);
-  if (!blueprint || !Array.isArray(blueprint.episodes)) {
-    throw new Error("Failed to parse season blueprint JSON");
+  let lastError = /** @type {Error | null} */ (null);
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const retryHint =
+      attempt > 1
+        ? `\n\nRetry ${attempt}/3: Your previous reply was invalid JSON, truncated, or had fewer than ${total} episodes. ` +
+          `Reply with ONE JSON object only — no markdown fences, no commentary. ` +
+          `The "episodes" array MUST contain exactly ${total} objects in order (episode 1 … ${total}).`
+        : "";
+
+    try {
+      const completion = await openai.chat.completions.create({
+        model: PLANNER_MODEL,
+        messages: [
+          { role: "system", content: BLUEPRINT_SYSTEM_PROMPT },
+          { role: "user", content: userContentBase + retryHint },
+        ],
+        max_tokens: blueprintMaxTokens,
+        temperature: attempt === 1 ? 0.55 : 0.22,
+        frequency_penalty: 0.7,
+        presence_penalty: 0.1,
+      });
+
+      const choice = completion.choices?.[0];
+      const finish = choice?.finish_reason;
+      if (finish === "length") {
+        console.warn(
+          `Blueprint attempt ${attempt}/3: response truncated (finish_reason=length, max_tokens=${blueprintMaxTokens})`
+        );
+      }
+
+      const rawContent = choice?.message?.content;
+      const content =
+        typeof rawContent === "string" && rawContent.trim()
+          ? rawContent.trim()
+          : "";
+
+      const blueprint = parseBlueprintFromContent(content);
+      if (!blueprint || !Array.isArray(blueprint.episodes)) {
+        lastError = new Error("Failed to parse season blueprint JSON");
+        console.warn(`Blueprint attempt ${attempt}/3: JSON parse failed (content length ${content.length})`);
+        continue;
+      }
+      if (blueprint.episodes.length < total) {
+        lastError = new Error(
+          `Blueprint has ${blueprint.episodes.length} episodes; need ${total}`
+        );
+        console.warn(`Blueprint attempt ${attempt}/3: ${lastError.message}`);
+        continue;
+      }
+      if (blueprint.episodes.length > total) {
+        blueprint.episodes = blueprint.episodes.slice(0, total);
+      }
+
+      hydrateBlueprintCharactersFromNames(blueprint, names);
+      return blueprint;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      console.warn(`Blueprint attempt ${attempt}/3:`, lastError.message);
+    }
   }
-  hydrateBlueprintCharactersFromNames(blueprint, names);
-  return blueprint;
+
+  throw lastError || new Error("Failed to parse season blueprint JSON");
 }
 
 const EPISODE_SUMMARY_SYSTEM_PROMPT = `You are a story planner for female-led vertical romance dramas.
