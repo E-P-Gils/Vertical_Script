@@ -36,8 +36,9 @@ function mapServerListRowToItem(row, prevItem) {
     title: formatMyScriptListTitle(row.genre, created),
     genre: String(row.genre || prevItem?.genre || "").trim(),
     summary: String(row.summary || prevItem?.summary || "").trim(),
-    englishText: prevItem?.englishText || "",
-    chineseText: prevItem?.chineseText || "",
+    // Always prefer server-backed text when present; fall back only if row fields are empty.
+    englishText: row.english_text != null && row.english_text !== "" ? String(row.english_text) : prevItem?.englishText || "",
+    chineseText: row.chinese_text != null && row.chinese_text !== "" ? String(row.chinese_text) : prevItem?.chineseText || "",
     generating: row.status === "generating",
     status: row.status || prevItem?.status,
     episodeDone: row.episode_done ?? prevItem?.episodeDone ?? 0,
@@ -127,74 +128,89 @@ function App() {
       clearBackgroundPoll();
       pollIntervalRef.current = -1;
 
-      const applyPolledScript = (row) => {
-        const id = row.id;
-        const target = row.episode_target || 60;
-        setMyScripts((prev) =>
-          prev.map((it) =>
-            it.id === id
-              ? {
-                  ...it,
-                  title: formatMyScriptListTitle(row.genre || it.genre, row.created_at || it.createdAt),
-                  genre: String(row.genre || it.genre || "").trim(),
-                  summary: row.summary != null ? String(row.summary) : it.summary,
-                  createdAt:
-                    row.created_at != null
-                      ? row.created_at instanceof Date
-                        ? row.created_at.toISOString()
-                        : String(row.created_at)
-                      : it.createdAt,
-                  englishText: row.english_text || "",
-                  chineseText: row.chinese_text || "",
-                  generating: row.status === "generating",
-                  status: row.status,
-                  episodeDone: row.episode_done ?? 0,
-                  episodeTarget: row.episode_target ?? it.episodeTarget ?? target,
-                  errorMessage: row.error_message ? String(row.error_message) : "",
-                }
-              : it
-          )
-        );
-        if (activeScriptIdRef.current === id) {
+      const applyPolledRows = (rows) => {
+        const rowById = new Map(rows.map((r) => [r.id, r]));
+        const activeId = activeScriptIdRef.current;
+
+        // Update the editor + progress for the currently loaded script.
+        if (activeId && rowById.has(activeId)) {
+          const row = rowById.get(activeId);
+          const target = row.episode_target || 60;
+          const doneEp = row.episode_done ?? 0;
           setScript(row.english_text || "");
           setScriptZh(row.chinese_text || "");
           if (row.status === "generating") {
             setProgress({
-              episode: row.episode_done || 0,
-              total: row.episode_target || target,
+              episode: doneEp || 0,
+              total: target,
               phase: "generating",
             });
+          } else if (row.status === "failed") {
+            setError(row.error_message || "Generation failed");
+          } else if (row.status === "complete") {
+            if (doneEp < target) {
+              setError(
+                `Generation finished on the server with only ${doneEp} of ${target} episodes saved. Open My Scripts to inspect, or delete and start again. / 服务器仅保存了 ${doneEp}/${target} 集。请在「我的剧本」中查看或删除后重试。`
+              );
+            } else {
+              setModalOpen(false);
+            }
           }
         }
-        return row.status;
+
+        setMyScripts((prev) => {
+          const prevById = new Map(prev.map((x) => [x.id, x]));
+          const fromServerMissing = rows
+            .filter((row) => !prevById.has(row.id))
+            .map((row) => mapServerListRowToItem(row, undefined));
+
+          const updated = prev.map((it) => {
+            const row = rowById.get(it.id);
+            if (!row) return it;
+            const target = row.episode_target || 60;
+            return {
+              ...it,
+              title: formatMyScriptListTitle(row.genre || it.genre, row.created_at || it.createdAt),
+              genre: String(row.genre || it.genre || "").trim(),
+              summary: row.summary != null ? String(row.summary) : it.summary,
+              createdAt:
+                row.created_at != null
+                  ? row.created_at instanceof Date
+                    ? row.created_at.toISOString()
+                    : String(row.created_at)
+                  : it.createdAt,
+              englishText: row.english_text || "",
+              chineseText: row.chinese_text || "",
+              generating: row.status === "generating",
+              status: row.status,
+              episodeDone: row.episode_done ?? 0,
+              episodeTarget: row.episode_target ?? it.episodeTarget ?? target,
+              errorMessage: row.error_message ? String(row.error_message) : "",
+            };
+          });
+
+          // Keep server-updated + any newly discovered server scripts, but cap the UI list.
+          return [...fromServerMissing, ...updated].slice(0, 50);
+        });
       };
 
       const pollOnce = async () => {
         try {
-          const pr = await fetch(`${API_BASE}/scripts/${encodeURIComponent(scriptId)}`, {
+          const pr = await fetch(`${API_BASE}/scripts`, {
             headers: { Authorization: `Bearer ${authToken}` },
           });
           if (!pr.ok) return;
           const pd = await pr.json();
-          const row = pd.script;
-          if (!row) return;
-          const st = applyPolledScript(row);
-          const targetEp = row.episode_target || 60;
-          const doneEp = row.episode_done ?? 0;
-          if (st === "failed") {
+          const rows = Array.isArray(pd.scripts) ? pd.scripts : [];
+          if (!rows.length) return;
+
+          applyPolledRows(rows);
+
+          // Keep polling while ANY script is still generating (supports multiple concurrent generations).
+          const anyGenerating = rows.some((r) => r.status === "generating");
+          if (!anyGenerating) {
             clearBackgroundPoll();
             setProgress({ episode: 0, total: 0, phase: "generating" });
-            setError(row.error_message || "Generation failed");
-          } else if (st === "complete" && doneEp >= targetEp) {
-            clearBackgroundPoll();
-            setProgress({ episode: 0, total: 0, phase: "generating" });
-            setModalOpen(false);
-          } else if (st === "complete" && doneEp < targetEp) {
-            clearBackgroundPoll();
-            setProgress({ episode: 0, total: 0, phase: "generating" });
-            setError(
-              `Generation finished on the server with only ${doneEp} of ${targetEp} episodes saved. Open My Scripts to inspect, or delete and start again. / 服务器仅保存了 ${doneEp}/${targetEp} 集。请在「我的剧本」中查看或删除后重试。`
-            );
           }
         } catch {
           /* ignore */
