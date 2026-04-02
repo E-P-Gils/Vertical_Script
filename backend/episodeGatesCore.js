@@ -94,7 +94,7 @@ function looksLikeSynonymVomit(text) {
   return false;
 }
 
-function hasSentenceLevelMerges(text) {
+export function hasSentenceLevelMerges(text) {
   if (!text || typeof text !== "string") return false;
   const words = text.split(/\s+/).filter(Boolean);
   return words.some((w) => w.length > 25 && /^[A-Za-z]+$/.test(w));

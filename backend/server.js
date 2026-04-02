@@ -35,6 +35,7 @@ import {
   tagEpisodeEvents,
   passesBasicFormatCheck,
   hasQualityCollapse,
+  hasSentenceLevelMerges,
   extractOpeningFingerprint,
   findMostSimilarPriorOpening,
   detectDuplicateEpisodes,
