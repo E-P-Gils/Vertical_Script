@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   buildScreenplayPdfBytes,
   prepareChineseScriptLikePdfInput,
+  prepareEnglishScriptForDisplay,
   prepareEnglishScriptLikePdfInput,
 } from "./screenplayPdf.js";
 import "./App.css";
@@ -122,6 +123,21 @@ function App() {
     }
   }, []);
 
+  /** Full script text lives on GET /scripts/:id — list route omits english_text/chinese_text. */
+  const fetchScriptDetail = useCallback(async (scriptId) => {
+    if (!authToken || !scriptId) return null;
+    try {
+      const r = await fetch(`${API_BASE}/scripts/${encodeURIComponent(scriptId)}`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!r.ok) return null;
+      const d = await r.json();
+      return d.script || null;
+    } catch {
+      return null;
+    }
+  }, [authToken]);
+
   const scheduleProgressPoll = useCallback(
     (scriptId) => {
       if (!authToken || !scriptId) return;
@@ -137,8 +153,12 @@ function App() {
           const row = rowById.get(activeId);
           const target = row.episode_target || 60;
           const doneEp = row.episode_done ?? 0;
-          setScript(row.english_text || "");
-          setScriptZh(row.chinese_text || "");
+          if (Object.prototype.hasOwnProperty.call(row, "english_text")) {
+            setScript(String(row.english_text ?? ""));
+          }
+          if (Object.prototype.hasOwnProperty.call(row, "chinese_text")) {
+            setScriptZh(String(row.chinese_text ?? ""));
+          }
           if (row.status === "generating") {
             setProgress({
               episode: doneEp || 0,
@@ -179,8 +199,12 @@ function App() {
                     ? row.created_at.toISOString()
                     : String(row.created_at)
                   : it.createdAt,
-              englishText: row.english_text || "",
-              chineseText: row.chinese_text || "",
+              englishText: Object.prototype.hasOwnProperty.call(row, "english_text")
+                ? String(row.english_text ?? "")
+                : it.englishText,
+              chineseText: Object.prototype.hasOwnProperty.call(row, "chinese_text")
+                ? String(row.chinese_text ?? "")
+                : it.chineseText,
               generating: row.status === "generating",
               status: row.status,
               episodeDone: row.episode_done ?? 0,
@@ -201,8 +225,30 @@ function App() {
           });
           if (!pr.ok) return;
           const pd = await pr.json();
-          const rows = Array.isArray(pd.scripts) ? pd.scripts : [];
+          let rows = Array.isArray(pd.scripts) ? pd.scripts : [];
           if (!rows.length) return;
+
+          const aid = activeScriptIdRef.current;
+          if (aid && rows.some((r) => r.id === aid)) {
+            const detail = await fetchScriptDetail(aid);
+            if (detail) {
+              rows = rows.map((r) =>
+                r.id === aid
+                  ? {
+                      ...r,
+                      english_text: detail.english_text,
+                      chinese_text: detail.chinese_text,
+                      status: detail.status ?? r.status,
+                      episode_done: detail.episode_done ?? r.episode_done,
+                      episode_target: detail.episode_target ?? r.episode_target,
+                      error_message: detail.error_message ?? r.error_message,
+                      genre: detail.genre ?? r.genre,
+                      summary: detail.summary ?? r.summary,
+                    }
+                  : r
+              );
+            }
+          }
 
           applyPolledRows(rows);
 
@@ -224,7 +270,7 @@ function App() {
         }
       })();
     },
-    [authToken, clearBackgroundPoll]
+    [authToken, clearBackgroundPoll, fetchScriptDetail]
   );
 
   useEffect(() => {
@@ -308,8 +354,38 @@ function App() {
     );
   };
 
-  const loadScriptItem = (item) => {
+  const loadScriptItem = async (item) => {
     if (!item) return;
+    setError("");
+    if (authToken && isServerBackedScriptId(item.id)) {
+      const row = await fetchScriptDetail(item.id);
+      if (row) {
+        setScript(row.english_text || "");
+        setScriptZh(row.chinese_text || "");
+        setGenre(String(row.genre || item.genre || "").trim());
+        setActiveScriptId(item.id);
+        setPage("generate");
+        setModalOpen(false);
+        setMyScripts((prev) =>
+          prev.map((it) =>
+            it.id === item.id
+              ? {
+                  ...it,
+                  englishText: row.english_text || "",
+                  chineseText: row.chinese_text || "",
+                  status: row.status,
+                  generating: row.status === "generating",
+                  episodeDone: row.episode_done ?? it.episodeDone,
+                  episodeTarget: row.episode_target ?? it.episodeTarget,
+                  errorMessage: row.error_message ? String(row.error_message) : "",
+                }
+              : it
+          )
+        );
+        return;
+      }
+      setError("Could not load script from server. / 无法从服务器加载剧本。");
+    }
     setScript(item.englishText || "");
     setScriptZh(item.chineseText || "");
     setGenre(item.genre || "");
@@ -1073,7 +1149,16 @@ function App() {
                           try {
                             setError("");
                             setDownloading("en");
-                            const pdfBytes = await buildScreenplayPdfBytes(it.englishText, "en");
+                            let en = it.englishText;
+                            if (
+                              !String(en || "").trim() &&
+                              authToken &&
+                              isServerBackedScriptId(it.id)
+                            ) {
+                              const row = await fetchScriptDetail(it.id);
+                              en = row?.english_text || "";
+                            }
+                            const pdfBytes = await buildScreenplayPdfBytes(en, "en");
                             triggerPdfDownload(pdfBytes, "vertical_script_en.pdf");
                           } catch (e) {
                             setError(e instanceof Error ? e.message : "Download failed");
@@ -1081,19 +1166,36 @@ function App() {
                             setDownloading(null);
                           }
                         }}
-                        disabled={downloading !== null || !it.englishText?.trim()}
+                        disabled={
+                          downloading !== null ||
+                          (!it.englishText?.trim() &&
+                            !(authToken && isServerBackedScriptId(it.id)))
+                        }
                       >
                         Download EN PDF
                       </button>
                       <button
                         type="button"
                         className="btn btn-secondary"
-                        disabled={!it.chineseText || downloading !== null}
+                        disabled={
+                          (!it.chineseText?.trim() &&
+                            !(authToken && isServerBackedScriptId(it.id))) ||
+                          downloading !== null
+                        }
                         onClick={async () => {
                           try {
                             setError("");
                             setDownloading("zh");
-                            const pdfBytes = await buildScreenplayPdfBytes(it.chineseText, "zh");
+                            let zh = it.chineseText;
+                            if (
+                              !String(zh || "").trim() &&
+                              authToken &&
+                              isServerBackedScriptId(it.id)
+                            ) {
+                              const row = await fetchScriptDetail(it.id);
+                              zh = row?.chinese_text || "";
+                            }
+                            const pdfBytes = await buildScreenplayPdfBytes(zh, "zh");
                             triggerPdfDownload(pdfBytes, "vertical_script_zh.pdf");
                           } catch (e) {
                             setError(e instanceof Error ? e.message : "Download failed");
@@ -1326,7 +1428,7 @@ function App() {
             </div>
           )}
           <pre className="script-text">
-            {prepareEnglishScriptLikePdfInput(script)}
+            {prepareEnglishScriptForDisplay(script)}
           </pre>
           {scriptZh ? (
             <>

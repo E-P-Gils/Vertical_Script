@@ -43,6 +43,7 @@ import {
   measureRepetitionAgainstRecent,
   buildNameAnchors,
   lineHasCollapseLexicon,
+  measureVerticalEpisodeLengthBudget,
 } from "./episodeGatesCore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2798,7 +2799,7 @@ function buildCollapseRescueUserPrompt({
   }
   parts.push(`[LOGLINE] ${safeStr(logline).slice(0, 500)}`);
   parts.push(
-    "Write ONE complete episode of screenplay for the episode number above. Use the cast and logline only. Named characters only. Concrete action and dialogue. No abstract prose, no philosophy monologues, no vocabulary lists. Use standard screenplay format: scene headings (INT./EXT.), character cues in ALL CAPS, dialogue on the following line."
+    "Write ONE complete episode of screenplay for the episode number above. Use the cast and logline only. Named characters only. Concrete action and dialogue. No abstract prose, no philosophy monologues, no vocabulary lists, no stitched-in 'bonus' sequences or multi-act sagas. Short-form vertical drama only: about 2–5 tight scenes (roughly 80–200 substantive lines total, dialogue-forward). Use standard screenplay format: scene headings (INT./EXT.), character cues in ALL CAPS, dialogue on the following line."
   );
   if (blueprintContext) {
     parts.push(
@@ -4283,7 +4284,19 @@ async function runSeasonGeneration(body, res, persist) {
           }
         }
 
-        // Quality gate: prevent "synonym vomit" / context-collapse word-list runs.
+        const lengthBudget = measureVerticalEpisodeLengthBudget(episodeText);
+        if (lengthBudget.exceeds) {
+          sendStreamLine(res, {
+            type: "episode_length_gate",
+            episode: ep,
+            lines: lengthBudget.lines,
+            chars: lengthBudget.chars,
+            max_lines: lengthBudget.maxLines,
+            max_chars: lengthBudget.maxChars,
+          });
+        }
+
+        // Quality gate: prevent "synonym vomit" / context-collapse word-list runs / runaway length.
         if (hasQualityCollapse(episodeText, seriesNames)) {
           try {
             const qualityRetryContent = buildCollapseRescueUserPrompt({
@@ -5070,18 +5083,35 @@ async function runSeasonGeneration(body, res, persist) {
           const status = trErr?.status;
           // Hard quota (account out of credits) — no point continuing
           const isHardQuota = /insufficient_quota/i.test(msg) || (status === 429 && /quota/i.test(msg));
+          const placeholder = `[Episode ${epNum} — translation failed: ${msg}]`;
           try {
             sendStreamLine(res, { type: "translation_error", episode: epNum, message: msg });
             sendStreamLine(res, {
               type: "episode_zh",
               episode: epNum,
-              text: `[Episode ${epNum} — translation failed: ${msg}]`,
+              text: placeholder,
             });
           } catch (_writeErr) {
             // Client disconnected — nothing we can do, stop cleanly
             hardStop = true;
           }
+          // Must push one slot per English episode so joinEpisodeScriptsForStorage indices match
+          // episode numbers (fixes partial Chinese when a mid-season translation errors).
+          episodeZhMemo.push(placeholder);
           if (isHardQuota) hardStop = true;
+        }
+      }
+      const missing = total - episodeZhMemo.length;
+      if (missing > 0) {
+        for (let k = 0; k < missing; k++) {
+          const epNum = episodeZhMemo.length + 1;
+          const placeholder = `[Episode ${epNum} — translation not run (generation stopped early). See English episode.]`;
+          episodeZhMemo.push(placeholder);
+          try {
+            sendStreamLine(res, { type: "episode_zh", episode: epNum, text: placeholder });
+          } catch (_) {
+            /* ignore */
+          }
         }
       }
     }
@@ -5090,10 +5120,11 @@ async function runSeasonGeneration(body, res, persist) {
       try {
         const fullEn = joinEpisodeScriptsForStorage(episodeScriptsMemo);
         const fullZh = wantZh && episodeZhMemo.length ? joinEpisodeScriptsForStorage(episodeZhMemo) : "";
+        const doneActual = episodeScriptsMemo.length;
         await markScriptComplete(persist.scriptId, persist.userId, {
           english_text: fullEn,
           chinese_text: fullZh,
-          episode_done: episodeCount,
+          episode_done: doneActual,
         });
       } catch (ce) {
         console.warn("markScriptComplete:", ce?.message || ce);

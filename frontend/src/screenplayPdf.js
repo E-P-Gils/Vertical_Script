@@ -57,9 +57,17 @@ export function prepareChineseScriptLikePdfInput(script) {
 }
 
 /**
- * English PDF input + display: same normalization, punctuation, Latin-1 window, and
- * conservative glue repair as `buildScreenplayPdfBytes` uses before layout.
- * (Sentence-case softening of shouty dialogue is still PDF-only during line typing.)
+ * English on-screen display: preserve full UTF-8 from the server (em dashes, smart quotes, etc.).
+ * `prepareEnglishScriptLikePdfInput` strips non–Latin-1 for Courier PDF layout — use that only in PDF paths.
+ */
+export function prepareEnglishScriptForDisplay(script) {
+  if (!script || typeof script !== "string") return script;
+  return normalizeWhitespaceForPdf(script);
+}
+
+/**
+ * English PDF input: normalization, Latin-1 window, and glue repair for `buildScreenplayPdfBytes` (Courier).
+ * Do not use this for in-browser script preview — use `prepareEnglishScriptForDisplay` so nothing is silently dropped.
  */
 export function prepareEnglishScriptLikePdfInput(script) {
   if (!script || typeof script !== "string") return script;

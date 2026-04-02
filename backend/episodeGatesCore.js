@@ -49,6 +49,33 @@ export function lineHasCollapseLexicon(line) {
   return COLLAPSE_TECH_LEXICON.test(line) || COLLAPSE_ABSTRACT_LEXICON.test(line);
 }
 
+/**
+ * Vertical episodes target ~2–5 short scenes; runaway models can emit hundreds of lines of
+ * monologue, lists, or stitched “bonus” acts. Tie-breakers: count non-empty lines and raw UTF-8 length.
+ * When exceeded, `hasQualityCollapse` is true → server runs the existing collapse rescue (fresh tight episode).
+ */
+export function measureVerticalEpisodeLengthBudget(text) {
+  const enabled =
+    String(process.env.EPISODE_LENGTH_GATE_ENABLED ?? "true").trim().toLowerCase() !== "false";
+  const maxLines = Math.max(
+    80,
+    Math.min(800, parseInt(process.env.EPISODE_MAX_NONEMPTY_LINES || "260", 10) || 260)
+  );
+  const maxChars = Math.max(
+    6000,
+    Math.min(200000, parseInt(process.env.EPISODE_MAX_CHARS || "24000", 10) || 24000)
+  );
+  const raw = safeStr(text);
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).length;
+  const chars = raw.length;
+  const exceeds = enabled && (lines > maxLines || chars > maxChars);
+  return { enabled, lines, chars, maxLines, maxChars, exceeds };
+}
+
+function looksLikeExcessiveEpisodeLength(text) {
+  return measureVerticalEpisodeLengthBudget(text).exceeds;
+}
+
 export function passesBasicFormatCheck(text) {
   if (!text || typeof text !== "string") return false;
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -225,7 +252,8 @@ export function hasQualityCollapse(text, names = null) {
     looksLikeNgramDegenerationRun(text) ||
     looksLikeLowTypeTokenRatio(text) ||
     looksLikeGzipRepetitionCollapse(text) ||
-    looksLikeCommaSpamLine(text)
+    looksLikeCommaSpamLine(text) ||
+    looksLikeExcessiveEpisodeLength(text)
   );
 }
 

@@ -11,6 +11,7 @@ import {
   passesBasicFormatCheck,
   tagEpisodeEvents,
   hasQualityCollapse,
+  measureVerticalEpisodeLengthBudget,
   detectDuplicateEpisodes,
   measureRepetitionAgainstRecent,
   extractOpeningFingerprint,
@@ -32,6 +33,15 @@ function sampleScript(extraActionLines = 24) {
 
 test("passesBasicFormatCheck: representative valid screenplay passes", () => {
   assert.equal(passesBasicFormatCheck(sampleScript(24)), true);
+});
+
+test("measureVerticalEpisodeLengthBudget: normal episode under cap", () => {
+  const m = measureVerticalEpisodeLengthBudget(sampleScript(120));
+  assert.equal(m.exceeds, false);
+});
+
+test("hasQualityCollapse: runaway length triggers length gate", () => {
+  assert.equal(hasQualityCollapse(sampleScript(280), null), true);
 });
 
 test("measureRepetitionAgainstRecent: shared long sentence triggers retry", () => {
