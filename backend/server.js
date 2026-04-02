@@ -28,6 +28,7 @@ import {
   getScriptForUser,
   listScriptsForUser,
   deleteScriptForUser,
+  markInterruptedGeneratingScripts,
 } from "./scriptsStore.js";
 import { loadDynamicMergePatterns } from "./mergePatternRegistry.js";
 import {
@@ -730,8 +731,12 @@ async function openaiBlueprintChatCreate(body) {
 }
 
 async function generateSeasonBlueprintChunked({ total, logline, genre, names, tropes }) {
-  const chunkSpan = 12;
+  // Smaller chunks = smaller JSON per response = fewer parse failures from the planner model.
+  const chunkSpan = 8;
   const numChunks = Math.ceil(total / chunkSpan);
+  console.log(
+    `[blueprint] chunked planner v2: ${total} episodes → ${numChunks} chunk(s) of up to ${chunkSpan} episodes`
+  );
   let blueprint = null;
 
   for (let ci = 0; ci < numChunks; ci++) {
@@ -921,8 +926,13 @@ async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tr
     try {
       return await generateSeasonBlueprintChunked({ total, logline, genre, names, tropes });
     } catch (chunkErr) {
-      console.warn("Chunked blueprint failed, trying single-shot:", chunkErr?.message || chunkErr);
+      console.warn(
+        "[blueprint] chunked planner failed, falling back to single-shot:",
+        chunkErr?.message || chunkErr
+      );
     }
+  } else {
+    console.log(`[blueprint] single-shot planner (${total} episodes ≤ 15)`);
   }
 
   return await generateSeasonBlueprintSingleShot({ total, logline, genre, names, tropes });
@@ -5276,12 +5286,25 @@ const start = async () => {
   try {
     await initDb();
     console.log("Postgres DB initialized.");
+    if (process.env.SKIP_STUCK_GENERATION_RESET !== "true") {
+      try {
+        const cleared = await markInterruptedGeneratingScripts();
+        if (cleared > 0) {
+          console.warn(
+            `[startup] Cleared ${cleared} orphaned "generating" script(s) (no worker after previous deploy/crash).`
+          );
+        }
+      } catch (resetErr) {
+        console.warn("[startup] Stuck-generation reset failed:", resetErr?.message || resetErr);
+      }
+    }
   } catch (e) {
     console.warn("Postgres init skipped/failed:", e?.message || e);
   }
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`Using model: ${FINETUNED_MODEL}`);
+    console.log("Blueprint: chunked planner v2 (8 eps/chunk) + single-shot fallback; log tag [blueprint]");
   });
 };
 start();

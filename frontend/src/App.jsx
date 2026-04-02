@@ -1225,7 +1225,32 @@ function App() {
       )}
 
       {page === "generate" && (
-        <div style={{ width: "100%", display: "flex", justifyContent: "center" }}>
+        <div
+          style={{
+            width: "100%",
+            maxWidth: 720,
+            margin: "0 auto",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "1rem",
+          }}
+        >
+          <div className="generate-page-hint">
+            <p className="generate-page-hint-en">
+              Once your generation begins it will proceed on the backend. Please keep the browser tab open. If
+              you accidentally close the tab you can reopen the page and resume generating by visiting{" "}
+              <strong>My Scripts</strong> and reloading the page. Keep the browser tab open while translating the
+              script to Chinese. It takes around 50 minutes to generate a script, and 10 minutes to translate it.
+              You can generate multiple scripts at a time.
+            </p>
+            <p className="generate-page-hint-zh">
+              生成开始后会由服务器在后台继续执行。请尽量保持浏览器标签页打开。若不慎关闭标签页，可重新打开页面，进入
+              <strong>我的剧本</strong>
+              并刷新页面以继续查看生成进度。将剧本翻译为简体中文时，也请保持标签页打开。完整生成一部剧本大约需要 50
+              分钟，翻译约需 10 分钟。您可以同时生成多部剧本。
+            </p>
+          </div>
           <button
             type="button"
             className="btn-open"

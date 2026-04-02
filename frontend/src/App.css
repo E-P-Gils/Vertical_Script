@@ -477,6 +477,27 @@
 .ip-note-zh {
   margin: 0.25rem 0 0;
 }
+.generate-page-hint {
+  width: 100%;
+  max-width: 640px;
+  padding: 0.85rem 1rem;
+  margin: 0;
+  background: rgba(26, 26, 29, 0.65);
+  border: 1px solid var(--steel-light);
+  border-radius: 8px;
+  color: var(--cream);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  text-align: left;
+}
+.generate-page-hint-en {
+  margin: 0;
+  opacity: 0.95;
+}
+.generate-page-hint-zh {
+  margin: 0.65rem 0 0;
+  opacity: 0.92;
+}
 .modal-actions {
   display: flex;
   gap: 0.75rem;

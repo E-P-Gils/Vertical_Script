@@ -92,3 +92,23 @@ export async function deleteScriptForUser(scriptId, userId) {
   );
   return r.rowCount > 0;
 }
+
+/**
+ * Background generation runs in-process. After a deploy or crash, rows stay status=generating
+ * but nothing is running — mark them failed so the UI and users are not misled.
+ */
+export async function markInterruptedGeneratingScripts() {
+  const pool = getPool();
+  const msg =
+    "Generation stopped when the server restarted (deploy or instance restart). " +
+    "Any episodes already saved are still in this script; start a new generation for a full 60-episode run.";
+  const r = await pool.query(
+    `UPDATE saved_scripts SET
+       status = 'failed',
+       error_message = $1,
+       updated_at = NOW()
+     WHERE status = 'generating'`,
+    [msg.slice(0, 2000)]
+  );
+  return r.rowCount;
+}
