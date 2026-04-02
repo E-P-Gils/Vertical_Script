@@ -1,0 +1,18 @@
+# Optional local Postgres for background generation (tab can close; job persists).
+# Usage: docker compose up -d
+# Then set in root .env: DATABASE_URL=postgres://vertical:vertical@localhost:5432/vertical_script
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vertical
+      POSTGRES_PASSWORD: vertical
+      POSTGRES_DB: vertical_script
+    ports:
+      - "5432:5432"
+    volumes:
+      - vertical_script_pg:/var/lib/postgresql/data
+
+volumes:
+  vertical_script_pg:

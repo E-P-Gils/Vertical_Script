@@ -27,6 +27,7 @@ import {
   markScriptComplete,
   getScriptForUser,
   listScriptsForUser,
+  deleteScriptForUser,
 } from "./scriptsStore.js";
 import { loadDynamicMergePatterns } from "./mergePatternRegistry.js";
 import {
@@ -3333,6 +3334,22 @@ app.get("/scripts/:id", requireAuth, async (req, res) => {
   } catch (e) {
     console.error("getScriptForUser:", e);
     return res.status(500).json({ error: "Failed to load script" });
+  }
+});
+
+app.delete("/scripts/:id", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({ error: "Auth not enabled" });
+  }
+  const userId = Number(req.auth?.sub);
+  if (!Number.isFinite(userId)) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const ok = await deleteScriptForUser(req.params.id, userId);
+    if (!ok) return res.status(404).json({ error: "Not found" });
+    return res.status(204).end();
+  } catch (e) {
+    console.error("deleteScriptForUser:", e);
+    return res.status(500).json({ error: "Failed to delete script" });
   }
 });
 

@@ -83,3 +83,12 @@ export async function listScriptsForUser(userId, limit = 50) {
   );
   return r.rows;
 }
+
+export async function deleteScriptForUser(scriptId, userId) {
+  const pool = getPool();
+  const r = await pool.query(
+    `DELETE FROM saved_scripts WHERE id = $1::uuid AND user_id = $2 RETURNING id`,
+    [scriptId, userId]
+  );
+  return r.rowCount > 0;
+}

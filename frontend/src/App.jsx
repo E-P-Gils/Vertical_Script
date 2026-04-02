@@ -10,6 +10,21 @@ import "./App.css";
 // If you want the hosted Render backend, set VITE_API_BASE to `https://vertical-script.onrender.com`.
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
+/** List label: "{genre} Script generated on {date}" (genre omitted if empty). */
+function formatMyScriptListTitle(genreName, createdAtIso) {
+  const d = new Date(createdAtIso);
+  const dateStr = Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  const g = String(genreName || "").trim();
+  const prefix = g ? `${g} ` : "";
+  return `${prefix}Script generated on ${dateStr || "unknown date"}`;
+}
+
+function isServerBackedScriptId(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ""));
+}
+
 function mapServerListRowToItem(row, prevItem) {
   const created =
     row.created_at instanceof Date
@@ -18,7 +33,7 @@ function mapServerListRowToItem(row, prevItem) {
   return {
     id: row.id,
     createdAt: created,
-    title: String(row.title || prevItem?.title || "Generated Script").trim() || "Generated Script",
+    title: formatMyScriptListTitle(row.genre, created),
     genre: String(row.genre || prevItem?.genre || "").trim(),
     summary: String(row.summary || prevItem?.summary || "").trim(),
     englishText: prevItem?.englishText || "",
@@ -82,7 +97,7 @@ function App() {
         ? parsed.map((it, idx) => ({
             id: it?.id || `legacy_${idx}_${Date.now()}`,
             createdAt: it?.createdAt || new Date().toISOString(),
-            title: String(it?.title || "Generated Script").trim() || "Generated Script",
+            title: formatMyScriptListTitle(it?.genre, it?.createdAt || new Date().toISOString()),
             genre: String(it?.genre || "").trim(),
             summary: String(it?.summary || "").trim(),
             englishText: String(it?.englishText || "").trim(),
@@ -94,6 +109,8 @@ function App() {
     }
   });
   const [activeScriptId, setActiveScriptId] = useState(null);
+  const [deletePromptItem, setDeletePromptItem] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
   const pollIntervalRef = useRef(null);
   const activeScriptIdRef = useRef(activeScriptId);
 
@@ -118,6 +135,15 @@ function App() {
             it.id === id
               ? {
                   ...it,
+                  title: formatMyScriptListTitle(row.genre || it.genre, row.created_at || it.createdAt),
+                  genre: String(row.genre || it.genre || "").trim(),
+                  summary: row.summary != null ? String(row.summary) : it.summary,
+                  createdAt:
+                    row.created_at != null
+                      ? row.created_at instanceof Date
+                        ? row.created_at.toISOString()
+                        : String(row.created_at)
+                      : it.createdAt,
                   englishText: row.english_text || "",
                   chineseText: row.chinese_text || "",
                   generating: row.status === "generating",
@@ -227,23 +253,16 @@ function App() {
       }
     : {};
 
-  const buildScriptTitle = (summaryText, genreName) => {
-    const s = String(summaryText || "").trim();
-    if (!s) return genreName ? `${genreName} Script` : "Generated Script";
-    const first = s.split(/[.?!\n]/)[0] || s;
-    const words = first.trim().split(/\s+/).slice(0, 8).join(" ");
-    return words ? words.replace(/[^\w\s'-]/g, "").trim() : (genreName ? `${genreName} Script` : "Generated Script");
-  };
-
   const persistGeneratedScript = (englishText, genreName, summaryText) => {
     const t = String(englishText || "").trim();
     if (!t) return;
     const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const summary = String(summaryText || "").trim();
+    const createdAt = new Date().toISOString();
     const item = {
       id,
-      createdAt: new Date().toISOString(),
-      title: buildScriptTitle(summary, genreName || genre || ""),
+      createdAt,
+      title: formatMyScriptListTitle(genreName || genre || "", createdAt),
       genre: genreName || genre || "",
       summary,
       englishText: t,
@@ -270,6 +289,37 @@ function App() {
     setActiveScriptId(item.id);
     setPage("generate");
     setModalOpen(false);
+  };
+
+  const confirmDeleteScript = async () => {
+    const it = deletePromptItem;
+    if (!it) return;
+    setDeletingId(it.id);
+    setError("");
+    try {
+      if (authToken && isServerBackedScriptId(it.id)) {
+        const r = await fetch(`${API_BASE}/scripts/${encodeURIComponent(it.id)}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          throw new Error(data.error || "Delete failed");
+        }
+      }
+      setMyScripts((prev) => prev.filter((x) => x.id !== it.id));
+      if (it.status === "generating" || it.generating) clearBackgroundPoll();
+      if (activeScriptId === it.id) {
+        setActiveScriptId(null);
+        setScript("");
+        setScriptZh("");
+      }
+      setDeletePromptItem(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const handleRegister = async (e) => {
@@ -434,11 +484,11 @@ function App() {
       if (bgRes.ok && bgRes.status === 202 && bgData.scriptId) {
         const scriptId = bgData.scriptId;
         const summary = String(bgData.summary || "").trim();
-        const title = buildScriptTitle(summary, genre);
+        const createdAt = new Date().toISOString();
         const newItem = {
           id: scriptId,
-          createdAt: new Date().toISOString(),
-          title,
+          createdAt,
+          title: formatMyScriptListTitle(genre, createdAt),
           genre,
           summary,
           englishText: "",
@@ -938,11 +988,23 @@ function App() {
               {myScripts.map((it) => {
                 const created = new Date(it.createdAt);
                 const isActive = it.id === activeScriptId;
+                const listTitle = formatMyScriptListTitle(it.genre, it.createdAt);
                 return (
                   <div key={it.id} style={{ border: "1px solid var(--steel-light)", borderRadius: 8, padding: "0.75rem", background: "rgba(26,26,29,0.35)" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
-                      <div>
-                        <div style={{ fontWeight: 700 }}>{it.title || "Generated Script"}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", alignItems: "flex-start" }}>
+                      <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                        <div className="script-card-head">
+                          <div style={{ fontWeight: 700 }}>{listTitle}</div>
+                          <button
+                            type="button"
+                            className="btn-script-delete"
+                            aria-label="Delete script"
+                            disabled={deletingId != null}
+                            onClick={() => setDeletePromptItem(it)}
+                          >
+                            ×
+                          </button>
+                        </div>
                         <div style={{ opacity: 0.95, fontSize: "0.9rem", marginTop: "0.1rem" }}>
                           Genre / 类型: {it.genre || "N/A"}
                         </div>
@@ -1240,6 +1302,41 @@ function App() {
           </p>
         </div>
       </footer>
+
+      {deletePromptItem && (
+        <div
+          className="modal-backdrop"
+          onClick={() => deletingId == null && setDeletePromptItem(null)}
+        >
+          <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <h2 className="modal-title">Delete script / 删除剧本</h2>
+            <p style={{ marginTop: 0, lineHeight: 1.5 }}>
+              Are you sure you want to delete this script?
+            </p>
+            <p style={{ marginTop: "0.5rem", lineHeight: 1.5, opacity: 0.95 }}>
+              您确定要删除此剧本吗？
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={deletingId != null}
+                onClick={() => setDeletePromptItem(null)}
+              >
+                Cancel / 取消
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={deletingId != null}
+                onClick={() => void confirmDeleteScript()}
+              >
+                Delete / 删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {page === "generate" && modalOpen && (
         <div className="modal-backdrop" onClick={() => !loading && setModalOpen(false)}>

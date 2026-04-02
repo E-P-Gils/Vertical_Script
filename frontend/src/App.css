@@ -507,3 +507,40 @@
 .btn-primary:hover:not(:disabled) {
   background: var(--blood-light);
 }
+.btn-danger {
+  background: #6b1515;
+  color: var(--cream);
+  border: 1px solid var(--blood-pale);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--blood-dark);
+}
+.script-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.btn-script-delete {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  line-height: 1;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--cream);
+  background: transparent;
+  border: 1px solid var(--steel-light);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-script-delete:hover:not(:disabled) {
+  background: rgba(139, 32, 32, 0.35);
+  border-color: var(--blood-pale);
+}
+.btn-script-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
