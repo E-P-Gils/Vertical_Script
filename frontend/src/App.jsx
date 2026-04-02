@@ -179,11 +179,22 @@ function App() {
           const row = pd.script;
           if (!row) return;
           const st = applyPolledScript(row);
-          if (st === "complete" || st === "failed") {
+          const targetEp = row.episode_target || 60;
+          const doneEp = row.episode_done ?? 0;
+          if (st === "failed") {
             clearBackgroundPoll();
             setProgress({ episode: 0, total: 0, phase: "generating" });
-            if (st === "failed") setError(row.error_message || "Generation failed");
-            else setModalOpen(false);
+            setError(row.error_message || "Generation failed");
+          } else if (st === "complete" && doneEp >= targetEp) {
+            clearBackgroundPoll();
+            setProgress({ episode: 0, total: 0, phase: "generating" });
+            setModalOpen(false);
+          } else if (st === "complete" && doneEp < targetEp) {
+            clearBackgroundPoll();
+            setProgress({ episode: 0, total: 0, phase: "generating" });
+            setError(
+              `Generation finished on the server with only ${doneEp} of ${targetEp} episodes saved. Open My Scripts to inspect, or delete and start again. / 服务器仅保存了 ${doneEp}/${targetEp} 集。请在「我的剧本」中查看或删除后重试。`
+            );
           }
         } catch {
           /* ignore */

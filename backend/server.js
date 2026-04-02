@@ -418,6 +418,18 @@ Finale shaping:
 
 Output only valid JSON. No commentary before or after.`;
 
+/** Continuation chunks: only the episodes array; first chunk carries series + characters. */
+const BLUEPRINT_CHUNK_CONTINUE_SYSTEM_PROMPT = `You are a season planner for female-led vertical romance dramas, continuing the SAME series outline.
+
+Return ONE JSON object with a single top-level key: "episodes".
+
+"episodes" must be an array of episode plan objects. Each object MUST include:
+episode (number), arc_phase, title, setting_focus, emotional_focus, heroine_state, male1_state, male2_state, main_conflict, key_events (array of strings), twist_or_reveal, cliffhanger_type, cliffhanger, hook_type, conflict_type, unique_scene, micro_beats (array of exactly 4 strings).
+
+arc_phase: episodes 1–5 "hook", 6–20 "escalation", 21–40 "turning_point", 41–55 "endgame", 56+ "finale".
+
+Valid JSON only — no markdown, no prose outside the object.`;
+
 function buildBlueprintPrompt({ logline, names, genre, episodeCount, tropes }) {
   const total = Math.max(1, Math.min(120, episodeCount || 60));
   const heroine = (names && names.heroine) || "EMMA LIN";
@@ -499,21 +511,34 @@ function extractFirstBalancedJsonObject(text) {
 function parseBlueprintFromContent(content) {
   let raw = (content || "").trim();
   raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+
+  const tryParseObject = (s) => {
+    try {
+      const parsed = JSON.parse(s);
+      if (parsed && Array.isArray(parsed.episodes) && parsed.episodes.length > 0) return parsed;
+    } catch (_) {}
+    return null;
+  };
+
+  const repaired = raw
+    .replace(/[\u201C\u201D\u2018\u2019]/g, '"')
+    .replace(/,\s*([\]}])/g, "$1");
+  const direct = tryParseObject(raw) || tryParseObject(repaired);
+  if (direct) return direct;
+
   const candidates = [];
   const balanced = extractFirstBalancedJsonObject(raw);
   if (balanced) candidates.push(balanced);
+  const balancedRep = extractFirstBalancedJsonObject(repaired);
+  if (balancedRep && balancedRep !== balanced) candidates.push(balancedRep);
   const greedy = raw.match(/\{[\s\S]*\}/);
   if (greedy && greedy[0] !== balanced) candidates.push(greedy[0]);
   if (!candidates.length && raw.startsWith("{")) candidates.push(raw);
 
   for (const cand of candidates) {
     if (!cand) continue;
-    try {
-      const parsed = JSON.parse(cand);
-      if (parsed && Array.isArray(parsed.episodes) && parsed.episodes.length > 0) return parsed;
-    } catch (_) {
-      /* try next candidate */
-    }
+    const p = tryParseObject(cand) || tryParseObject(cand.replace(/,\s*([\]}])/g, "$1"));
+    if (p) return p;
   }
   return null;
 }
@@ -678,8 +703,148 @@ async function generateGenreStyleNotes({ genre, logline }) {
   }
 }
 
-async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tropes }) {
-  const total = Math.max(1, Math.min(120, episodeCount || 60));
+function normalizeBlueprintEpisodeChunk(eps, start, end) {
+  if (!Array.isArray(eps)) return null;
+  const need = end - start + 1;
+  if (eps.length < need) return null;
+  const slice = eps.slice(0, need);
+  for (let i = 0; i < slice.length; i++) {
+    const exp = start + i;
+    if (!slice[i] || typeof slice[i] !== "object") return null;
+    slice[i] = { ...slice[i], episode: exp };
+  }
+  return slice;
+}
+
+async function openaiBlueprintChatCreate(body) {
+  const withJson = { ...body, response_format: { type: "json_object" } };
+  try {
+    return await openai.chat.completions.create(withJson);
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (/response_format|json_object|unsupported|json mode/i.test(msg)) {
+      return await openai.chat.completions.create(body);
+    }
+    throw err;
+  }
+}
+
+async function generateSeasonBlueprintChunked({ total, logline, genre, names, tropes }) {
+  const chunkSpan = 12;
+  const numChunks = Math.ceil(total / chunkSpan);
+  let blueprint = null;
+
+  for (let ci = 0; ci < numChunks; ci++) {
+    const start = ci * chunkSpan + 1;
+    const end = Math.min((ci + 1) * chunkSpan, total);
+    const count = end - start + 1;
+    const isFirst = ci === 0;
+
+    let chunkOk = false;
+    let lastChunkErr = /** @type {Error | null} */ (null);
+
+    for (let attempt = 1; attempt <= 4 && !chunkOk; attempt++) {
+      const userContent = isFirst
+        ? buildBlueprintPrompt({ logline, names, genre, episodeCount: total, tropes }) +
+          `\n\nReturn ONE JSON object with keys: series_title, heroine, male1, male2, genre, tropes, characters (exactly 3 entries), episodes.\n` +
+          `CRITICAL: "episodes" MUST contain exactly ${count} objects — episode numbers ${start} through ${end} only (not the full ${total}-episode season).\n` +
+          `Each episode object must follow the full per-episode schema (including micro_beats with exactly 4 strings).\n` +
+          (attempt > 1
+            ? `\n(Attempt ${attempt}/4: reply was invalid or wrong length. Valid JSON only; exactly ${count} episodes.)`
+            : "")
+        : [
+            `[CONTINUE SAME SERIES] [GENRE=${String(genre || "Romance").trim() || "Romance"}] [TOTAL_EPISODES=${total}]`,
+            `[HEROINE=${(names && names.heroine) || "HEROINE"}] [MALE1=${(names && names.coldCeo) || "MALE1"}] [MALE2=${(names && names.warmFriend) || "MALE2"}]`,
+            `[LOGLINE] ${safeStr(logline).slice(0, 1200)}`,
+            "",
+            `Return JSON with ONLY the key "episodes": an array of exactly ${count} objects for episodes ${start} through ${end} inclusive.`,
+            `Use the same per-episode fields as the season planner (episode, arc_phase, title, setting_focus, emotional_focus, heroine_state, male1_state, male2_state, main_conflict, key_events, twist_or_reveal, cliffhanger_type, cliffhanger, hook_type, conflict_type, unique_scene, micro_beats[4]).`,
+            attempt > 1
+              ? `\n(Attempt ${attempt}/4: valid JSON only; exactly ${count} episodes in order.)`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n");
+
+      const maxTok = Math.min(16384, Math.max(4096, count * 520));
+
+      try {
+        const completion = await openaiBlueprintChatCreate({
+          model: PLANNER_MODEL,
+          messages: [
+            {
+              role: "system",
+              content: isFirst
+                ? `${BLUEPRINT_SYSTEM_PROMPT}\n\nWhen the user asks for a partial episode range, still include every required top-level key; only limit the "episodes" array to that range.`
+                : BLUEPRINT_CHUNK_CONTINUE_SYSTEM_PROMPT,
+            },
+            { role: "user", content: userContent },
+          ],
+          max_tokens: maxTok,
+          temperature: attempt <= 2 ? 0.4 : 0.18,
+          frequency_penalty: 0.35,
+          presence_penalty: 0.08,
+        });
+
+        const finish = completion.choices?.[0]?.finish_reason;
+        if (finish === "length") {
+          console.warn(
+            `Blueprint chunk ${ci + 1}/${numChunks} attempt ${attempt}/4: truncated (max_tokens=${maxTok})`
+          );
+        }
+
+        const content = safeStr(completion.choices?.[0]?.message?.content).trim();
+        let parsed = null;
+        try {
+          parsed = JSON.parse(content);
+        } catch {
+          parsed = parseBlueprintFromContent(content);
+        }
+
+        if (!parsed || !Array.isArray(parsed.episodes)) {
+          lastChunkErr = new Error("invalid JSON structure");
+          console.warn(
+            `Blueprint chunk ${ci + 1}/${numChunks} attempt ${attempt}/4: parse failed (len=${content.length})`
+          );
+          continue;
+        }
+
+        const norm = normalizeBlueprintEpisodeChunk(parsed.episodes, start, end);
+        if (!norm) {
+          lastChunkErr = new Error(`expected ${count} episodes, got ${parsed.episodes.length}`);
+          console.warn(`Blueprint chunk ${ci + 1}/${numChunks} attempt ${attempt}/4: ${lastChunkErr.message}`);
+          continue;
+        }
+
+        if (isFirst) {
+          blueprint = parsed;
+          blueprint.episodes = norm;
+        } else {
+          blueprint.episodes.push(...norm);
+        }
+        chunkOk = true;
+      } catch (err) {
+        lastChunkErr = err instanceof Error ? err : new Error(String(err));
+        console.warn(`Blueprint chunk ${ci + 1}/${numChunks} attempt ${attempt}/4:`, lastChunkErr.message);
+      }
+    }
+
+    if (!chunkOk) {
+      throw lastChunkErr || new Error(`Blueprint chunk ${start}-${end} failed`);
+    }
+  }
+
+  if (!blueprint || !Array.isArray(blueprint.episodes) || blueprint.episodes.length !== total) {
+    throw new Error(
+      `Blueprint merge mismatch: have ${blueprint?.episodes?.length ?? 0} episodes, need ${total}`
+    );
+  }
+
+  hydrateBlueprintCharactersFromNames(blueprint, names);
+  return blueprint;
+}
+
+async function generateSeasonBlueprintSingleShot({ total, logline, genre, names, tropes }) {
   const userContentBase = buildBlueprintPrompt({
     logline,
     names,
@@ -687,58 +852,51 @@ async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tr
     episodeCount: total,
     tropes,
   });
-
-  // 60-episode blueprints are large; 4096 tokens often truncates mid-JSON and breaks parsing.
   const blueprintMaxTokens = Math.min(16384, Math.max(8192, total * 150));
-
   let lastError = /** @type {Error | null} */ (null);
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     const retryHint =
       attempt > 1
-        ? `\n\nRetry ${attempt}/3: Your previous reply was invalid JSON, truncated, or had fewer than ${total} episodes. ` +
-          `Reply with ONE JSON object only — no markdown fences, no commentary. ` +
-          `The "episodes" array MUST contain exactly ${total} objects in order (episode 1 … ${total}).`
+        ? `\n\nRetry ${attempt}/3: Invalid JSON or wrong episode count. ONE JSON object only. "episodes" must have exactly ${total} entries.`
         : "";
 
     try {
-      const completion = await openai.chat.completions.create({
+      const completion = await openaiBlueprintChatCreate({
         model: PLANNER_MODEL,
         messages: [
           { role: "system", content: BLUEPRINT_SYSTEM_PROMPT },
           { role: "user", content: userContentBase + retryHint },
         ],
         max_tokens: blueprintMaxTokens,
-        temperature: attempt === 1 ? 0.55 : 0.22,
-        frequency_penalty: 0.7,
-        presence_penalty: 0.1,
+        temperature: attempt === 1 ? 0.5 : 0.2,
+        frequency_penalty: 0.4,
+        presence_penalty: 0.08,
       });
 
       const choice = completion.choices?.[0];
-      const finish = choice?.finish_reason;
-      if (finish === "length") {
+      if (choice?.finish_reason === "length") {
         console.warn(
-          `Blueprint attempt ${attempt}/3: response truncated (finish_reason=length, max_tokens=${blueprintMaxTokens})`
+          `Blueprint single-shot attempt ${attempt}/3: truncated (max_tokens=${blueprintMaxTokens})`
         );
       }
 
-      const rawContent = choice?.message?.content;
-      const content =
-        typeof rawContent === "string" && rawContent.trim()
-          ? rawContent.trim()
-          : "";
+      const content = safeStr(choice?.message?.content).trim();
+      let blueprint = null;
+      try {
+        blueprint = JSON.parse(content);
+      } catch {
+        blueprint = parseBlueprintFromContent(content);
+      }
 
-      const blueprint = parseBlueprintFromContent(content);
       if (!blueprint || !Array.isArray(blueprint.episodes)) {
         lastError = new Error("Failed to parse season blueprint JSON");
-        console.warn(`Blueprint attempt ${attempt}/3: JSON parse failed (content length ${content.length})`);
+        console.warn(`Blueprint single-shot attempt ${attempt}/3: parse failed (len=${content.length})`);
         continue;
       }
       if (blueprint.episodes.length < total) {
-        lastError = new Error(
-          `Blueprint has ${blueprint.episodes.length} episodes; need ${total}`
-        );
-        console.warn(`Blueprint attempt ${attempt}/3: ${lastError.message}`);
+        lastError = new Error(`Blueprint has ${blueprint.episodes.length} episodes; need ${total}`);
+        console.warn(`Blueprint single-shot attempt ${attempt}/3: ${lastError.message}`);
         continue;
       }
       if (blueprint.episodes.length > total) {
@@ -749,11 +907,25 @@ async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tr
       return blueprint;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      console.warn(`Blueprint attempt ${attempt}/3:`, lastError.message);
+      console.warn(`Blueprint single-shot attempt ${attempt}/3:`, lastError.message);
     }
   }
 
   throw lastError || new Error("Failed to parse season blueprint JSON");
+}
+
+async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tropes }) {
+  const total = Math.max(1, Math.min(120, episodeCount || 60));
+
+  if (total > 15) {
+    try {
+      return await generateSeasonBlueprintChunked({ total, logline, genre, names, tropes });
+    } catch (chunkErr) {
+      console.warn("Chunked blueprint failed, trying single-shot:", chunkErr?.message || chunkErr);
+    }
+  }
+
+  return await generateSeasonBlueprintSingleShot({ total, logline, genre, names, tropes });
 }
 
 const EPISODE_SUMMARY_SYSTEM_PROMPT = `You are a story planner for female-led vertical romance dramas.
