@@ -11,6 +11,38 @@ import "./App.css";
 // If you want the hosted Render backend, set VITE_API_BASE to `https://vertical-script.onrender.com`.
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
+/**
+ * List route omits english_text/chinese_text. Without this, only the actively polled script
+ * gets bodies merged — concurrent background jobs stay empty or stuck on stale partial text.
+ */
+async function attachFullTextToCompleteRows(rows, fetchDetail, maxScripts = 10) {
+  if (!Array.isArray(rows) || typeof fetchDetail !== "function") return rows;
+  const complete = rows.filter((r) => r && r.status === "complete").slice(0, maxScripts);
+  if (!complete.length) return rows;
+  const results = await Promise.all(complete.map((r) => fetchDetail(r.id)));
+  const byId = new Map();
+  complete.forEach((r, i) => {
+    const d = results[i];
+    if (d) byId.set(r.id, d);
+  });
+  if (!byId.size) return rows;
+  return rows.map((r) => {
+    const d = byId.get(r.id);
+    if (!d) return r;
+    return {
+      ...r,
+      english_text: d.english_text,
+      chinese_text: d.chinese_text,
+      status: d.status ?? r.status,
+      episode_done: d.episode_done ?? r.episode_done,
+      episode_target: d.episode_target ?? r.episode_target,
+      error_message: d.error_message ?? r.error_message,
+      genre: d.genre ?? r.genre,
+      summary: d.summary ?? r.summary,
+    };
+  });
+}
+
 /** List label: "{genre} Script generated on {date}" (genre omitted if empty). */
 function formatMyScriptListTitle(genreName, createdAtIso) {
   const d = new Date(createdAtIso);
@@ -250,10 +282,15 @@ function App() {
             }
           }
 
+          const anyGenerating = rows.some((r) => r.status === "generating");
+          rows = await attachFullTextToCompleteRows(
+            rows,
+            fetchScriptDetail,
+            anyGenerating ? 6 : 10
+          );
+
           applyPolledRows(rows);
 
-          // Keep polling while ANY script is still generating (supports multiple concurrent generations).
-          const anyGenerating = rows.some((r) => r.status === "generating");
           if (!anyGenerating) {
             clearBackgroundPoll();
             setProgress({ episode: 0, total: 0, phase: "generating" });
@@ -301,7 +338,11 @@ function App() {
         });
         if (!r.ok || cancelled) return;
         const data = await r.json();
-        const rows = Array.isArray(data.scripts) ? data.scripts : [];
+        let rows = Array.isArray(data.scripts) ? data.scripts : [];
+        if (!cancelled && rows.length) {
+          rows = await attachFullTextToCompleteRows(rows, fetchScriptDetail, 10);
+        }
+        if (cancelled) return;
         setMyScripts((prev) => {
           const prevById = new Map(prev.map((x) => [x.id, x]));
           const serverIds = new Set(rows.map((row) => row.id));
@@ -318,7 +359,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [authToken, scheduleProgressPoll]);
+  }, [authToken, scheduleProgressPoll, fetchScriptDetail]);
 
   const authHeaders = authToken
     ? {
