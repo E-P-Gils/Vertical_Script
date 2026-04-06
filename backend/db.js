@@ -68,6 +68,22 @@ export async function initDb() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code_hash TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ;`);
 
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_tier TEXT NOT NULL DEFAULT 'free';`);
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'users_plan_tier_check'
+      ) THEN
+        ALTER TABLE users ADD CONSTRAINT users_plan_tier_check
+          CHECK (plan_tier IN ('free', 'starter', 'professional', 'business'));
+      END IF;
+    END $$;
+  `);
+
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS script_credits INTEGER NOT NULL DEFAULT 0;`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS saved_scripts (
       id UUID PRIMARY KEY,

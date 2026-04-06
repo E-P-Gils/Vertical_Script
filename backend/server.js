@@ -20,6 +20,7 @@ import { fixMergedWordIssuesPhase2, fixMergedWordIssuesPhase2Detailed } from "./
 import { auditMergedWords } from "./mergedWordsAudit.js";
 import { initDb } from "./db.js";
 import { loginUser, registerUser, requireAuth, verifyEmailCode, isJwtAuthEnabled } from "./auth.js";
+import { getUserPlanRow, setUserPlanTierByUserId, PLAN_TIERS } from "./userPlan.js";
 import {
   createGeneratingScript,
   updateScriptProgress,
@@ -3492,6 +3493,35 @@ function pickReplacementNameForVictor() {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+const SCRIPT_CREDITS_REQUIRED_ERROR =
+  "Purchase credits to generate a script! / 购买剧本额度后方可生成剧本！";
+
+/** When JWT auth is on, require at least 1 script credit. Returns true if the response was already sent. */
+async function rejectIfNoScriptCredits(req, res) {
+  if (!isJwtAuthEnabled()) return false;
+  const uid = Number(req.auth?.sub);
+  if (!Number.isFinite(uid)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return true;
+  }
+  try {
+    const row = await getUserPlanRow(uid);
+    if (!row) {
+      res.status(403).json({ error: "Account not found." });
+      return true;
+    }
+    if (Number(row.script_credits ?? 0) < 1) {
+      res.status(403).json({ error: SCRIPT_CREDITS_REQUIRED_ERROR });
+      return true;
+    }
+  } catch (e) {
+    console.error("rejectIfNoScriptCredits:", e);
+    res.status(500).json({ error: "Could not verify script credits." });
+    return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Auth (optional) - bcrypt + Postgres + JWT bearer
 // Enable by setting:
@@ -3503,7 +3533,62 @@ app.post("/auth/register", (req, res) => registerUser(req, res));
 app.post("/auth/login", (req, res) => loginUser(req, res));
 app.post("/auth/confirm-email", (req, res) => verifyEmailCode(req, res));
 
+app.get("/plan-tiers", (_req, res) => {
+  res.json({ planTiers: [...PLAN_TIERS] });
+});
+
+app.get("/me", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) return res.json({ user: null });
+  try {
+    const uid = Number(req.auth?.sub);
+    if (!Number.isFinite(uid)) return res.status(401).json({ error: "Unauthorized" });
+    const row = await getUserPlanRow(uid);
+    if (!row) return res.status(404).json({ error: "user not found" });
+    res.json({
+      user: {
+        id: row.id,
+        email: row.email,
+        planTier: row.plan_tier,
+        scriptCredits: Number(row.script_credits ?? 0),
+      },
+    });
+  } catch (e) {
+    console.error("GET /me:", e);
+    res.status(500).json({ error: e.message || "failed" });
+  }
+});
+
+/**
+ * Ops / future Stripe webhooks: set a user's plan tier.
+ * Header: X-Plan-Assign-Secret must match env PLAN_ASSIGN_SECRET (min 8 chars).
+ * Body: { "planTier": "free" | "starter" | "professional" | "business" }
+ */
+app.put("/users/:id/plan-tier", async (req, res) => {
+  const secret = process.env.PLAN_ASSIGN_SECRET;
+  if (!secret || String(secret).length < 8) {
+    return res.status(503).json({
+      error: "Plan assignment is not configured. Set PLAN_ASSIGN_SECRET on the server.",
+    });
+  }
+  if (String(req.headers["x-plan-assign-secret"] || "") !== secret) {
+    return res.status(401).json({ error: "Invalid or missing X-Plan-Assign-Secret header" });
+  }
+  try {
+    const tier = req.body?.planTier ?? req.body?.plan_tier;
+    const updated = await setUserPlanTierByUserId(req.params.id, tier);
+    res.json({
+      ok: true,
+      user: { id: updated.id, email: updated.email, planTier: updated.plan_tier },
+    });
+  } catch (e) {
+    const msg = e?.message || "failed";
+    const status = msg.includes("not found") ? 404 : msg.includes("Invalid plan") ? 400 : 500;
+    res.status(status).json({ error: msg });
+  }
+});
+
 app.post("/generate", requireAuth, async (req, res) => {
+  if (await rejectIfNoScriptCredits(req, res)) return;
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
@@ -3535,6 +3620,7 @@ app.post("/generate/background", requireAuth, async (req, res) => {
   if (!Number.isFinite(userId)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
+  if (await rejectIfNoScriptCredits(req, res)) return;
   const body = req.body || {};
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
   const genre = String(body.genre || "Romance").trim() || "Romance";

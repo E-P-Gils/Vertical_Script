@@ -11,6 +11,9 @@ import "./App.css";
 // If you want the hosted Render backend, set VITE_API_BASE to `https://vertical-script.onrender.com`.
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
+const SCRIPT_CREDITS_REQUIRED_MSG =
+  "Purchase credits to generate a script! / 购买剧本额度后方可生成剧本！";
+
 /**
  * List route omits english_text/chinese_text. Without this, only the actively polled script
  * gets bodies merged — concurrent background jobs stay empty or stuck on stale partial text.
@@ -121,6 +124,9 @@ function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authConfirmPassword, setAuthConfirmPassword] = useState("");
   const [authMode, setAuthMode] = useState("register"); // register | login
+
+  /** From GET /me — prepaid / grant script generations (not decremented by this app yet). */
+  const [scriptCredits, setScriptCredits] = useState(null);
 
   const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts
   const [myScripts, setMyScripts] = useState(() => {
@@ -325,6 +331,31 @@ function App() {
   }, [authToken]);
 
   useEffect(() => {
+    if (!authToken) {
+      setScriptCredits(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/me`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!r.ok || cancelled) return;
+        const d = await r.json().catch(() => ({}));
+        if (cancelled || !d.user) return;
+        const n = d.user.scriptCredits;
+        setScriptCredits(typeof n === "number" && Number.isFinite(n) ? n : 0);
+      } catch {
+        if (!cancelled) setScriptCredits(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken]);
+
+  useEffect(() => {
     return () => clearBackgroundPoll();
   }, []);
 
@@ -520,6 +551,9 @@ function App() {
       try {
         localStorage.setItem("authToken", loginData.token);
       } catch {}
+      if (typeof loginData.scriptCredits === "number" && Number.isFinite(loginData.scriptCredits)) {
+        setScriptCredits(loginData.scriptCredits);
+      }
 
       setAuthConfirmPassword("");
       setError("");
@@ -565,6 +599,9 @@ function App() {
       try {
         localStorage.setItem("authToken", data.token);
       } catch {}
+      if (typeof data.scriptCredits === "number" && Number.isFinite(data.scriptCredits)) {
+        setScriptCredits(data.scriptCredits);
+      }
       setAuthMode("login");
       setError("");
       setPage("generate");
@@ -591,6 +628,18 @@ function App() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!genre) return;
+    if (authToken) {
+      if (scriptCredits === null) {
+        setError(
+          "Loading your account… Please wait and try again. / 正在加载账户信息，请稍后再试。"
+        );
+        return;
+      }
+      if (scriptCredits < 1) {
+        setError(SCRIPT_CREDITS_REQUIRED_MSG);
+        return;
+      }
+    }
     setError("");
     setScript("");
     setScriptZh("");
@@ -661,7 +710,10 @@ function App() {
         setLoading(false);
         setProgress({ episode: 0, total: 0, phase: "generating" });
         if (bgRes.status === 401 || bgRes.status === 403) {
-          setError("Please register and verify your email, then log in again.");
+          setError(
+            errMsg ||
+              "Please register and verify your email, then log in again."
+          );
         } else {
           setError(errMsg || "Generation failed");
         }
@@ -1039,70 +1091,166 @@ function App() {
       )}
 
       {page === "pricing" && (
-        <section className="script-output pricing-panel" style={{ maxWidth: 980 }}>
+        <section className="script-output pricing-panel" style={{ maxWidth: 1100 }}>
           <h2 className="pricing-title">PRICING / 定价</h2>
           <p
             className="script-output-hint pricing-hint"
             style={{ marginTop: "-0.25rem" }}
           >
-            Choose a plan. All plans include full 60-episode vertical script generation. / 选择一个方案。所有方案均包含完整60集垂直剧本生成。
+            Full 60-episode vertical scripts · RMB pricing · Batch bundles + monthly tiers / 完整 60 集垂直剧本 · 人民币计费 ·
+            批量包 + 月付档位
           </p>
+
+          <div className="pricing-batch-section">
+            <h3 className="pricing-subtitle">Batch value pricing / 批量梯度价</h3>
+            <p className="pricing-batch-lead">
+              Instead of one flat per-script price, bundles are priced for value—the <strong>5-script pack</strong> is a
+              product, not just a discount. / 不单次一口价，而用梯度打包体现价值——
+              <strong>5 本剧本包</strong>是独立产品，而不是“随便减点价”。
+            </p>
+            <div className="pricing-bundle-grid">
+              {[
+                { n: 1, total: 100, each: 100 },
+                { n: 5, total: 400, each: 80 },
+                { n: 20, total: 1200, each: 60 },
+                { n: 100, total: 4000, each: 40 },
+              ].map((b) => (
+                <div key={b.n} className="pricing-bundle-card">
+                  <div className="pricing-bundle-count">
+                    {b.n} script{b.n > 1 ? "s" : ""} / {b.n} 本
+                  </div>
+                  <div className="pricing-bundle-total">¥{b.total}</div>
+                  <div className="pricing-bundle-each">
+                    ¥{b.each} <span>each / 每本</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary pricing-bundle-cta"
+                    onClick={() => {
+                      /* Stripe / checkout — coming soon */
+                    }}
+                  >
+                    Purchase / 购买
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <h3 className="pricing-subtitle" style={{ marginTop: "1.75rem" }}>
+            Monthly tiers / 月付档位
+          </h3>
+          <p className="script-output-hint pricing-hint" style={{ marginBottom: "0.9rem" }}>
+            Aggressive included scripts + low overage rates. / 包含剧本数更激进，超出后单价更低。
+          </p>
+
           <div className="pricing-grid">
             <article className="pricing-card">
-              <h3 className="pricing-name">Free / 免费</h3>
+              <h3 className="pricing-name">Pay-as-you-go / 按需付费</h3>
               <p className="pricing-rate">
-                $30 <span>per script generation (pay as you go) / 每次剧本生成（按需付费）</span>
+                ¥120 <span>per script / 每本剧本</span>
               </p>
               <ul className="pricing-features">
-                <li>1 free generation / 1次免费生成</li>
-                <li>30 dollars per script generation / 每次剧本生成 30 美元</li>
-                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+                <li>No monthly commitment — buy scripts as you need / 无月费，按本购买</li>
+                <li>Combine with batch bundles above for lower per-script cost / 可叠加上方批量包，单本更省</li>
+                <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
               </ul>
+              <div className="pricing-card-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ width: "100%" }}
+                  onClick={() => {
+                    /* Stripe — single script PAYG — coming soon */
+                  }}
+                >
+                  Purchase / 购买
+                </button>
+              </div>
             </article>
 
             <article className="pricing-card">
               <h3 className="pricing-name">Starter / 入门</h3>
               <p className="pricing-rate">
-                $99/mo <span>or $1,000/year / 或 $1,000/年</span>
+                ¥599<span className="pricing-rate-unit">/month · 月</span>
               </p>
               <ul className="pricing-features">
-                <li>$20 per script generation / 每次剧本生成 $20</li>
-                <li>3 free monthly generations / 每月3次免费生成</li>
-                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+                <li>
+                  <strong>5 free scripts / month</strong> included / 每月含 <strong>5 本免费</strong> 剧本额度
+                </li>
+                <li>
+                  <strong>¥80</strong> per script after quota / 超额后每本 <strong>¥80</strong>
+                </li>
+                <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
               </ul>
+              <div className="pricing-card-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ width: "100%" }}
+                  onClick={() => {
+                    /* Stripe — Subscribe Starter — coming soon */
+                  }}
+                >
+                  Subscribe / 订阅
+                </button>
+              </div>
             </article>
 
             <article className="pricing-card">
               <h3 className="pricing-name">Professional / 专业</h3>
               <p className="pricing-rate">
-                $499/mo <span>or $5,000/year / 或 $5,000/年</span>
+                ¥2,999<span className="pricing-rate-unit">/month · 月</span>
               </p>
               <ul className="pricing-features">
-                <li>$12 per script generation / 每次剧本生成 $12</li>
-                <li>6 free monthly generations / 每月6次免费生成</li>
                 <li>
-                  Access to high-performing “Science Fiction” and “Fantasy” genres / 可使用高表现的“科幻”和“奇幻”题材
+                  <strong>20 free scripts / month</strong> included / 每月含 <strong>20 本免费</strong> 剧本额度
                 </li>
-                <li>English and Chinese script support / 支持英文与简体中文剧本</li>
-                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+                <li>
+                  <strong>¥50</strong> per script after quota / 超额后每本 <strong>¥50</strong>
+                </li>
+                <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
               </ul>
+              <div className="pricing-card-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ width: "100%" }}
+                  onClick={() => {
+                    /* Stripe — Subscribe Professional — coming soon */
+                  }}
+                >
+                  Subscribe / 订阅
+                </button>
+              </div>
             </article>
 
             <article className="pricing-card">
               <h3 className="pricing-name">Business / 商务</h3>
               <p className="pricing-rate">
-                $999/mo <span>or $10,000/year / 或 $10,000/年</span>
+                ¥9,999<span className="pricing-rate-unit">/month · 月</span>
               </p>
               <ul className="pricing-features">
-                <li>$5 per script generation / 每次剧本生成 $5</li>
-                <li>12 free monthly generations / 每月12次免费生成</li>
-                <li>Priority support / 优先支持</li>
                 <li>
-                  Access to high-performing “Science Fiction”, “Fantasy”, “Superhero”, and “Horror” genres / 可使用高表现的“科幻”、“奇幻”、“超级英雄”和“恐怖”题材
+                  <strong>100 free scripts / month</strong> included / 每月含 <strong>100 本免费</strong> 剧本额度
                 </li>
-                <li>English and Chinese script support / 支持英文与简体中文剧本</li>
-                <li>Includes full 60-episode vertical script generation / 包含完整60集垂直剧本生成</li>
+                <li>
+                  <strong>¥30</strong> per script after quota / 超额后每本 <strong>¥30</strong>
+                </li>
+                <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
               </ul>
+              <div className="pricing-card-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ width: "100%" }}
+                  onClick={() => {
+                    /* Stripe — Subscribe Business — coming soon */
+                  }}
+                >
+                  Subscribe / 订阅
+                </button>
+              </div>
             </article>
           </div>
         </section>
@@ -1395,6 +1543,26 @@ function App() {
             gap: "1rem",
           }}
         >
+          {authToken ? (
+            <div className="script-credits-strip" aria-live="polite">
+              <span className="script-credits-label">
+                Script credits / 剧本额度
+              </span>
+              <span className="script-credits-value">
+                {scriptCredits !== null ? scriptCredits : "—"}
+              </span>
+            </div>
+          ) : null}
+          {authToken && scriptCredits !== null && scriptCredits < 1 ? (
+            <p className="script-credits-required-callout" role="alert">
+              <span className="script-credits-required-en">
+                Purchase credits to generate a script!
+              </span>
+              <span className="script-credits-required-zh">
+                购买剧本额度后方可生成剧本！
+              </span>
+            </p>
+          ) : null}
           <div className="generate-page-hint">
             <p className="generate-page-hint-en">
               Once your generation begins it will proceed on the backend. Please keep the browser tab open. If
@@ -1417,6 +1585,16 @@ function App() {
               if (!authToken) {
                 setError("Please log in or register to generate a script.");
                 setPage("login");
+                return;
+              }
+              if (scriptCredits === null) {
+                setError(
+                  "Loading your account… Please wait and try again. / 正在加载账户信息，请稍后再试。"
+                );
+                return;
+              }
+              if (scriptCredits < 1) {
+                setError(SCRIPT_CREDITS_REQUIRED_MSG);
                 return;
               }
               setModalOpen(true);
@@ -1612,7 +1790,12 @@ function App() {
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={loading || !genre}
+                  disabled={
+                    loading ||
+                    !genre ||
+                    (Boolean(authToken) &&
+                      (scriptCredits === null || scriptCredits < 1))
+                  }
                 >
                   {loading
                     ? progress.total > 0
