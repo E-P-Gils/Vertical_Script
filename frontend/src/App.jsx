@@ -5,6 +5,7 @@ import {
   prepareEnglishScriptForDisplay,
   prepareEnglishScriptLikePdfInput,
 } from "./screenplayPdf.js";
+import SecretOwnerTools from "./SecretOwnerTools.jsx";
 import "./App.css";
 
 // If you run the backend locally, keep VITE_API_BASE unset and calls go to Vite's `/api` proxy.
@@ -13,6 +14,13 @@ const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
 const SCRIPT_CREDITS_REQUIRED_MSG =
   "Purchase credits to generate a script! / 购买剧本额度后方可生成剧本！";
+
+/** Shown only in nav for this account; must match server OWNER_OPS_EMAIL. */
+const OWNER_OPS_TAB_EMAIL = (
+  import.meta.env.VITE_OWNER_OPS_EMAIL || "sculptoid11@gmail.com"
+)
+  .trim()
+  .toLowerCase();
 
 /**
  * List route omits english_text/chinese_text. Without this, only the actively polled script
@@ -128,7 +136,10 @@ function App() {
   /** From GET /me — prepaid / grant script generations (not decremented by this app yet). */
   const [scriptCredits, setScriptCredits] = useState(null);
 
-  const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts
+  /** From GET /me — used to show owner-only nav (must match server allowlist). */
+  const [meEmail, setMeEmail] = useState("");
+
+  const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts | owner
   const [myScripts, setMyScripts] = useState(() => {
     try {
       const raw = localStorage.getItem("myScripts");
@@ -333,6 +344,7 @@ function App() {
   useEffect(() => {
     if (!authToken) {
       setScriptCredits(null);
+      setMeEmail("");
       return;
     }
     let cancelled = false;
@@ -344,6 +356,7 @@ function App() {
         if (!r.ok || cancelled) return;
         const d = await r.json().catch(() => ({}));
         if (cancelled || !d.user) return;
+        setMeEmail(String(d.user.email || "").trim());
         const n = d.user.scriptCredits;
         setScriptCredits(typeof n === "number" && Number.isFinite(n) ? n : 0);
       } catch {
@@ -354,6 +367,38 @@ function App() {
       cancelled = true;
     };
   }, [authToken]);
+
+  const refreshMe = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const r = await fetch(`${API_BASE}/me`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!r.ok) return;
+      const d = await r.json().catch(() => ({}));
+      if (!d.user) return;
+      setMeEmail(String(d.user.email || "").trim());
+      const n = d.user.scriptCredits;
+      setScriptCredits(typeof n === "number" && Number.isFinite(n) ? n : 0);
+    } catch {
+      /* ignore */
+    }
+  }, [authToken]);
+
+  const showOwnerTab =
+    Boolean(authToken) &&
+    meEmail.trim().toLowerCase() === OWNER_OPS_TAB_EMAIL;
+
+  useEffect(() => {
+    if (page !== "owner") return;
+    if (!authToken) {
+      setPage("home");
+      return;
+    }
+    if (meEmail && meEmail.trim().toLowerCase() !== OWNER_OPS_TAB_EMAIL) {
+      setPage("home");
+    }
+  }, [page, authToken, meEmail]);
 
   useEffect(() => {
     return () => clearBackgroundPoll();
@@ -618,6 +663,7 @@ function App() {
   const handleLogout = () => {
     clearBackgroundPoll();
     setAuthToken(null);
+    setMeEmail("");
     try {
       localStorage.removeItem("authToken");
     } catch {}
@@ -1058,6 +1104,16 @@ function App() {
         >
           My Scripts / 我的剧本
         </button>
+        {showOwnerTab ? (
+          <button
+            type="button"
+            className={page === "owner" ? "btn btn-primary" : "btn btn-secondary"}
+            onClick={() => setPage("owner")}
+            style={{ borderRadius: 6 }}
+          >
+            Owner / 站长
+          </button>
+        ) : null}
       </div>
 
       {page === "home" && (
@@ -1072,10 +1128,10 @@ function App() {
             }}
           >
             <div style={{ color: "var(--blood-pale)" }}>
-              GENERATE A FULL PRODUCTION-READY 60 EPISODE VERTICAL SCRIPT IN UNDER 10 MINUTES
+              GENERATE MULTIPLE PRODUCTION-READY 60-EPISODE VERTICAL SCRIPTS AT THE SAME TIME!
             </div>
             <div style={{ marginTop: "0.5rem", opacity: 0.95 }}>
-              在不到 10 分钟内生成完整、可投入制作的 60 集垂直剧本
+              同时生成多部 60 集可投入制作的垂直剧本！
             </div>
           </div>
           <div style={{ display: "flex", justifyContent: "center", marginTop: "0.75rem" }}>
@@ -1089,6 +1145,14 @@ function App() {
           </div>
         </section>
       )}
+
+      {page === "owner" && showOwnerTab ? (
+        <SecretOwnerTools
+          API_BASE={API_BASE}
+          authToken={authToken}
+          onAfterGrant={refreshMe}
+        />
+      ) : null}
 
       {page === "pricing" && (
         <section className="script-output pricing-panel" style={{ maxWidth: 1100 }}>
@@ -1565,17 +1629,22 @@ function App() {
           ) : null}
           <div className="generate-page-hint">
             <p className="generate-page-hint-en">
-              Once your generation begins it will proceed on the backend. Please keep the browser tab open. If
-              you accidentally close the tab you can reopen the page and resume generating by visiting{" "}
-              <strong>My Scripts</strong> and reloading the page. Keep the browser tab open while translating the
-              script to Chinese. It takes around 50 minutes to generate a script, and 10 minutes to translate it.
-              You can generate multiple scripts at a time.
+              Once your generation begins it will proceed on the backend—you do not need to keep the browser tab
+              open while it runs. If you close the tab, you can reopen the page later and check progress under{" "}
+              <strong>My Scripts</strong>
+              (refresh if needed). Keep the tab open{" "}
+              <strong>only while translating the script to Chinese</strong>. It takes around 50 minutes to generate a
+              script and about 10 minutes to translate it. You can have up to{" "}
+              <strong>5 scripts</strong> generating at the same time.
             </p>
             <p className="generate-page-hint-zh">
-              生成开始后会由服务器在后台继续执行。请尽量保持浏览器标签页打开。若不慎关闭标签页，可重新打开页面，进入
+              生成开始后会由服务器在后台继续执行，
+              <strong>生成过程中不必</strong>
+              一直开着浏览器标签页。若已关闭标签页，可稍后重新打开页面，在
               <strong>我的剧本</strong>
-              并刷新页面以继续查看生成进度。将剧本翻译为简体中文时，也请保持标签页打开。完整生成一部剧本大约需要 50
-              分钟，翻译约需 10 分钟。您可以同时生成多部剧本。
+              中查看进度（必要时刷新）。<strong>仅在将剧本翻译为简体中文时</strong>
+              需要保持标签页打开。完整生成一部剧本大约需要 50 分钟，翻译约需 10 分钟。最多可同时有{" "}
+              <strong>5 部剧本</strong>在生成中。
             </p>
           </div>
           <button

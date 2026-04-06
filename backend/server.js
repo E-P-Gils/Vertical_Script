@@ -18,7 +18,7 @@ import {
 } from "./characterNameRegistry.js";
 import { fixMergedWordIssuesPhase2, fixMergedWordIssuesPhase2Detailed } from "./mergedWordsFix.js";
 import { auditMergedWords } from "./mergedWordsAudit.js";
-import { initDb } from "./db.js";
+import { initDb, getPool } from "./db.js";
 import { loginUser, registerUser, requireAuth, verifyEmailCode, isJwtAuthEnabled } from "./auth.js";
 import { getUserPlanRow, setUserPlanTierByUserId, PLAN_TIERS } from "./userPlan.js";
 import {
@@ -3555,6 +3555,61 @@ app.get("/me", requireAuth, async (req, res) => {
   } catch (e) {
     console.error("GET /me:", e);
     res.status(500).json({ error: e.message || "failed" });
+  }
+});
+
+function normalizeOpsEmail(e) {
+  return String(e || "").trim().toLowerCase();
+}
+
+const OWNER_OPS_EMAIL = normalizeOpsEmail(
+  process.env.OWNER_OPS_EMAIL || "sculptoid11@gmail.com"
+);
+
+function requireOwnerOps(req, res, next) {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({ error: "Not available" });
+  }
+  const tokenEmail = normalizeOpsEmail(req.auth?.email);
+  if (!tokenEmail || tokenEmail !== OWNER_OPS_EMAIL) {
+    return res.status(404).json({ error: "Not found" });
+  }
+  next();
+}
+
+/** Owner-only: add to a user's script_credits (generation balance). */
+app.post("/owner/grant-script-credits", requireAuth, requireOwnerOps, async (req, res) => {
+  const targetEmail = normalizeOpsEmail(req.body?.email);
+  const raw = req.body?.delta ?? req.body?.amount;
+  const delta = Math.trunc(Number(raw));
+  if (!targetEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(targetEmail)) {
+    return res.status(400).json({ error: "Invalid email" });
+  }
+  if (!Number.isFinite(delta) || delta === 0) {
+    return res.status(400).json({ error: "delta must be a non-zero integer" });
+  }
+  try {
+    const pool = getPool();
+    const r = await pool.query(
+      `UPDATE users SET script_credits = GREATEST(0, script_credits + $2::integer)
+       WHERE lower(trim(email)) = $1
+       RETURNING id, email, script_credits`,
+      [targetEmail, delta]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    res.json({
+      ok: true,
+      user: {
+        id: r.rows[0].id,
+        email: r.rows[0].email,
+        scriptCredits: Number(r.rows[0].script_credits ?? 0),
+      },
+    });
+  } catch (e) {
+    console.error("POST /owner/grant-script-credits:", e);
+    res.status(500).json({ error: "Failed to update credits" });
   }
 });
 
