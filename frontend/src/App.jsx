@@ -22,6 +22,11 @@ const OWNER_OPS_TAB_EMAIL = (
   .trim()
   .toLowerCase();
 
+/** Must match backend `scriptsStore.js` MAX_CONCURRENT_GENERATIONS_PER_USER. */
+const MAX_CONCURRENT_GENERATIONS = 5;
+
+const CONCURRENT_GENERATIONS_CAP_MSG = `You already have ${MAX_CONCURRENT_GENERATIONS} scripts generating. Wait for one to finish or check My Scripts. / 您已有 ${MAX_CONCURRENT_GENERATIONS} 个剧本正在生成，请等待完成或在「我的剧本」中查看。`;
+
 /**
  * List route omits english_text/chinese_text. Without this, only the actively polled script
  * gets bodies merged — concurrent background jobs stay empty or stuck on stale partial text.
@@ -327,6 +332,32 @@ function App() {
     [authToken, clearBackgroundPoll, fetchScriptDetail]
   );
 
+  const refetchMyScriptsFromServer = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const r = await fetch(`${API_BASE}/scripts`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!r.ok) return;
+      const data = await r.json();
+      let rows = Array.isArray(data.scripts) ? data.scripts : [];
+      if (rows.length) {
+        rows = await attachFullTextToCompleteRows(rows, fetchScriptDetail, 10);
+      }
+      setMyScripts((prev) => {
+        const prevById = new Map(prev.map((x) => [x.id, x]));
+        const serverIds = new Set(rows.map((row) => row.id));
+        const fromServer = rows.map((row) => mapServerListRowToItem(row, prevById.get(row.id)));
+        const localOnly = prev.filter((p) => !serverIds.has(p.id));
+        return [...fromServer, ...localOnly].slice(0, 50);
+      });
+      const topGen = rows.find((row) => row.status === "generating");
+      if (topGen) scheduleProgressPoll(topGen.id);
+    } catch {
+      /* ignore */
+    }
+  }, [authToken, fetchScriptDetail, scheduleProgressPoll]);
+
   useEffect(() => {
     activeScriptIdRef.current = activeScriptId;
   }, [activeScriptId]);
@@ -406,36 +437,8 @@ function App() {
 
   useEffect(() => {
     if (!authToken) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await fetch(`${API_BASE}/scripts`, {
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        if (!r.ok || cancelled) return;
-        const data = await r.json();
-        let rows = Array.isArray(data.scripts) ? data.scripts : [];
-        if (!cancelled && rows.length) {
-          rows = await attachFullTextToCompleteRows(rows, fetchScriptDetail, 10);
-        }
-        if (cancelled) return;
-        setMyScripts((prev) => {
-          const prevById = new Map(prev.map((x) => [x.id, x]));
-          const serverIds = new Set(rows.map((row) => row.id));
-          const fromServer = rows.map((row) => mapServerListRowToItem(row, prevById.get(row.id)));
-          const localOnly = prev.filter((p) => !serverIds.has(p.id));
-          return [...fromServer, ...localOnly].slice(0, 50);
-        });
-        const topGen = rows.find((r) => r.status === "generating");
-        if (topGen && !cancelled) scheduleProgressPoll(topGen.id);
-      } catch {
-        /* ignore */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [authToken, scheduleProgressPoll, fetchScriptDetail]);
+    void refetchMyScriptsFromServer();
+  }, [authToken, refetchMyScriptsFromServer]);
 
   const authHeaders = authToken
     ? {
@@ -685,6 +688,13 @@ function App() {
         setError(SCRIPT_CREDITS_REQUIRED_MSG);
         return;
       }
+      const activeGenerationCount = myScripts.filter(
+        (s) => s.status === "generating" || s.generating
+      ).length;
+      if (activeGenerationCount >= MAX_CONCURRENT_GENERATIONS) {
+        setError(CONCURRENT_GENERATIONS_CAP_MSG);
+        return;
+      }
     }
     setError("");
     setScript("");
@@ -761,6 +771,8 @@ function App() {
             errMsg ||
               "Please register and verify your email, then log in again."
           );
+        } else if (bgRes.status === 429) {
+          setError(errMsg || CONCURRENT_GENERATIONS_CAP_MSG);
         } else {
           setError(errMsg || "Generation failed");
         }
@@ -782,6 +794,9 @@ function App() {
         const data = await res.json().catch(() => ({}));
         if (res.status === 401 || res.status === 403) {
           throw new Error("Please register and verify your email, then log in again.");
+        }
+        if (res.status === 429) {
+          throw new Error(data.error || CONCURRENT_GENERATIONS_CAP_MSG);
         }
         throw new Error(data.error || "Generation failed");
       }
@@ -829,7 +844,11 @@ function App() {
         } else if (data.type === "error") {
           setError(data.message || "Generation error");
         } else if (data.type === "done") {
-          persistGeneratedScript(fullScript, genre, streamSummaryForPersist);
+          if (authToken) {
+            void refetchMyScriptsFromServer();
+          } else {
+            persistGeneratedScript(fullScript, genre, streamSummaryForPersist);
+          }
           setModalOpen(false);
         }
       };
@@ -1668,6 +1687,13 @@ function App() {
                 setError(SCRIPT_CREDITS_REQUIRED_MSG);
                 return;
               }
+              const genCount = myScripts.filter(
+                (s) => s.status === "generating" || s.generating
+              ).length;
+              if (genCount >= MAX_CONCURRENT_GENERATIONS) {
+                setError(CONCURRENT_GENERATIONS_CAP_MSG);
+                return;
+              }
               setModalOpen(true);
             }}
           >
@@ -1865,7 +1891,11 @@ function App() {
                     loading ||
                     !genre ||
                     (Boolean(authToken) &&
-                      (scriptCredits === null || scriptCredits < 1))
+                      (scriptCredits === null ||
+                        scriptCredits < 1 ||
+                        myScripts.filter(
+                          (s) => s.status === "generating" || s.generating
+                        ).length >= MAX_CONCURRENT_GENERATIONS))
                   }
                 >
                   {loading

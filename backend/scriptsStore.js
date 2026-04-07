@@ -1,6 +1,20 @@
 import { randomUUID } from "crypto";
 import { getPool } from "./db.js";
 
+/** Max saved_scripts rows in `generating` status per user (background + authenticated stream). */
+export const MAX_CONCURRENT_GENERATIONS_PER_USER = 5;
+
+export async function countGeneratingScriptsForUser(userId) {
+  const pool = getPool();
+  const id = Number(userId);
+  if (!Number.isFinite(id)) return 0;
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS c FROM saved_scripts WHERE user_id = $1 AND status = 'generating'`,
+    [id]
+  );
+  return r.rows[0]?.c ?? 0;
+}
+
 export async function createGeneratingScript({ userId, title, genre, summary, episodeTarget }) {
   const pool = getPool();
   const id = randomUUID();

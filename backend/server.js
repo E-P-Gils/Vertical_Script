@@ -30,6 +30,8 @@ import {
   listScriptsForUser,
   deleteScriptForUser,
   markInterruptedGeneratingScripts,
+  countGeneratingScriptsForUser,
+  MAX_CONCURRENT_GENERATIONS_PER_USER,
 } from "./scriptsStore.js";
 import { loadDynamicMergePatterns } from "./mergePatternRegistry.js";
 import {
@@ -3496,6 +3498,8 @@ function pickReplacementNameForVictor() {
 const SCRIPT_CREDITS_REQUIRED_ERROR =
   "Purchase credits to generate a script! / 购买剧本额度后方可生成剧本！";
 
+const CONCURRENT_GENERATIONS_CAP_ERROR = `You already have ${MAX_CONCURRENT_GENERATIONS_PER_USER} scripts generating. Wait for one to finish or check My Scripts. / 您已有 ${MAX_CONCURRENT_GENERATIONS_PER_USER} 个剧本正在生成，请等待完成或在「我的剧本」中查看。`;
+
 async function refundOneScriptCredit(userId) {
   const id = Number(userId);
   if (!Number.isFinite(id)) return;
@@ -3541,6 +3545,28 @@ async function consumeOneScriptCreditOrReject(req, res) {
     res.status(500).json({ error: "Could not update script credits." });
     return true;
   }
+}
+
+/** When JWT auth is on, reject if user already has max concurrent generating scripts. */
+async function rejectIfConcurrentGenerationCapOrReject(req, res) {
+  if (!isJwtAuthEnabled()) return false;
+  const uid = Number(req.auth?.sub);
+  if (!Number.isFinite(uid)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return true;
+  }
+  try {
+    const n = await countGeneratingScriptsForUser(uid);
+    if (n >= MAX_CONCURRENT_GENERATIONS_PER_USER) {
+      res.status(429).json({ error: CONCURRENT_GENERATIONS_CAP_ERROR });
+      return true;
+    }
+  } catch (e) {
+    console.error("rejectIfConcurrentGenerationCapOrReject:", e);
+    res.status(500).json({ error: "Could not verify active generations." });
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -3664,15 +3690,80 @@ app.put("/users/:id/plan-tier", async (req, res) => {
 });
 
 app.post("/generate", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+    try {
+      await runSeasonGeneration(req.body || {}, res, null);
+    } catch (err) {
+      console.error("/generate:", err);
+      try {
+        if (!res.writableEnded) {
+          sendStreamLine(res, { type: "error", message: err.message || "Generation failed" });
+          sendStreamLine(res, { type: "done", model: FINETUNED_MODEL });
+        }
+      } catch (_) {}
+    } finally {
+      try {
+        if (!res.writableEnded) res.end();
+      } catch (_) {}
+    }
+    return;
+  }
+
+  const userId = Number(req.auth?.sub);
+  if (!Number.isFinite(userId)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const body = req.body || {};
+  const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
+  const genre = String(body.genre || "Romance").trim() || "Romance";
+  const logline = pickRandomPresetSummary(genre);
+  if (!logline) {
+    return res.status(500).json({
+      error: "No preset summary available for this genre.",
+    });
+  }
+  if (await rejectIfConcurrentGenerationCapOrReject(req, res)) return;
   if (await consumeOneScriptCreditOrReject(req, res)) return;
+
+  const title = safeStr(body.title).slice(0, 300) || "Generated Script";
+  let row;
+  try {
+    row = await createGeneratingScript({
+      userId,
+      title,
+      genre,
+      summary: logline.slice(0, 2000),
+      episodeTarget: episodeCount,
+    });
+  } catch (e) {
+    console.error("createGeneratingScript (stream path):", e);
+    await refundOneScriptCredit(userId);
+    return res.status(503).json({
+      error:
+        "Could not save script draft. Ensure DATABASE_URL is set and Postgres is reachable.",
+    });
+  }
+
+  const persist = { scriptId: row.id, userId };
+  const bodyWithPreset = { ...body, logline, __serverPresetLogline: logline };
+
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders?.();
   try {
-    await runSeasonGeneration(req.body || {}, res, null);
+    await runSeasonGeneration(bodyWithPreset, res, persist);
   } catch (err) {
     console.error("/generate:", err);
+    try {
+      if (persist?.scriptId && persist?.userId) {
+        await markScriptFailed(persist.scriptId, persist.userId, String(err?.message || err));
+      }
+    } catch (_) {}
     try {
       if (!res.writableEnded) {
         sendStreamLine(res, { type: "error", message: err.message || "Generation failed" });
@@ -3705,6 +3796,7 @@ app.post("/generate/background", requireAuth, async (req, res) => {
       error: "No preset summary available for this genre.",
     });
   }
+  if (await rejectIfConcurrentGenerationCapOrReject(req, res)) return;
   if (await consumeOneScriptCreditOrReject(req, res)) return;
   const title = safeStr(body.title).slice(0, 300) || "Generated Script";
   let row;
