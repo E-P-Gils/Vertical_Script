@@ -85,6 +85,15 @@ export async function initDb() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS script_credits INTEGER NOT NULL DEFAULT 0;`);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS saved_scripts (
       id UUID PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

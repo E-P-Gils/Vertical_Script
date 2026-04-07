@@ -7,6 +7,7 @@ import dotenv from "dotenv";
 import express from "express";
 import fs from "fs";
 import OpenAI from "openai";
+import Stripe from "stripe";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { getSeriesNames } from "./nameEngine.js";
@@ -72,9 +73,182 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
+// Stripe webhooks must receive the raw body for signature verification.
+app.post("/vsinfinite/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  const secretKey = process.env.STRIPE_SECRET_KEY || null;
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || null;
+  if (!secretKey || !webhookSecret) {
+    return res.status(503).send("Stripe is not configured");
+  }
+
+  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
+  const sig = String(req.headers["stripe-signature"] || "");
+  let evt;
+  try {
+    evt = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (e) {
+    return res.status(400).send(`Webhook signature verification failed.`);
+  }
+
+  // Idempotency: store Stripe event id (Stripe retries deliveries).
+  let isNewEvent = false;
+  try {
+    const pool = getPool();
+    const ins = await pool.query(
+      `INSERT INTO stripe_webhook_events (id, type, payload)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
+      [evt.id, evt.type, JSON.stringify(evt)]
+    );
+    isNewEvent = ins.rowCount > 0;
+  } catch (e) {
+    // If the DB is down, fail the webhook so Stripe retries instead of silently losing grants.
+    console.error("[stripe] store event failed:", e);
+    return res.status(503).send("Temporary error");
+  }
+  if (!isNewEvent) return res.status(200).json({ received: true, duplicate: true });
+
+  try {
+    if (evt.type === "checkout.session.completed") {
+      const session = evt.data?.object;
+      const mode = String(session?.mode || "");
+      const paid = String(session?.payment_status || "") === "paid";
+      if (mode === "payment" && paid) {
+        const email = String(session?.metadata?.userEmail || session?.customer_details?.email || "")
+          .trim()
+          .toLowerCase();
+        const credits = Math.trunc(Number(session?.metadata?.scriptCredits || session?.metadata?.credits));
+        if (email && Number.isFinite(credits) && credits !== 0) {
+          const pool = getPool();
+          await pool.query(
+            `UPDATE users SET script_credits = GREATEST(0, script_credits + $2::integer)
+             WHERE lower(trim(email)) = $1`,
+            [email, credits]
+          );
+        } else {
+          console.warn("[stripe] checkout.session.completed missing userEmail or credits metadata", {
+            id: session?.id,
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[stripe] handler failed:", e);
+    // Return 500 so Stripe retries; idempotency table prevents double grants.
+    return res.status(500).send("Webhook handler error");
+  }
+
+  return res.status(200).json({ received: true });
+});
 // Translation endpoint may receive the full English script in one request.
 // Increase body limit to avoid HTTP 413 on larger seasons.
 app.use(express.json({ limit: "20mb" }));
+
+function parseJsonEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(String(raw));
+  } catch (e) {
+    console.warn(`[stripe] Could not parse ${name} as JSON`);
+    return fallback;
+  }
+}
+
+function getPublicBaseUrl(req) {
+  const envUrl = String(process.env.PUBLIC_APP_URL || "").trim();
+  if (envUrl) return envUrl.replace(/\/+$/, "");
+  const origin = String(req.headers.origin || "").trim();
+  if (origin) return origin.replace(/\/+$/, "");
+  return "";
+}
+
+/** Create a Stripe Checkout Session and return { url }. */
+app.post("/vsinfinite/stripe/create-checkout-session", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({ error: "JWT auth is not enabled on this server." });
+  }
+  const secretKey = process.env.STRIPE_SECRET_KEY || null;
+  if (!secretKey) return res.status(503).json({ error: "Stripe is not configured." });
+
+  const uid = Number(req.auth?.sub);
+  if (!Number.isFinite(uid)) return res.status(401).json({ error: "Unauthorized" });
+  const me = await getUserPlanRow(uid);
+  if (!me?.email) return res.status(404).json({ error: "user not found" });
+
+  const body = req.body || {};
+  const pack = String(body.pack || "").trim();
+  const providedPriceId = String(body.priceId || body.price_id || "").trim();
+  const kind = String(body.kind || "").trim().toLowerCase(); // "payment" | "subscription"
+
+  const packToPrice = parseJsonEnv("STRIPE_PACK_PRICE_MAP_JSON", {});
+  const priceToCredits = parseJsonEnv("STRIPE_PRICE_CREDITS_MAP_JSON", {});
+
+  const priceId = providedPriceId || (pack ? String(packToPrice[pack] || "") : "");
+  if (!priceId || !/^price_/.test(priceId)) {
+    return res.status(400).json({ error: "Unknown or missing priceId/pack." });
+  }
+
+  const allowedPrices = String(process.env.STRIPE_ALLOWED_PRICE_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowedPrices.length && !allowedPrices.includes(priceId)) {
+    return res.status(400).json({ error: "priceId is not allowed." });
+  }
+
+  const publicBase = getPublicBaseUrl(req);
+  const successUrl =
+    String(process.env.STRIPE_SUCCESS_URL || "").trim() ||
+    (publicBase ? `${publicBase}/?stripe=success` : "");
+  const cancelUrl =
+    String(process.env.STRIPE_CANCEL_URL || "").trim() ||
+    (publicBase ? `${publicBase}/?stripe=cancel` : "");
+  if (!successUrl || !cancelUrl) {
+    return res.status(503).json({
+      error: "Missing PUBLIC_APP_URL (or STRIPE_SUCCESS_URL/STRIPE_CANCEL_URL).",
+    });
+  }
+
+  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
+  const mode = kind === "subscription" ? "subscription" : "payment";
+
+  const creditsForPrice = Math.trunc(Number(priceToCredits?.[priceId]));
+  const metadata = {
+    userId: String(uid),
+    userEmail: String(me.email).trim().toLowerCase(),
+    // For one-time packs we grant via webhook metadata.scriptCredits
+    scriptCredits:
+      mode === "payment" && Number.isFinite(creditsForPrice) ? String(creditsForPrice) : "",
+    pack: pack || "",
+    priceId,
+  };
+
+  if (mode === "payment") {
+    if (!metadata.scriptCredits) {
+      return res.status(503).json({
+        error:
+          "Credits mapping missing for this priceId. Set STRIPE_PRICE_CREDITS_MAP_JSON on the server.",
+      });
+    }
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      metadata,
+      customer_email: metadata.userEmail,
+    });
+    return res.json({ ok: true, url: session.url });
+  } catch (e) {
+    console.error("[stripe] create checkout session failed:", e);
+    return res.status(500).json({ error: "Failed to create Stripe Checkout Session." });
+  }
+});
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const FINETUNED_MODEL =

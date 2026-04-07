@@ -674,6 +674,34 @@ function App() {
     setModalOpen(false);
   };
 
+  const startStripeCheckout = useCallback(
+    async ({ pack, kind }) => {
+      if (!authToken) {
+        setError("Please log in or register first. / 请先登录或注册。");
+        setPage("login");
+        return;
+      }
+      setError("");
+      try {
+        const r = await fetch(`${API_BASE}/vsinfinite/stripe/create-checkout-session`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ pack, kind }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || "Checkout failed");
+        if (!d.url) throw new Error("Checkout failed: missing URL");
+        window.location.href = d.url;
+      } catch (e) {
+        setError(String(e?.message || e || "Checkout failed"));
+      }
+    },
+    [authToken]
+  );
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!genre) return;
@@ -1212,7 +1240,7 @@ function App() {
                     type="button"
                     className="btn btn-primary pricing-bundle-cta"
                     onClick={() => {
-                      /* Stripe / checkout — coming soon */
+                      void startStripeCheckout({ pack: `pack_${b.n}`, kind: "payment" });
                     }}
                   >
                     Purchase / 购买
@@ -1246,7 +1274,7 @@ function App() {
                   className="btn btn-primary"
                   style={{ width: "100%" }}
                   onClick={() => {
-                    /* Stripe — single script PAYG — coming soon */
+                    void startStripeCheckout({ pack: "payg_1", kind: "payment" });
                   }}
                 >
                   Purchase / 购买
@@ -1274,7 +1302,7 @@ function App() {
                   className="btn btn-primary"
                   style={{ width: "100%" }}
                   onClick={() => {
-                    /* Stripe — Subscribe Starter — coming soon */
+                    void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
                   }}
                 >
                   Subscribe / 订阅
@@ -1302,7 +1330,7 @@ function App() {
                   className="btn btn-primary"
                   style={{ width: "100%" }}
                   onClick={() => {
-                    /* Stripe — Subscribe Professional — coming soon */
+                    void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
                   }}
                 >
                   Subscribe / 订阅
@@ -1330,7 +1358,7 @@ function App() {
                   className="btn btn-primary"
                   style={{ width: "100%" }}
                   onClick={() => {
-                    /* Stripe — Subscribe Business — coming soon */
+                    void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
                   }}
                 >
                   Subscribe / 订阅
