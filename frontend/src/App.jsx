@@ -746,6 +746,7 @@ function App() {
         setLoading(false);
         scheduleProgressPoll(scriptId);
         setModalOpen(false);
+        void refreshMe();
         return;
       }
 
@@ -784,6 +785,7 @@ function App() {
         }
         throw new Error(data.error || "Generation failed");
       }
+      void refreshMe();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";

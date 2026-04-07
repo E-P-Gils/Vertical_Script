@@ -3496,8 +3496,22 @@ function pickReplacementNameForVictor() {
 const SCRIPT_CREDITS_REQUIRED_ERROR =
   "Purchase credits to generate a script! / 购买剧本额度后方可生成剧本！";
 
-/** When JWT auth is on, require at least 1 script credit. Returns true if the response was already sent. */
-async function rejectIfNoScriptCredits(req, res) {
+async function refundOneScriptCredit(userId) {
+  const id = Number(userId);
+  if (!Number.isFinite(id)) return;
+  try {
+    const pool = getPool();
+    await pool.query(`UPDATE users SET script_credits = script_credits + 1 WHERE id = $1`, [id]);
+  } catch (e) {
+    console.error("refundOneScriptCredit:", e);
+  }
+}
+
+/**
+ * When JWT auth is on, atomically subtract one script credit before generation starts.
+ * Returns true if the response was already sent (error).
+ */
+async function consumeOneScriptCreditOrReject(req, res) {
   if (!isJwtAuthEnabled()) return false;
   const uid = Number(req.auth?.sub);
   if (!Number.isFinite(uid)) {
@@ -3505,21 +3519,28 @@ async function rejectIfNoScriptCredits(req, res) {
     return true;
   }
   try {
-    const row = await getUserPlanRow(uid);
-    if (!row) {
-      res.status(403).json({ error: "Account not found." });
-      return true;
-    }
-    if (Number(row.script_credits ?? 0) < 1) {
+    const pool = getPool();
+    const r = await pool.query(
+      `UPDATE users SET script_credits = script_credits - 1
+       WHERE id = $1 AND script_credits >= 1
+       RETURNING script_credits`,
+      [uid]
+    );
+    if (r.rowCount === 0) {
+      const row = await getUserPlanRow(uid);
+      if (!row) {
+        res.status(403).json({ error: "Account not found." });
+        return true;
+      }
       res.status(403).json({ error: SCRIPT_CREDITS_REQUIRED_ERROR });
       return true;
     }
+    return false;
   } catch (e) {
-    console.error("rejectIfNoScriptCredits:", e);
-    res.status(500).json({ error: "Could not verify script credits." });
+    console.error("consumeOneScriptCreditOrReject:", e);
+    res.status(500).json({ error: "Could not update script credits." });
     return true;
   }
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -3643,7 +3664,7 @@ app.put("/users/:id/plan-tier", async (req, res) => {
 });
 
 app.post("/generate", requireAuth, async (req, res) => {
-  if (await rejectIfNoScriptCredits(req, res)) return;
+  if (await consumeOneScriptCreditOrReject(req, res)) return;
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
@@ -3675,7 +3696,6 @@ app.post("/generate/background", requireAuth, async (req, res) => {
   if (!Number.isFinite(userId)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  if (await rejectIfNoScriptCredits(req, res)) return;
   const body = req.body || {};
   const episodeCount = Math.max(1, Math.min(120, parseInt(body.episodeCount, 10) || 60));
   const genre = String(body.genre || "Romance").trim() || "Romance";
@@ -3685,6 +3705,7 @@ app.post("/generate/background", requireAuth, async (req, res) => {
       error: "No preset summary available for this genre.",
     });
   }
+  if (await consumeOneScriptCreditOrReject(req, res)) return;
   const title = safeStr(body.title).slice(0, 300) || "Generated Script";
   let row;
   try {
@@ -3697,6 +3718,7 @@ app.post("/generate/background", requireAuth, async (req, res) => {
     });
   } catch (e) {
     console.error("createGeneratingScript:", e);
+    await refundOneScriptCredit(userId);
     return res.status(503).json({
       error:
         "Could not save script draft. Ensure DATABASE_URL is set and Postgres is reachable.",
