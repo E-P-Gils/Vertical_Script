@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildScreenplayPdfBytes,
   prepareChineseScriptLikePdfInput,
@@ -156,25 +156,7 @@ function App() {
   const [cancelDonePeriodEnd, setCancelDonePeriodEnd] = useState(null);
 
   const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts | owner
-  const [myScripts, setMyScripts] = useState(() => {
-    try {
-      const raw = localStorage.getItem("myScripts");
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed)
-        ? parsed.map((it, idx) => ({
-            id: it?.id || `legacy_${idx}_${Date.now()}`,
-            createdAt: it?.createdAt || new Date().toISOString(),
-            title: formatMyScriptListTitle(it?.genre, it?.createdAt || new Date().toISOString()),
-            genre: String(it?.genre || "").trim(),
-            summary: String(it?.summary || "").trim(),
-            englishText: String(it?.englishText || "").trim(),
-            chineseText: String(it?.chineseText || "").trim(),
-          }))
-        : [];
-    } catch {
-      return [];
-    }
-  });
+  const [myScripts, setMyScripts] = useState([]);
   const [activeScriptId, setActiveScriptId] = useState(null);
   const [deletePromptItem, setDeletePromptItem] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -373,14 +355,68 @@ function App() {
     activeScriptIdRef.current = activeScriptId;
   }, [activeScriptId]);
 
+  const scriptsCacheKey = useMemo(() => {
+    const e = String(meEmail || "").trim().toLowerCase();
+    return e ? `myScripts:${e}` : "";
+  }, [meEmail]);
+
+  // Load per-user cached scripts when we know the account email.
   useEffect(() => {
+    if (!authToken) return;
+    if (!scriptsCacheKey) return;
     try {
-      localStorage.setItem("myScripts", JSON.stringify(myScripts));
+      const raw = localStorage.getItem(scriptsCacheKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      const items = Array.isArray(parsed)
+        ? parsed.map((it, idx) => ({
+            id: it?.id || `legacy_${idx}_${Date.now()}`,
+            createdAt: it?.createdAt || new Date().toISOString(),
+            title: formatMyScriptListTitle(it?.genre, it?.createdAt || new Date().toISOString()),
+            genre: String(it?.genre || "").trim(),
+            summary: String(it?.summary || "").trim(),
+            englishText: String(it?.englishText || "").trim(),
+            chineseText: String(it?.chineseText || "").trim(),
+            generating: !!it?.generating,
+            status: it?.status || "",
+            episodeDone: it?.episodeDone ?? 0,
+            episodeTarget: it?.episodeTarget ?? 60,
+            errorMessage: String(it?.errorMessage || ""),
+          }))
+        : [];
+      // Only set local cache if we don't already have server-backed rows.
+      setMyScripts((prev) => (prev && prev.length ? prev : items.slice(0, 50)));
+    } catch {
+      /* ignore */
+    }
+  }, [authToken, scriptsCacheKey]);
+
+  // Persist cache per-user only (never global), and only when logged in.
+  useEffect(() => {
+    if (!authToken) return;
+    if (!scriptsCacheKey) return;
+    try {
+      localStorage.setItem(scriptsCacheKey, JSON.stringify(myScripts));
     } catch {}
-  }, [myScripts]);
+  }, [authToken, myScripts, scriptsCacheKey]);
+
+  // On logout/account switch, clear UI state and remove legacy global cache key.
+  useEffect(() => {
+    if (authToken) return;
+    setMyScripts([]);
+    setActiveScriptId(null);
+    try {
+      localStorage.removeItem("myScripts");
+    } catch {}
+  }, [authToken]);
 
   useEffect(() => {
     if (authToken) setError("");
+  }, [authToken]);
+
+  // Switching accounts on the same device should never show the previous user's cached scripts.
+  useEffect(() => {
+    setMyScripts([]);
+    setActiveScriptId(null);
   }, [authToken]);
 
   useEffect(() => {
