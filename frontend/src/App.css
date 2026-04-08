@@ -368,6 +368,32 @@
 .pricing-features li::marker {
   color: var(--blood-light);
 }
+.pricing-refund-policy {
+  margin-top: 2rem;
+  padding: 1rem 1.15rem;
+  border-radius: 8px;
+  border: 1px solid var(--steel-light);
+  background: rgba(26, 26, 29, 0.45);
+  max-width: 720px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.pricing-refund-policy .pricing-subtitle {
+  margin-top: 0;
+  margin-bottom: 0.65rem;
+}
+.pricing-refund-policy-en,
+.pricing-refund-policy-zh {
+  margin: 0 0 0.55rem;
+  line-height: 1.55;
+  font-size: 0.95rem;
+  color: var(--cream);
+}
+.pricing-refund-policy-zh {
+  margin-bottom: 0;
+  opacity: 0.96;
+}
+
 .pricing-title {
   margin: 0.25rem 0 0.15rem;
   text-align: center;

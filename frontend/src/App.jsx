@@ -144,6 +144,17 @@ function App() {
   /** From GET /me — used to show owner-only nav (must match server allowlist). */
   const [meEmail, setMeEmail] = useState("");
 
+  /** From GET /me — subscription + pricing UI. */
+  const [mePlanTier, setMePlanTier] = useState("free");
+  const [meStripeSubscriptionId, setMeStripeSubscriptionId] = useState(null);
+  const [meSubscriptionCancelAtPeriodEnd, setMeSubscriptionCancelAtPeriodEnd] = useState(false);
+  const [meSubscriptionPeriodEnd, setMeSubscriptionPeriodEnd] = useState(null);
+
+  /** null | "confirm" | "done" — cancel subscription modal on pricing. */
+  const [cancelSubModal, setCancelSubModal] = useState(null);
+  const [cancelSubLoading, setCancelSubLoading] = useState(false);
+  const [cancelDonePeriodEnd, setCancelDonePeriodEnd] = useState(null);
+
   const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts | owner
   const [myScripts, setMyScripts] = useState(() => {
     try {
@@ -376,6 +387,10 @@ function App() {
     if (!authToken) {
       setScriptCredits(null);
       setMeEmail("");
+      setMePlanTier("free");
+      setMeStripeSubscriptionId(null);
+      setMeSubscriptionCancelAtPeriodEnd(false);
+      setMeSubscriptionPeriodEnd(null);
       return;
     }
     let cancelled = false;
@@ -390,6 +405,14 @@ function App() {
         setMeEmail(String(d.user.email || "").trim());
         const n = d.user.scriptCredits;
         setScriptCredits(typeof n === "number" && Number.isFinite(n) ? n : 0);
+        setMePlanTier(String(d.user.planTier || "free").toLowerCase());
+        setMeStripeSubscriptionId(d.user.stripeSubscriptionId || null);
+        setMeSubscriptionCancelAtPeriodEnd(!!d.user.subscriptionCancelAtPeriodEnd);
+        setMeSubscriptionPeriodEnd(
+          d.user.subscriptionCurrentPeriodEnd != null
+            ? String(d.user.subscriptionCurrentPeriodEnd)
+            : null
+        );
       } catch {
         if (!cancelled) setScriptCredits(null);
       }
@@ -411,6 +434,14 @@ function App() {
       setMeEmail(String(d.user.email || "").trim());
       const n = d.user.scriptCredits;
       setScriptCredits(typeof n === "number" && Number.isFinite(n) ? n : 0);
+      setMePlanTier(String(d.user.planTier || "free").toLowerCase());
+      setMeStripeSubscriptionId(d.user.stripeSubscriptionId || null);
+      setMeSubscriptionCancelAtPeriodEnd(!!d.user.subscriptionCancelAtPeriodEnd);
+      setMeSubscriptionPeriodEnd(
+        d.user.subscriptionCurrentPeriodEnd != null
+          ? String(d.user.subscriptionCurrentPeriodEnd)
+          : null
+      );
     } catch {
       /* ignore */
     }
@@ -667,12 +698,38 @@ function App() {
     clearBackgroundPoll();
     setAuthToken(null);
     setMeEmail("");
+    setMePlanTier("free");
+    setMeStripeSubscriptionId(null);
+    setMeSubscriptionCancelAtPeriodEnd(false);
+    setMeSubscriptionPeriodEnd(null);
+    setCancelSubModal(null);
     try {
       localStorage.removeItem("authToken");
     } catch {}
     setPage("home");
     setModalOpen(false);
   };
+
+  const confirmCancelSubscription = useCallback(async () => {
+    if (!authToken) return;
+    setCancelSubLoading(true);
+    setError("");
+    try {
+      const r = await fetch(`${API_BASE}/vsinfinite/stripe/cancel-subscription`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Cancel failed");
+      setCancelDonePeriodEnd(d.currentPeriodEnd ? String(d.currentPeriodEnd) : null);
+      setCancelSubModal("done");
+      void refreshMe();
+    } catch (e) {
+      setError(String(e?.message || e || "Cancel failed"));
+    } finally {
+      setCancelSubLoading(false);
+    }
+  }, [authToken, refreshMe]);
 
   const startStripeCheckout = useCallback(
     async ({ pack, kind }) => {
@@ -1297,16 +1354,40 @@ function App() {
                 <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
               </ul>
               <div className="pricing-card-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ width: "100%" }}
-                  onClick={() => {
-                    void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
-                  }}
-                >
-                  Subscribe / 订阅
-                </button>
+                {authToken &&
+                mePlanTier === "starter" &&
+                meStripeSubscriptionId ? (
+                  meSubscriptionCancelAtPeriodEnd ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: "100%" }}
+                      disabled
+                    >
+                      Cancellation scheduled / 已安排周期末取消
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: "100%" }}
+                      onClick={() => setCancelSubModal("confirm")}
+                    >
+                      Cancel / 取消
+                    </button>
+                  )
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    style={{ width: "100%" }}
+                    onClick={() => {
+                      void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
+                    }}
+                  >
+                    Subscribe / 订阅
+                  </button>
+                )}
               </div>
             </article>
 
@@ -1325,16 +1406,40 @@ function App() {
                 <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
               </ul>
               <div className="pricing-card-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ width: "100%" }}
-                  onClick={() => {
-                    void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
-                  }}
-                >
-                  Subscribe / 订阅
-                </button>
+                {authToken &&
+                mePlanTier === "professional" &&
+                meStripeSubscriptionId ? (
+                  meSubscriptionCancelAtPeriodEnd ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: "100%" }}
+                      disabled
+                    >
+                      Cancellation scheduled / 已安排周期末取消
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: "100%" }}
+                      onClick={() => setCancelSubModal("confirm")}
+                    >
+                      Cancel / 取消
+                    </button>
+                  )
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    style={{ width: "100%" }}
+                    onClick={() => {
+                      void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
+                    }}
+                  >
+                    Subscribe / 订阅
+                  </button>
+                )}
               </div>
             </article>
 
@@ -1353,18 +1458,55 @@ function App() {
                 <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
               </ul>
               <div className="pricing-card-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ width: "100%" }}
-                  onClick={() => {
-                    void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
-                  }}
-                >
-                  Subscribe / 订阅
-                </button>
+                {authToken &&
+                mePlanTier === "business" &&
+                meStripeSubscriptionId ? (
+                  meSubscriptionCancelAtPeriodEnd ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: "100%" }}
+                      disabled
+                    >
+                      Cancellation scheduled / 已安排周期末取消
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: "100%" }}
+                      onClick={() => setCancelSubModal("confirm")}
+                    >
+                      Cancel / 取消
+                    </button>
+                  )
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    style={{ width: "100%" }}
+                    onClick={() => {
+                      void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
+                    }}
+                  >
+                    Subscribe / 订阅
+                  </button>
+                )}
               </div>
             </article>
+          </div>
+
+          <div className="pricing-refund-policy">
+            <h3 className="pricing-subtitle">Refund policy / 退款政策</h3>
+            <p className="pricing-refund-policy-en">
+              <strong>Subscriptions:</strong> You may contact us to request a refund within{" "}
+              <strong>7 days</strong> of your <strong>first</strong> subscription payment, and within{" "}
+              <strong>2 days</strong> of each <strong>renewal</strong> payment after that.
+            </p>
+            <p className="pricing-refund-policy-zh">
+              <strong>订阅：</strong>首次订阅付款后 <strong>7 天内</strong>，以及之后每次<strong>续费</strong>
+              付款后 <strong>2 天内</strong>，可联系我们申请退款。
+            </p>
           </div>
         </section>
       )}
@@ -1800,6 +1942,86 @@ function App() {
           </p>
         </div>
       </footer>
+
+      {cancelSubModal ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (cancelSubLoading) return;
+            setCancelSubModal(null);
+            setCancelDonePeriodEnd(null);
+          }}
+        >
+          <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            {cancelSubModal === "confirm" ? (
+              <>
+                <h2 className="modal-title">Cancel subscription? / 取消订阅？</h2>
+                <p style={{ marginTop: 0, lineHeight: 1.55 }}>
+                  Are you sure you want to cancel? Your subscription will not auto-renew, but you will keep your
+                  current plan benefits until the end of the billing period you already paid for.
+                </p>
+                <p style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
+                  确定要取消吗？取消后<strong>不会自动续费</strong>；在当前已付费的计费周期结束前，您仍可继续使用当前档位权益。
+                </p>
+                {error ? <p className="error" style={{ marginTop: "0.75rem" }}>Error / 错误: {error}</p> : null}
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={cancelSubLoading}
+                    onClick={() => {
+                      setCancelSubModal(null);
+                      setError("");
+                    }}
+                  >
+                    Back / 返回
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    disabled={cancelSubLoading}
+                    onClick={() => void confirmCancelSubscription()}
+                  >
+                    {cancelSubLoading ? "Working… / 处理中…" : "Yes, cancel / 确认取消"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="modal-title">Subscription updated / 订阅已更新</h2>
+                <p style={{ marginTop: 0, lineHeight: 1.55 }}>
+                  Your plan will <strong>not auto-renew</strong>. You will keep access to your subscription features
+                  until the end of your current paid period
+                  {cancelDonePeriodEnd || meSubscriptionPeriodEnd
+                    ? ` (${new Date(cancelDonePeriodEnd || meSubscriptionPeriodEnd).toLocaleString()})`
+                    : ""}
+                  .
+                </p>
+                <p style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
+                  您的套餐<strong>到期后将不会自动续费</strong>。在当前已付费周期结束前，您仍可继续使用订阅权益
+                  {cancelDonePeriodEnd || meSubscriptionPeriodEnd
+                    ? `（约至 ${new Date(cancelDonePeriodEnd || meSubscriptionPeriodEnd).toLocaleString()}）`
+                    : ""}
+                  。
+                </p>
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      setCancelSubModal(null);
+                      setCancelDonePeriodEnd(null);
+                      setError("");
+                    }}
+                  >
+                    OK / 确定
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {deletePromptItem && (
         <div

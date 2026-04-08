@@ -109,6 +109,14 @@ app.post("/vsinfinite/stripe", express.raw({ type: "application/json" }), async 
   }
   if (!isNewEvent) return res.status(200).json({ received: true, duplicate: true });
 
+  const pool = getPool();
+
+  function assertPlanTier(t) {
+    const allowed = new Set(["free", "starter", "professional", "business"]);
+    const x = String(t || "").trim().toLowerCase();
+    return allowed.has(x) ? x : null;
+  }
+
   try {
     if (evt.type === "checkout.session.completed") {
       const session = evt.data?.object;
@@ -120,7 +128,6 @@ app.post("/vsinfinite/stripe", express.raw({ type: "application/json" }), async 
           .toLowerCase();
         const credits = Math.trunc(Number(session?.metadata?.scriptCredits || session?.metadata?.credits));
         if (email && Number.isFinite(credits) && credits !== 0) {
-          const pool = getPool();
           await pool.query(
             `UPDATE users SET script_credits = GREATEST(0, script_credits + $2::integer)
              WHERE lower(trim(email)) = $1`,
@@ -131,6 +138,105 @@ app.post("/vsinfinite/stripe", express.raw({ type: "application/json" }), async 
             id: session?.id,
           });
         }
+      }
+      if (mode === "subscription" && paid) {
+        const uid = Math.trunc(Number(session?.metadata?.userId));
+        const tier = assertPlanTier(session?.metadata?.planTier);
+        const cust = session?.customer != null ? String(session.customer) : null;
+        const subId = session?.subscription != null ? String(session.subscription) : null;
+        if (Number.isFinite(uid) && uid > 0 && tier) {
+          await pool.query(
+            `UPDATE users SET
+               plan_tier = $2,
+               stripe_customer_id = COALESCE($3, stripe_customer_id),
+               stripe_subscription_id = COALESCE($4, stripe_subscription_id),
+               subscription_cancel_at_period_end = FALSE
+             WHERE id = $1`,
+            [uid, tier, cust, subId]
+          );
+        } else {
+          console.warn("[stripe] checkout.session.completed subscription missing userId/planTier", {
+            id: session?.id,
+          });
+        }
+      }
+    }
+
+    if (evt.type === "invoice.paid") {
+      const inv = evt.data?.object;
+      const subRef = inv?.subscription;
+      if (!subRef) {
+        /* one-off invoice, not subscription */
+      } else {
+        const br = String(inv?.billing_reason || "");
+        if (br === "subscription_create" || br === "subscription_cycle") {
+          const sub = await stripe.subscriptions.retrieve(String(subRef));
+          const md = sub?.metadata || {};
+          const uid = Math.trunc(Number(md.userId));
+          const credits = Math.trunc(Number(md.monthlyCredits));
+          const tier = assertPlanTier(md.planTier);
+          const amt = Number(inv?.amount_paid ?? 0);
+          if (Number.isFinite(uid) && uid > 0 && tier && Number.isFinite(credits) && credits > 0 && amt > 0) {
+            await pool.query(
+              `UPDATE users SET
+                 plan_tier = $2,
+                 script_credits = GREATEST(0, script_credits + $3::integer),
+                 stripe_customer_id = COALESCE($4, stripe_customer_id),
+                 stripe_subscription_id = COALESCE($5, stripe_subscription_id),
+                 subscription_cancel_at_period_end = $6,
+                 subscription_current_period_end = to_timestamp($7::double precision)
+               WHERE id = $1`,
+              [
+                uid,
+                tier,
+                credits,
+                inv?.customer != null ? String(inv.customer) : null,
+                String(subRef),
+                !!sub.cancel_at_period_end,
+                Number(sub.current_period_end) || 0,
+              ]
+            );
+          } else {
+            console.warn("[stripe] invoice.paid subscription missing metadata or zero payment", {
+              invoice: inv?.id,
+              uid,
+              tier,
+              credits,
+              amt,
+            });
+          }
+        }
+      }
+    }
+
+    if (evt.type === "customer.subscription.updated") {
+      const sub = evt.data?.object;
+      const uid = Math.trunc(Number(sub?.metadata?.userId));
+      const cpe = Number(sub?.current_period_end);
+      if (Number.isFinite(uid) && uid > 0 && Number.isFinite(cpe) && cpe > 0) {
+        await pool.query(
+          `UPDATE users SET
+             subscription_cancel_at_period_end = $2,
+             subscription_current_period_end = to_timestamp($3::double precision)
+           WHERE id = $1`,
+          [uid, !!sub.cancel_at_period_end, cpe]
+        );
+      }
+    }
+
+    if (evt.type === "customer.subscription.deleted") {
+      const sub = evt.data?.object;
+      const uid = Math.trunc(Number(sub?.metadata?.userId));
+      if (Number.isFinite(uid) && uid > 0) {
+        await pool.query(
+          `UPDATE users SET
+             plan_tier = 'free',
+             stripe_subscription_id = NULL,
+             subscription_cancel_at_period_end = FALSE,
+             subscription_current_period_end = NULL
+           WHERE id = $1`,
+          [uid]
+        );
       }
     }
   } catch (e) {
@@ -184,10 +290,51 @@ app.post("/vsinfinite/stripe/create-checkout-session", requireAuth, async (req, 
 
   const packToPrice = parseJsonEnv("STRIPE_PACK_PRICE_MAP_JSON", {});
   const priceToCredits = parseJsonEnv("STRIPE_PRICE_CREDITS_MAP_JSON", {});
+  const subPackMap = parseJsonEnv("STRIPE_SUBSCRIPTION_PACK_MAP_JSON", {});
+  const priceToSubDetails = parseJsonEnv("STRIPE_SUBSCRIPTION_PRICE_DETAILS_JSON", {});
 
-  const priceId = providedPriceId || (pack ? String(packToPrice[pack] || "") : "");
+  const mode = kind === "subscription" ? "subscription" : "payment";
+
+  let priceId = providedPriceId;
+  let subPlanTier = "";
+  let subMonthlyCredits = 0;
+
+  if (mode === "subscription") {
+    if (priceId) {
+      const det = priceToSubDetails[priceId];
+      if (det) {
+        subPlanTier = String(det.planTier || "");
+        subMonthlyCredits = Math.trunc(Number(det.monthlyCredits));
+      }
+    } else if (pack && subPackMap[pack]) {
+      const spec = subPackMap[pack];
+      priceId = String(spec.price || spec.priceId || "");
+      subPlanTier = String(spec.planTier || "");
+      subMonthlyCredits = Math.trunc(Number(spec.monthlyCredits));
+    } else {
+      priceId = pack ? String(packToPrice[pack] || "") : "";
+      const det = priceId ? priceToSubDetails[priceId] : null;
+      if (det) {
+        subPlanTier = String(det.planTier || "");
+        subMonthlyCredits = Math.trunc(Number(det.monthlyCredits));
+      }
+    }
+  } else {
+    priceId = providedPriceId || (pack ? String(packToPrice[pack] || "") : "");
+  }
+
   if (!priceId || !/^price_/.test(priceId)) {
     return res.status(400).json({ error: "Unknown or missing priceId/pack." });
+  }
+
+  if (mode === "subscription") {
+    const tierOk = /^(starter|professional|business)$/.test(String(subPlanTier).toLowerCase());
+    if (!tierOk || !Number.isFinite(subMonthlyCredits) || subMonthlyCredits <= 0) {
+      return res.status(503).json({
+        error:
+          "Subscription pack misconfigured. Set STRIPE_SUBSCRIPTION_PACK_MAP_JSON (or STRIPE_SUBSCRIPTION_PRICE_DETAILS_JSON for each price).",
+      });
+    }
   }
 
   const allowedPrices = String(process.env.STRIPE_ALLOWED_PRICE_IDS || "")
@@ -212,7 +359,6 @@ app.post("/vsinfinite/stripe/create-checkout-session", requireAuth, async (req, 
   }
 
   const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
-  const mode = kind === "subscription" ? "subscription" : "payment";
 
   const creditsForPrice = Math.trunc(Number(priceToCredits?.[priceId]));
   const metadata = {
@@ -223,6 +369,8 @@ app.post("/vsinfinite/stripe/create-checkout-session", requireAuth, async (req, 
       mode === "payment" && Number.isFinite(creditsForPrice) ? String(creditsForPrice) : "",
     pack: pack || "",
     priceId,
+    planTier: mode === "subscription" ? String(subPlanTier).toLowerCase() : "",
+    monthlyCredits: mode === "subscription" ? String(subMonthlyCredits) : "",
   };
 
   if (mode === "payment") {
@@ -242,6 +390,19 @@ app.post("/vsinfinite/stripe/create-checkout-session", requireAuth, async (req, 
       cancel_url: cancelUrl,
       metadata,
       customer_email: metadata.userEmail,
+      subscription_data:
+        mode === "subscription"
+          ? {
+              metadata: {
+                userId: metadata.userId,
+                userEmail: metadata.userEmail,
+                planTier: metadata.planTier,
+                monthlyCredits: metadata.monthlyCredits,
+                pack: metadata.pack,
+                priceId: metadata.priceId,
+              },
+            }
+          : undefined,
     });
     return res.json({ ok: true, url: session.url });
   } catch (e) {
@@ -3771,11 +3932,71 @@ app.get("/me", requireAuth, async (req, res) => {
         email: row.email,
         planTier: row.plan_tier,
         scriptCredits: Number(row.script_credits ?? 0),
+        stripeSubscriptionId: row.stripe_subscription_id || null,
+        subscriptionCancelAtPeriodEnd: !!row.subscription_cancel_at_period_end,
+        subscriptionCurrentPeriodEnd: row.subscription_current_period_end
+          ? new Date(row.subscription_current_period_end).toISOString()
+          : null,
       },
     });
   } catch (e) {
     console.error("GET /me:", e);
     res.status(500).json({ error: e.message || "failed" });
+  }
+});
+
+app.post("/vsinfinite/stripe/cancel-subscription", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({ error: "JWT auth is not enabled on this server." });
+  }
+  const secretKey = process.env.STRIPE_SECRET_KEY || null;
+  if (!secretKey) return res.status(503).json({ error: "Stripe is not configured." });
+
+  const uid = Number(req.auth?.sub);
+  if (!Number.isFinite(uid)) return res.status(401).json({ error: "Unauthorized" });
+
+  const row = await getUserPlanRow(uid);
+  if (!row) return res.status(404).json({ error: "user not found" });
+
+  const tier = String(row.plan_tier || "").toLowerCase();
+  if (tier === "free") {
+    return res.status(400).json({ error: "No paid plan to cancel." });
+  }
+  if (!row.stripe_subscription_id) {
+    return res.status(400).json({
+      error:
+        "No Stripe subscription on file. Contact support if your account should have an active subscription.",
+    });
+  }
+  if (row.subscription_cancel_at_period_end) {
+    return res.status(400).json({ error: "Subscription is already set to cancel at period end." });
+  }
+
+  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
+  try {
+    const sub = await stripe.subscriptions.update(String(row.stripe_subscription_id), {
+      cancel_at_period_end: true,
+    });
+    const cpe = Number(sub.current_period_end);
+    if (!Number.isFinite(cpe) || cpe <= 0) {
+      throw new Error("Stripe subscription missing current_period_end");
+    }
+    const pool = getPool();
+    await pool.query(
+      `UPDATE users SET
+         subscription_cancel_at_period_end = TRUE,
+         subscription_current_period_end = to_timestamp($2::double precision)
+       WHERE id = $1`,
+      [uid, cpe]
+    );
+    return res.json({
+      ok: true,
+      cancelAtPeriodEnd: true,
+      currentPeriodEnd: new Date(cpe * 1000).toISOString(),
+    });
+  } catch (e) {
+    console.error("[stripe] cancel-subscription:", e);
+    return res.status(500).json({ error: "Failed to cancel subscription with Stripe." });
   }
 });
 

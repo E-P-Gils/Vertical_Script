@@ -15,7 +15,14 @@ export async function getUserPlanRow(userId) {
   const pool = getPool();
   const id = Number(userId);
   if (!Number.isFinite(id)) return null;
-  const r = await pool.query(`SELECT id, email, plan_tier, script_credits FROM users WHERE id = $1`, [id]);
+  const r = await pool.query(
+    `SELECT id, email, plan_tier, script_credits,
+            stripe_subscription_id,
+            subscription_cancel_at_period_end,
+            subscription_current_period_end
+     FROM users WHERE id = $1`,
+    [id]
+  );
   return r.rows[0] || null;
 }
 

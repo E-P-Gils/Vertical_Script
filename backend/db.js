@@ -83,6 +83,14 @@ export async function initDb() {
   `);
 
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS script_credits INTEGER NOT NULL DEFAULT 0;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT;`);
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE;`
+  );
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_current_period_end TIMESTAMPTZ;`
+  );
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stripe_webhook_events (
