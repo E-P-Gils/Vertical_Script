@@ -339,9 +339,32 @@
   align-items: stretch;
   padding: 0.2rem 0.1rem 0.55rem;
 }
+.pricing-grid.pricing-grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  max-width: 74rem;
+  margin-left: auto;
+  margin-right: auto;
+  gap: 1rem;
+}
 @media (max-width: 1024px) {
   .pricing-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pricing-grid.pricing-grid-3 {
+    max-width: none;
+    gap: 0.9rem;
+  }
+}
+
+.pricing-payg-batch-row {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
+  gap: 1rem;
+  align-items: start;
+}
+@media (max-width: 1024px) {
+  .pricing-payg-batch-row {
+    grid-template-columns: 1fr;
   }
 }
 @media (max-width: 560px) {
