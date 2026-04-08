@@ -1304,43 +1304,195 @@ function App() {
                   )}
                 </p>
 
-                <div className={paidTier ? "pricing-payg-batch-row" : ""}>
-                  <div className={paidTier ? "pricing-payg-col" : ""}>
-                    <div className={paidTier ? "" : "pricing-grid"}>
-                      <article className="pricing-card">
-                        <h3 className="pricing-name">
-                          {paidTier ? "Buy Script Credit / 购买剧本额度" : "Pay-as-you-go / 按需付费"}
-                        </h3>
-                        <p className="pricing-rate">
-                          ¥{overage} <span>per script / 每本剧本</span>
-                        </p>
-                        <ul className="pricing-features">
-                          <li>
-                            {paidTier
-                              ? "Extra script credits billed per script at your tier rate / 按当前档位单本价格加购"
-                              : "No monthly commitment — buy scripts as you need / 无月费，按本购买"}
-                          </li>
-                          <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
-                        </ul>
-                        <div className="pricing-card-actions">
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            style={{ width: "100%" }}
-                            disabled
-                            onClick={() => {
-                              setError("Purchases are temporarily disabled. / 暂时无法购买。");
-                            }}
-                          >
-                            {paidTier ? "Buy Script Credit (disabled) / 购买额度（暂不可用）" : "Purchase (disabled) / 购买（暂不可用）"}
-                          </button>
-                        </div>
-                      </article>
-                    </div>
-                  </div>
+                {paidTier ? (
+                  <>
+                    <div className="pricing-payg-batch-row">
+                      <div className="pricing-payg-col">
+                        <article className="pricing-card">
+                          <h3 className="pricing-name">Buy Script Credit / 购买剧本额度</h3>
+                          <p className="pricing-rate">
+                            ¥{overage} <span>per script / 每本剧本</span>
+                          </p>
+                          <ul className="pricing-features">
+                            <li>Extra script credits billed per script at your tier rate / 按当前档位单本价格加购</li>
+                            <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                          </ul>
+                          <div className="pricing-card-actions">
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              style={{ width: "100%" }}
+                              onClick={() => {
+                                void startStripeCheckout({ pack: payPack, kind: "payment" });
+                              }}
+                            >
+                              Buy Script Credit / 购买额度
+                            </button>
+                          </div>
+                        </article>
+                      </div>
 
-                  <div className={paidTier ? "pricing-batch-col" : ""}>
-                    <div className="pricing-batch-section" style={paidTier ? { marginTop: 0 } : { marginTop: "1.75rem" }}>
+                      <div className="pricing-batch-col">
+                        <div className="pricing-batch-section" style={{ marginTop: 0 }}>
+                          <h3 className="pricing-subtitle">Batch value pricing / 批量梯度价</h3>
+                          <p className="pricing-batch-lead">
+                            Bundles are priced for value—the <strong>5-script pack</strong> is a product, not just a
+                            discount. / 梯度打包体现价值——<strong>5 本剧本包</strong>是独立产品，而不是“随便减点价”。
+                          </p>
+                          <div className="pricing-bundle-grid">
+                            {[
+                              { n: 5, total: 400, each: 80 },
+                              { n: 20, total: 1200, each: 60 },
+                              { n: 100, total: 4000, each: 40 },
+                            ].map((b) => (
+                              <div key={b.n} className="pricing-bundle-card">
+                                <div className="pricing-bundle-count">
+                                  {b.n} script{b.n > 1 ? "s" : ""} / {b.n} 本
+                                </div>
+                                <div className="pricing-bundle-total">¥{b.total}</div>
+                                <div className="pricing-bundle-each">
+                                  ¥{b.each} <span>each / 每本</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary pricing-bundle-cta"
+                                  onClick={() => {
+                                    void startStripeCheckout({ pack: `pack_${b.n}`, kind: "payment" });
+                                  }}
+                                >
+                                  Purchase / 购买
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <h3 className="pricing-subtitle" style={{ marginTop: "1.75rem" }}>
+                      Monthly tiers / 月付档位
+                    </h3>
+                    <p className="script-output-hint pricing-hint" style={{ marginBottom: "0.9rem" }}>
+                      Aggressive included scripts + low overage rates. / 包含剧本数更激进，超出后单价更低。
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="pricing-payg-sub-row">
+                      <div className="pricing-payg-col">
+                        <article className="pricing-card">
+                          <h3 className="pricing-name">Pay-as-you-go / 按需付费</h3>
+                          <p className="pricing-rate">
+                            ¥120 <span>per script / 每本剧本</span>
+                          </p>
+                          <ul className="pricing-features">
+                            <li>No monthly commitment — buy scripts as you need / 无月费，按本购买</li>
+                            <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                          </ul>
+                          <div className="pricing-card-actions">
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              style={{ width: "100%" }}
+                              onClick={() => {
+                                void startStripeCheckout({ pack: "payg_1", kind: "payment" });
+                              }}
+                            >
+                              Purchase / 购买
+                            </button>
+                          </div>
+                        </article>
+                      </div>
+                      <div className="pricing-sub-col">
+                        <div className="pricing-grid pricing-grid-3 pricing-grid-tight">
+                          <article className="pricing-card">
+                            <h3 className="pricing-name">Starter / 入门</h3>
+                            <p className="pricing-rate">
+                              ¥599<span className="pricing-rate-unit">/month · 月</span>
+                            </p>
+                            <ul className="pricing-features">
+                              <li>
+                                <strong>5 free scripts / month</strong> included / 每月含 <strong>5 本免费</strong> 剧本额度
+                              </li>
+                              <li>
+                                <strong>¥80</strong> per script after quota / 超额后每本 <strong>¥80</strong>
+                              </li>
+                              <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                            </ul>
+                            <div className="pricing-card-actions">
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                style={{ width: "100%" }}
+                                onClick={() => {
+                                  void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
+                                }}
+                              >
+                                Subscribe / 订阅
+                              </button>
+                            </div>
+                          </article>
+
+                          <article className="pricing-card">
+                            <h3 className="pricing-name">Professional / 专业</h3>
+                            <p className="pricing-rate">
+                              ¥2,999<span className="pricing-rate-unit">/month · 月</span>
+                            </p>
+                            <ul className="pricing-features">
+                              <li>
+                                <strong>20 free scripts / month</strong> included / 每月含 <strong>20 本免费</strong> 剧本额度
+                              </li>
+                              <li>
+                                <strong>¥50</strong> per script after quota / 超额后每本 <strong>¥50</strong>
+                              </li>
+                              <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                            </ul>
+                            <div className="pricing-card-actions">
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                style={{ width: "100%" }}
+                                onClick={() => {
+                                  void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
+                                }}
+                              >
+                                Subscribe / 订阅
+                              </button>
+                            </div>
+                          </article>
+
+                          <article className="pricing-card">
+                            <h3 className="pricing-name">Business / 商务</h3>
+                            <p className="pricing-rate">
+                              ¥9,999<span className="pricing-rate-unit">/month · 月</span>
+                            </p>
+                            <ul className="pricing-features">
+                              <li>
+                                <strong>100 free scripts / month</strong> included / 每月含 <strong>100 本免费</strong> 剧本额度
+                              </li>
+                              <li>
+                                <strong>¥30</strong> per script after quota / 超额后每本 <strong>¥30</strong>
+                              </li>
+                              <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                            </ul>
+                            <div className="pricing-card-actions">
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                style={{ width: "100%" }}
+                                onClick={() => {
+                                  void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
+                                }}
+                              >
+                                Subscribe / 订阅
+                              </button>
+                            </div>
+                          </article>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pricing-batch-section pricing-batch-under" style={{ marginTop: "1.25rem" }}>
                       <h3 className="pricing-subtitle">Batch value pricing / 批量梯度价</h3>
                       <p className="pricing-batch-lead">
                         Bundles are priced for value—the <strong>5-script pack</strong> is a product, not just a discount.
@@ -1363,28 +1515,20 @@ function App() {
                             <button
                               type="button"
                               className="btn btn-primary pricing-bundle-cta"
-                              disabled
                               onClick={() => {
-                                setError("Purchases are temporarily disabled. / 暂时无法购买。");
+                                void startStripeCheckout({ pack: `pack_${b.n}`, kind: "payment" });
                               }}
                             >
-                              Purchase (disabled) / 购买（暂不可用）
+                              Purchase / 购买
                             </button>
                           </div>
                         ))}
                       </div>
                     </div>
-                  </div>
-                </div>
+                  </>
+                )}
 
-                <h3 className="pricing-subtitle" style={{ marginTop: "1.75rem" }}>
-                  Monthly tiers / 月付档位
-                </h3>
-                <p className="script-output-hint pricing-hint" style={{ marginBottom: "0.9rem" }}>
-                  Aggressive included scripts + low overage rates. / 包含剧本数更激进，超出后单价更低。
-                </p>
-
-                <div className={paidTier ? "pricing-grid pricing-grid-3" : "pricing-grid"}>
+                <div className={paidTier ? "pricing-grid pricing-grid-3" : "pricing-hidden"} style={paidTier ? undefined : { display: "none" }}>
                   <article className="pricing-card">
               <h3 className="pricing-name">Starter / 入门</h3>
               <p className="pricing-rate">
@@ -1425,12 +1569,11 @@ function App() {
                     type="button"
                     className="btn btn-primary"
                     style={{ width: "100%" }}
-                    disabled
                     onClick={() => {
-                      setError("Subscriptions are temporarily disabled. / 暂时无法订阅。");
+                      void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
                     }}
                   >
-                    Subscribe (disabled) / 订阅（暂不可用）
+                    Subscribe / 订阅
                   </button>
                 )}
               </div>
@@ -1476,12 +1619,11 @@ function App() {
                     type="button"
                     className="btn btn-primary"
                     style={{ width: "100%" }}
-                    disabled
                     onClick={() => {
-                      setError("Subscriptions are temporarily disabled. / 暂时无法订阅。");
+                      void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
                     }}
                   >
-                    Subscribe (disabled) / 订阅（暂不可用）
+                    Subscribe / 订阅
                   </button>
                 )}
               </div>
@@ -1527,12 +1669,11 @@ function App() {
                     type="button"
                     className="btn btn-primary"
                     style={{ width: "100%" }}
-                    disabled
                     onClick={() => {
-                      setError("Subscriptions are temporarily disabled. / 暂时无法订阅。");
+                      void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
                     }}
                   >
-                    Subscribe (disabled) / 订阅（暂不可用）
+                    Subscribe / 订阅
                   </button>
                 )}
               </div>
