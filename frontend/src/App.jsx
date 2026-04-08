@@ -1327,11 +1327,12 @@ function App() {
                             type="button"
                             className="btn btn-primary"
                             style={{ width: "100%" }}
+                            disabled
                             onClick={() => {
-                              void startStripeCheckout({ pack: payPack, kind: "payment" });
+                              setError("Purchases are temporarily disabled. / 暂时无法购买。");
                             }}
                           >
-                            {paidTier ? "Buy Script Credit / 购买额度" : "Purchase / 购买"}
+                            {paidTier ? "Buy Script Credit (disabled) / 购买额度（暂不可用）" : "Purchase (disabled) / 购买（暂不可用）"}
                           </button>
                         </div>
                       </article>
@@ -1362,11 +1363,12 @@ function App() {
                             <button
                               type="button"
                               className="btn btn-primary pricing-bundle-cta"
+                              disabled
                               onClick={() => {
-                                void startStripeCheckout({ pack: `pack_${b.n}`, kind: "payment" });
+                                setError("Purchases are temporarily disabled. / 暂时无法购买。");
                               }}
                             >
-                              Purchase / 购买
+                              Purchase (disabled) / 购买（暂不可用）
                             </button>
                           </div>
                         ))}
@@ -1423,11 +1425,12 @@ function App() {
                     type="button"
                     className="btn btn-primary"
                     style={{ width: "100%" }}
+                    disabled
                     onClick={() => {
-                      void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
+                      setError("Subscriptions are temporarily disabled. / 暂时无法订阅。");
                     }}
                   >
-                    Subscribe / 订阅
+                    Subscribe (disabled) / 订阅（暂不可用）
                   </button>
                 )}
               </div>
@@ -1473,11 +1476,12 @@ function App() {
                     type="button"
                     className="btn btn-primary"
                     style={{ width: "100%" }}
+                    disabled
                     onClick={() => {
-                      void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
+                      setError("Subscriptions are temporarily disabled. / 暂时无法订阅。");
                     }}
                   >
-                    Subscribe / 订阅
+                    Subscribe (disabled) / 订阅（暂不可用）
                   </button>
                 )}
               </div>
@@ -1523,11 +1527,12 @@ function App() {
                     type="button"
                     className="btn btn-primary"
                     style={{ width: "100%" }}
+                    disabled
                     onClick={() => {
-                      void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
+                      setError("Subscriptions are temporarily disabled. / 暂时无法订阅。");
                     }}
                   >
-                    Subscribe / 订阅
+                    Subscribe (disabled) / 订阅（暂不可用）
                   </button>
                 )}
               </div>
