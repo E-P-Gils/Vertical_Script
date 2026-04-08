@@ -136,6 +136,8 @@ function App() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authConfirmPassword, setAuthConfirmPassword] = useState("");
+  // Some auth UI flows reference this; keep defined to avoid runtime errors.
+  const [authCode, setAuthCode] = useState("");
   const [authMode, setAuthMode] = useState("register"); // register | login
 
   /** From GET /me — prepaid / grant script generations (not decremented by this app yet). */
