@@ -21,7 +21,12 @@ import { fixMergedWordIssuesPhase2, fixMergedWordIssuesPhase2Detailed } from "./
 import { auditMergedWords } from "./mergedWordsAudit.js";
 import { initDb, getPool } from "./db.js";
 import { loginUser, registerUser, requireAuth, verifyEmailCode, isJwtAuthEnabled } from "./auth.js";
-import { getUserPlanRow, setUserPlanTierByUserId, PLAN_TIERS } from "./userPlan.js";
+import {
+  getUserPlanRow,
+  setUserPlanTierByUserId,
+  PLAN_TIERS,
+  assertValidPlanTier,
+} from "./userPlan.js";
 import {
   createGeneratingScript,
   updateScriptProgress,
@@ -4052,6 +4057,79 @@ app.post("/owner/grant-script-credits", requireAuth, requireOwnerOps, async (req
   } catch (e) {
     console.error("POST /owner/grant-script-credits:", e);
     res.status(500).json({ error: "Failed to update credits" });
+  }
+});
+
+/** Owner-only: look up vertical_script plan (plan_tier) + credits by email. */
+app.get("/owner/user-plan", requireAuth, requireOwnerOps, async (req, res) => {
+  const email = normalizeOpsEmail(req.query.email);
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+    return res.status(400).json({ error: "Invalid or missing email query param" });
+  }
+  try {
+    const pool = getPool();
+    const r = await pool.query(
+      `SELECT id, email, plan_tier, script_credits,
+              stripe_customer_id, stripe_subscription_id,
+              subscription_cancel_at_period_end,
+              subscription_current_period_end
+       FROM users WHERE lower(trim(email)) = $1`,
+      [email]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const row = r.rows[0];
+    const cpe = row.subscription_current_period_end;
+    res.json({
+      ok: true,
+      user: {
+        id: row.id,
+        email: row.email,
+        planTier: row.plan_tier,
+        scriptCredits: Number(row.script_credits ?? 0),
+        stripeCustomerId: row.stripe_customer_id || null,
+        stripeSubscriptionId: row.stripe_subscription_id || null,
+        subscriptionCancelAtPeriodEnd: !!row.subscription_cancel_at_period_end,
+        subscriptionCurrentPeriodEnd:
+          cpe instanceof Date ? cpe.toISOString() : cpe ? new Date(cpe).toISOString() : null,
+      },
+    });
+  } catch (e) {
+    console.error("GET /owner/user-plan:", e);
+    res.status(500).json({ error: "Lookup failed" });
+  }
+});
+
+/** Owner-only: set `plan_tier` by email (`none` or `free` → free tier). */
+app.post("/owner/set-plan-tier", requireAuth, requireOwnerOps, async (req, res) => {
+  const email = normalizeOpsEmail(req.body?.email);
+  let tierRaw = req.body?.planTier ?? req.body?.plan_tier ?? "";
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+    return res.status(400).json({ error: "Invalid email" });
+  }
+  const t = String(tierRaw).trim().toLowerCase();
+  const tier = t === "none" ? "free" : t;
+  try {
+    assertValidPlanTier(tier);
+  } catch (e) {
+    return res.status(400).json({ error: e?.message || "Invalid plan tier" });
+  }
+  try {
+    const pool = getPool();
+    const found = await pool.query(`SELECT id FROM users WHERE lower(trim(email)) = $1`, [email]);
+    if (found.rowCount === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const uid = found.rows[0].id;
+    const updated = await setUserPlanTierByUserId(uid, tier);
+    res.json({
+      ok: true,
+      user: { id: updated.id, email: updated.email, planTier: updated.plan_tier },
+    });
+  } catch (e) {
+    console.error("POST /owner/set-plan-tier:", e);
+    res.status(500).json({ error: "Failed to update plan tier" });
   }
 });
 
