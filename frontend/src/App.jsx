@@ -354,44 +354,6 @@ function App() {
     }
   }, [authToken, fetchScriptDetail, scheduleProgressPoll]);
 
-  const refundCreditForScript = useCallback(
-    async (scriptId) => {
-      if (!authToken || !scriptId) return;
-      try {
-        const r = await fetch(`${API_BASE}/scripts/${encodeURIComponent(scriptId)}/refund-credit`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) return;
-        if (d.refunded) {
-          setMyScripts((prev) =>
-            prev.map((it) => (it.id === scriptId ? { ...it, creditRefunded: true } : it))
-          );
-          // Update the credits strip if visible.
-          void refreshMe();
-        }
-      } catch {
-        /* ignore */
-      }
-    },
-    [API_BASE, authToken, refreshMe]
-  );
-
-  // When a script fails or completes short, auto-refund one credit (idempotent).
-  useEffect(() => {
-    if (!authToken) return;
-    (myScripts || []).forEach((it) => {
-      if (!it || !isServerBackedScriptId(it.id)) return;
-      if (it.creditRefunded) return;
-      const status = String(it.status || "");
-      const target = Number(it.episodeTarget ?? 60);
-      const done = Number(it.episodeDone ?? 0);
-      const eligible = status === "failed" || (status === "complete" && done < target);
-      if (eligible) void refundCreditForScript(it.id);
-    });
-  }, [authToken, myScripts, refundCreditForScript]);
-
   useEffect(() => {
     activeScriptIdRef.current = activeScriptId;
   }, [activeScriptId]);
@@ -523,6 +485,44 @@ function App() {
       /* ignore */
     }
   }, [authToken]);
+
+  const refundCreditForScript = useCallback(
+    async (scriptId) => {
+      if (!authToken || !scriptId) return;
+      try {
+        const r = await fetch(`${API_BASE}/scripts/${encodeURIComponent(scriptId)}/refund-credit`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return;
+        if (d.refunded) {
+          setMyScripts((prev) =>
+            prev.map((it) => (it.id === scriptId ? { ...it, creditRefunded: true } : it))
+          );
+          // Update the credits strip if visible.
+          void refreshMe();
+        }
+      } catch {
+        /* ignore */
+      }
+    },
+    [API_BASE, authToken, refreshMe]
+  );
+
+  // When a script fails or completes short, auto-refund one credit (idempotent).
+  useEffect(() => {
+    if (!authToken) return;
+    (myScripts || []).forEach((it) => {
+      if (!it || !isServerBackedScriptId(it.id)) return;
+      if (it.creditRefunded) return;
+      const status = String(it.status || "");
+      const target = Number(it.episodeTarget ?? 60);
+      const done = Number(it.episodeDone ?? 0);
+      const eligible = status === "failed" || (status === "complete" && done < target);
+      if (eligible) void refundCreditForScript(it.id);
+    });
+  }, [authToken, myScripts, refundCreditForScript]);
 
   const showOwnerTab =
     Boolean(authToken) &&
