@@ -749,6 +749,27 @@
   margin: 0.65rem 0 0;
   opacity: 0.92;
 }
+.generate-page-bug-note {
+  width: 100%;
+  max-width: 640px;
+  padding: 0.75rem 1rem;
+  margin: 0;
+  background: rgba(26, 26, 29, 0.5);
+  border: 1px solid rgba(139, 32, 32, 0.35);
+  border-radius: 8px;
+  color: var(--cream);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  text-align: left;
+}
+.generate-page-bug-note-en {
+  margin: 0;
+  opacity: 0.94;
+}
+.generate-page-bug-note-zh {
+  margin: 0.55rem 0 0;
+  opacity: 0.9;
+}
 .modal-actions {
   display: flex;
   gap: 0.75rem;

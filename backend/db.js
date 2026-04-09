@@ -114,10 +114,14 @@ export async function initDb() {
       episode_target INTEGER NOT NULL DEFAULT 60,
       episode_done INTEGER NOT NULL DEFAULT 0,
       error_message TEXT,
+      credit_refunded BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await pool.query(
+    `ALTER TABLE saved_scripts ADD COLUMN IF NOT EXISTS credit_refunded BOOLEAN NOT NULL DEFAULT FALSE;`
+  );
   await pool.query(
     `CREATE INDEX IF NOT EXISTS idx_saved_scripts_user_updated ON saved_scripts (user_id, updated_at DESC);`
   );

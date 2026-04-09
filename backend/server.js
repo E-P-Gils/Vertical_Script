@@ -35,6 +35,7 @@ import {
   getScriptForUser,
   listScriptsForUser,
   deleteScriptForUser,
+  refundCreditForScriptIfEligible,
   markInterruptedGeneratingScripts,
   countGeneratingScriptsForUser,
   MAX_CONCURRENT_GENERATIONS_PER_USER,
@@ -73,7 +74,7 @@ const DYNAMIC_MERGE_PATTERNS_PATH = join(
 const app = express();
 const corsOptions = {
   origin: true,
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 app.use(cors(corsOptions));
@@ -4352,6 +4353,24 @@ app.delete("/scripts/:id", requireAuth, async (req, res) => {
   } catch (e) {
     console.error("deleteScriptForUser:", e);
     return res.status(500).json({ error: "Failed to delete script" });
+  }
+});
+
+/** Refund 1 script credit for a failed/incomplete generation (idempotent). */
+app.post("/scripts/:id/refund-credit", requireAuth, async (req, res) => {
+  if (!isJwtAuthEnabled()) {
+    return res.status(503).json({ error: "Auth not enabled" });
+  }
+  const userId = Number(req.auth?.sub);
+  if (!Number.isFinite(userId)) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const out = await refundCreditForScriptIfEligible(req.params.id, userId);
+    return res.json({ ok: true, refunded: !!out.refunded, scriptCredits: out.scriptCredits ?? null });
+  } catch (e) {
+    const msg = e?.message || "failed";
+    const status = msg.includes("not found") ? 404 : 500;
+    console.error("POST /scripts/:id/refund-credit:", e);
+    return res.status(status).json({ error: msg.includes("not found") ? "Not found" : "Refund failed" });
   }
 });
 

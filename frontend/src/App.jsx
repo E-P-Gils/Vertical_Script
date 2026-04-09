@@ -93,6 +93,7 @@ function mapServerListRowToItem(row, prevItem) {
     episodeDone: row.episode_done ?? prevItem?.episodeDone ?? 0,
     episodeTarget: row.episode_target ?? prevItem?.episodeTarget ?? 60,
     errorMessage: row.error_message ? String(row.error_message) : prevItem?.errorMessage || "",
+    creditRefunded: row.credit_refunded != null ? !!row.credit_refunded : !!prevItem?.creditRefunded,
   };
 }
 
@@ -352,6 +353,44 @@ function App() {
       /* ignore */
     }
   }, [authToken, fetchScriptDetail, scheduleProgressPoll]);
+
+  const refundCreditForScript = useCallback(
+    async (scriptId) => {
+      if (!authToken || !scriptId) return;
+      try {
+        const r = await fetch(`${API_BASE}/scripts/${encodeURIComponent(scriptId)}/refund-credit`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return;
+        if (d.refunded) {
+          setMyScripts((prev) =>
+            prev.map((it) => (it.id === scriptId ? { ...it, creditRefunded: true } : it))
+          );
+          // Update the credits strip if visible.
+          void refreshMe();
+        }
+      } catch {
+        /* ignore */
+      }
+    },
+    [API_BASE, authToken, refreshMe]
+  );
+
+  // When a script fails or completes short, auto-refund one credit (idempotent).
+  useEffect(() => {
+    if (!authToken) return;
+    (myScripts || []).forEach((it) => {
+      if (!it || !isServerBackedScriptId(it.id)) return;
+      if (it.creditRefunded) return;
+      const status = String(it.status || "");
+      const target = Number(it.episodeTarget ?? 60);
+      const done = Number(it.episodeDone ?? 0);
+      const eligible = status === "failed" || (status === "complete" && done < target);
+      if (eligible) void refundCreditForScript(it.id);
+    });
+  }, [authToken, myScripts, refundCreditForScript]);
 
   useEffect(() => {
     activeScriptIdRef.current = activeScriptId;
@@ -1798,6 +1837,28 @@ function App() {
                             {it.errorMessage}
                           </div>
                         ) : null}
+                        {(it.status === "failed" ||
+                          (it.status === "complete" &&
+                            Number(it.episodeTarget ?? 60) > 0 &&
+                            Number(it.episodeDone ?? 0) < Number(it.episodeTarget ?? 60))) && (
+                          <div
+                            className="error"
+                            style={{
+                              marginTop: "0.45rem",
+                              fontSize: "0.85rem",
+                              lineHeight: 1.45,
+                              opacity: 0.98,
+                            }}
+                          >
+                            <div style={{ fontWeight: 700 }}>
+                              This generation experienced issues on the backend. We are actively investigating and your
+                              script credit has been refunded. We apologize for the inconvenience.
+                            </div>
+                            <div style={{ marginTop: "0.35rem", opacity: 0.95 }}>
+                              本次生成在后台遇到问题。我们正在积极排查，且已为您退还本次消耗的剧本额度。对此给您带来的不便，我们深表歉意。
+                            </div>
+                          </div>
+                        )}
                       </div>
                       <div style={{ opacity: isActive ? 1 : 0.75 }}>
                         {it.status === "generating" || it.generating
@@ -2063,6 +2124,17 @@ function App() {
               <strong>5 部剧本</strong>在生成中。
             </p>
           </div>
+          <div className="generate-page-bug-note" role="note">
+            <p className="generate-page-bug-note-en">
+              *There is a bug that sometimes shuffles the episode end numbers. It is especially common for the EPISODE
+              60 END to actually read EPISODE 20 END. However this bug does not affect the quality or length of the
+              scripts; we guarantee 60 episodes will be created with each generation.
+            </p>
+            <p className="generate-page-bug-note-zh">
+              *已知显示问题：各集结尾处的集数编号有时会被打乱显示，尤其是第 60 集结尾可能显示为「第 20 集结尾」等。该问题
+              <strong>不影响</strong>剧本质量与篇幅；我们保证每次生成均会产出完整 <strong>60 集</strong>内容。
+            </p>
+          </div>
           <button
             type="button"
             className="btn-open"
@@ -2160,6 +2232,9 @@ function App() {
           </p>
           <p className="ip-note-zh">
             本平台创始文档明确：Vertical Infinite 不会主张对通过本软件生成之剧本内容的知识产权。每一份生成后的剧本均归生成该剧本的用户所有。
+          </p>
+          <p className="ip-note-en" style={{ marginTop: "0.5rem" }}>
+            Customer Support Contact = <strong>verticalinfinite@proton.me</strong>
           </p>
         </div>
       </footer>

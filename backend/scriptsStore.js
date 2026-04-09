@@ -81,7 +81,7 @@ export async function getScriptForUser(scriptId, userId) {
   const pool = getPool();
   const r = await pool.query(
     `SELECT id, title, genre, summary, english_text, chinese_text, status, episode_target, episode_done,
-            error_message, created_at, updated_at
+            error_message, credit_refunded, created_at, updated_at
      FROM saved_scripts WHERE id = $1::uuid AND user_id = $2`,
     [scriptId, userId]
   );
@@ -91,11 +91,64 @@ export async function getScriptForUser(scriptId, userId) {
 export async function listScriptsForUser(userId, limit = 50) {
   const pool = getPool();
   const r = await pool.query(
-    `SELECT id, title, genre, summary, status, episode_target, episode_done, error_message, created_at, updated_at
+    `SELECT id, title, genre, summary, status, episode_target, episode_done, error_message, credit_refunded, created_at, updated_at
      FROM saved_scripts WHERE user_id = $1 ORDER BY updated_at DESC LIMIT $2`,
     [userId, limit]
   );
   return r.rows;
+}
+
+/**
+ * Idempotently refund 1 script credit for a failed or incomplete generation.
+ * Returns { refunded: boolean, scriptCredits?: number }.
+ */
+export async function refundCreditForScriptIfEligible(scriptId, userId) {
+  const pool = getPool();
+  const uid = Number(userId);
+  if (!Number.isFinite(uid)) throw new Error("invalid user id");
+  // Transaction: lock script row, update once, increment credits once.
+  return await pool
+    .query("BEGIN")
+    .then(async () => {
+      const r = await pool.query(
+        `SELECT id, status, episode_target, episode_done, credit_refunded
+         FROM saved_scripts
+         WHERE id = $1::uuid AND user_id = $2
+         FOR UPDATE`,
+        [scriptId, uid]
+      );
+      if (r.rowCount === 0) throw new Error("not found");
+      const row = r.rows[0];
+      if (row.credit_refunded) {
+        await pool.query("COMMIT");
+        return { refunded: false };
+      }
+      const status = String(row.status || "");
+      const target = Number(row.episode_target ?? 60);
+      const done = Number(row.episode_done ?? 0);
+      const eligible = status === "failed" || (status === "complete" && done < target);
+      if (!eligible) {
+        await pool.query("COMMIT");
+        return { refunded: false };
+      }
+      await pool.query(
+        `UPDATE saved_scripts SET credit_refunded = TRUE, updated_at = NOW()
+         WHERE id = $1::uuid AND user_id = $2`,
+        [scriptId, uid]
+      );
+      const u = await pool.query(
+        `UPDATE users SET script_credits = script_credits + 1 WHERE id = $1 RETURNING script_credits`,
+        [uid]
+      );
+      await pool.query("COMMIT");
+      return { refunded: true, scriptCredits: Number(u.rows[0]?.script_credits ?? 0) };
+    })
+    .catch(async (e) => {
+      try {
+        await pool.query("ROLLBACK");
+      } catch {}
+      throw e;
+    });
 }
 
 export async function deleteScriptForUser(scriptId, userId) {
