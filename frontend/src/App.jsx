@@ -1822,11 +1822,6 @@ function App() {
                         <div style={{ opacity: 0.85, fontSize: "0.85rem", marginTop: "0.1rem" }}>
                           Date / 生成时间: {created.toLocaleString()}
                         </div>
-                        {it.summary ? (
-                          <div style={{ opacity: 0.88, fontSize: "0.85rem", marginTop: "0.35rem", maxWidth: 560 }}>
-                            Summary / 摘要: {it.summary}
-                          </div>
-                        ) : null}
                         {it.status === "generating" || it.generating ? (
                           <div style={{ opacity: 0.9, fontSize: "0.85rem", marginTop: "0.35rem" }}>
                             Generating in background / 后台生成中… {it.episodeDone ?? 0}/{it.episodeTarget ?? 60}
