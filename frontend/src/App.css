@@ -837,3 +837,105 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* UI language: show one locale at a time (paired .bilingual-en / .bilingual-zh blocks) */
+.page[data-ui-lang="en"] .bilingual-zh {
+  display: none !important;
+}
+.page[data-ui-lang="zh"] .bilingual-en {
+  display: none !important;
+}
+
+.ui-lang-node {
+  position: fixed;
+  top: 0.65rem;
+  right: 0.75rem;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--cream);
+  text-shadow: 0 1px 2px var(--steel-black);
+  pointer-events: auto;
+}
+
+.ui-lang-node-caption {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.15;
+  opacity: 0.92;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: none;
+}
+
+.ui-lang-caption-line {
+  display: block;
+}
+
+.ui-lang-segmented {
+  position: relative;
+  display: flex;
+  width: 148px;
+  padding: 0;
+  border: 1px solid var(--steel-light);
+  border-radius: 999px;
+  background: var(--steel-dark);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--metal);
+  overflow: hidden;
+}
+
+.ui-lang-knob {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 4px);
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--blood-light), var(--blood));
+  box-shadow: 0 0 10px rgba(139, 32, 32, 0.45);
+  transition: transform 0.22s ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.ui-lang-segmented.is-zh .ui-lang-knob {
+  transform: translateX(calc(100% + 4px));
+}
+
+.ui-lang-seg {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  padding: 0.42rem 0.5rem;
+  text-align: center;
+  transition: color 0.15s ease;
+}
+
+/* Knob is first child; labels are 2nd and 3rd spans */
+.ui-lang-segmented.is-en .ui-lang-seg:nth-child(2),
+.ui-lang-segmented.is-zh .ui-lang-seg:nth-child(3) {
+  color: var(--cream);
+}
+
+.ui-lang-segmented.is-en .ui-lang-seg:nth-child(3),
+.ui-lang-segmented.is-zh .ui-lang-seg:nth-child(2) {
+  color: var(--metal);
+}
+
+@media (max-width: 520px) {
+  .ui-lang-node {
+    top: 0.45rem;
+    right: 0.45rem;
+    font-size: 0.65rem;
+  }
+  .ui-lang-segmented {
+    width: 132px;
+  }
+}

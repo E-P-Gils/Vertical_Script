@@ -4010,16 +4010,32 @@ function normalizeOpsEmail(e) {
   return String(e || "").trim().toLowerCase();
 }
 
-const OWNER_OPS_EMAIL = normalizeOpsEmail(
-  process.env.OWNER_OPS_EMAIL || "sculptoid11@gmail.com"
-);
+/** Used when OWNER_OPS_EMAIL / OWNER_OPS_EMAILS env is unset. */
+const DEFAULT_OWNER_OPS_EMAILS = "sculptoid11@gmail.com,imwuqi57@gmail.com";
+
+function parseOwnerOpsAllowlistFromEnv() {
+  const raw = process.env.OWNER_OPS_EMAILS || process.env.OWNER_OPS_EMAIL || "";
+  const parts = String(raw)
+    .split(/[,;]+/)
+    .map(normalizeOpsEmail)
+    .filter(Boolean);
+  if (parts.length) return new Set(parts);
+  return new Set(
+    String(DEFAULT_OWNER_OPS_EMAILS)
+      .split(/[,;]+/)
+      .map(normalizeOpsEmail)
+      .filter(Boolean)
+  );
+}
+
+const OWNER_OPS_ALLOWLIST = parseOwnerOpsAllowlistFromEnv();
 
 function requireOwnerOps(req, res, next) {
   if (!isJwtAuthEnabled()) {
     return res.status(503).json({ error: "Not available" });
   }
   const tokenEmail = normalizeOpsEmail(req.auth?.email);
-  if (!tokenEmail || tokenEmail !== OWNER_OPS_EMAIL) {
+  if (!tokenEmail || !OWNER_OPS_ALLOWLIST.has(tokenEmail)) {
     return res.status(404).json({ error: "Not found" });
   }
   next();

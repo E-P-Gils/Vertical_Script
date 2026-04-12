@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   buildScreenplayPdfBytes,
   prepareChineseScriptLikePdfInput,
@@ -12,20 +20,96 @@ import "./App.css";
 // If you want the hosted Render backend, set VITE_API_BASE to `https://vertical-script.onrender.com`.
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
-const SCRIPT_CREDITS_REQUIRED_MSG =
-  "Purchase credits to generate a script! / 购买剧本额度后方可生成剧本！";
+const UI_LANG_STORAGE_KEY = "vertical_script_ui_lang";
 
-/** Shown only in nav for this account; must match server OWNER_OPS_EMAIL. */
-const OWNER_OPS_TAB_EMAIL = (
-  import.meta.env.VITE_OWNER_OPS_EMAIL || "sculptoid11@gmail.com"
-)
-  .trim()
-  .toLowerCase();
+const UiLangContext = createContext({
+  uiLang: "en",
+  setUiLang: () => {},
+});
+
+function useUiLang() {
+  return useContext(UiLangContext);
+}
+
+function pickLang(lang, en, zh) {
+  return lang === "zh" ? zh : en;
+}
+
+/** One line from `English / 中文` using the last ` / ` as delimiter. */
+function biText(lang, text) {
+  const s = String(text ?? "");
+  const sep = " / ";
+  const i = s.lastIndexOf(sep);
+  if (i < 0) return s;
+  return pickLang(lang, s.slice(0, i).trim(), s.slice(i + sep.length).trim());
+}
+
+function Bi({ text }) {
+  const { uiLang } = useUiLang();
+  return biText(uiLang, text);
+}
+
+function scriptCreditsRequiredMsg(lang) {
+  return pickLang(
+    lang,
+    "Purchase credits to generate a script!",
+    "购买剧本额度后方可生成剧本！"
+  );
+}
+
+function concurrentGenerationsCapMsg(lang) {
+  return pickLang(
+    lang,
+    `You already have ${MAX_CONCURRENT_GENERATIONS} scripts generating. Wait for one to finish or check My Scripts.`,
+    `您已有 ${MAX_CONCURRENT_GENERATIONS} 个剧本正在生成，请等待完成或在「我的剧本」中查看。`
+  );
+}
+
+function UiLangSwitch() {
+  const { uiLang, setUiLang } = useUiLang();
+  const isZh = uiLang === "zh";
+  return (
+    <div className="ui-lang-node">
+      <div className="ui-lang-node-caption" aria-hidden>
+        <span className="ui-lang-caption-line">Language</span>
+        <span className="ui-lang-caption-line">语言</span>
+      </div>
+      <button
+        type="button"
+        className={`ui-lang-segmented${isZh ? " is-zh" : " is-en"}`}
+        role="switch"
+        aria-checked={isZh}
+        aria-label={isZh ? "Interface language: Chinese. Switch to English." : "界面语言：英文。切换至中文。"}
+        onClick={() => setUiLang(isZh ? "en" : "zh")}
+      >
+        <span className="ui-lang-knob" aria-hidden />
+        <span className="ui-lang-seg">English</span>
+        <span className="ui-lang-seg">中文</span>
+      </button>
+    </div>
+  );
+}
+
+const DEFAULT_OWNER_OPS_TAB_EMAILS = "sculptoid11@gmail.com,imwuqi57@gmail.com";
+
+function parseOwnerOpsTabEmails(raw) {
+  return String(raw || "")
+    .split(/[,;]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** Shown only in nav for these accounts; must match server owner allowlist. */
+const OWNER_OPS_TAB_EMAILS = (() => {
+  const fromEnv =
+    import.meta.env.VITE_OWNER_OPS_EMAILS || import.meta.env.VITE_OWNER_OPS_EMAIL;
+  const parsed = parseOwnerOpsTabEmails(fromEnv);
+  if (parsed.length) return new Set(parsed);
+  return new Set(parseOwnerOpsTabEmails(DEFAULT_OWNER_OPS_TAB_EMAILS));
+})();
 
 /** Must match backend `scriptsStore.js` MAX_CONCURRENT_GENERATIONS_PER_USER. */
 const MAX_CONCURRENT_GENERATIONS = 5;
-
-const CONCURRENT_GENERATIONS_CAP_MSG = `You already have ${MAX_CONCURRENT_GENERATIONS} scripts generating. Wait for one to finish or check My Scripts. / 您已有 ${MAX_CONCURRENT_GENERATIONS} 个剧本正在生成，请等待完成或在「我的剧本」中查看。`;
 
 /**
  * List route omits english_text/chinese_text. Without this, only the actively polled script
@@ -141,6 +225,25 @@ function App() {
   const [authCode, setAuthCode] = useState("");
   const [authMode, setAuthMode] = useState("register"); // register | login
 
+  const [uiLang, setUiLang] = useState(() => {
+    try {
+      return localStorage.getItem(UI_LANG_STORAGE_KEY) === "zh" ? "zh" : "en";
+    } catch {
+      return "en";
+    }
+  });
+  const uiLangRef = useRef(uiLang);
+  uiLangRef.current = uiLang;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(UI_LANG_STORAGE_KEY, uiLang);
+    } catch {
+      /* ignore */
+    }
+    document.documentElement.lang = uiLang === "zh" ? "zh-Hans" : "en";
+  }, [uiLang]);
+
   /** From GET /me — prepaid / grant script generations (not decremented by this app yet). */
   const [scriptCredits, setScriptCredits] = useState(null);
 
@@ -220,7 +323,11 @@ function App() {
           } else if (row.status === "complete") {
             if (doneEp < target) {
               setError(
-                `Generation finished on the server with only ${doneEp} of ${target} episodes saved. Open My Scripts to inspect, or delete and start again. / 服务器仅保存了 ${doneEp}/${target} 集。请在「我的剧本」中查看或删除后重试。`
+                pickLang(
+                  uiLangRef.current,
+                  `Generation finished on the server with only ${doneEp} of ${target} episodes saved. Open My Scripts to inspect, or delete and start again.`,
+                  `服务器仅保存了 ${doneEp}/${target} 集。请在「我的剧本」中查看或删除后重试。`
+                )
               );
             } else {
               setModalOpen(false);
@@ -525,8 +632,7 @@ function App() {
   }, [authToken, myScripts, refundCreditForScript]);
 
   const showOwnerTab =
-    Boolean(authToken) &&
-    meEmail.trim().toLowerCase() === OWNER_OPS_TAB_EMAIL;
+    Boolean(authToken) && OWNER_OPS_TAB_EMAILS.has(meEmail.trim().toLowerCase());
 
   useEffect(() => {
     if (page !== "owner") return;
@@ -534,7 +640,7 @@ function App() {
       setPage("home");
       return;
     }
-    if (meEmail && meEmail.trim().toLowerCase() !== OWNER_OPS_TAB_EMAIL) {
+    if (meEmail && !OWNER_OPS_TAB_EMAILS.has(meEmail.trim().toLowerCase())) {
       setPage("home");
     }
   }, [page, authToken, meEmail]);
@@ -612,7 +718,9 @@ function App() {
         );
         return;
       }
-      setError("Could not load script from server. / 无法从服务器加载剧本。");
+      setError(
+        pickLang(uiLang, "Could not load script from server.", "无法从服务器加载剧本。")
+      );
     }
     setScript(item.englishText || "");
     setScriptZh(item.chineseText || "");
@@ -663,13 +771,19 @@ function App() {
         return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
       })();
       if (!emailOk) {
-        throw new Error("Please enter a valid email address with a real domain. / 请输入有效的邮箱地址（需包含域名）。");
+        throw new Error(
+          pickLang(
+            uiLang,
+            "Please enter a valid email address with a real domain.",
+            "请输入有效的邮箱地址（需包含域名）。"
+          )
+        );
       }
 
       const password = String(authPassword || "");
       const confirm = String(authConfirmPassword || "");
       if (password !== confirm) {
-        throw new Error("Passwords do not match. / 两次密码不一致。");
+        throw new Error(pickLang(uiLang, "Passwords do not match.", "两次密码不一致。"));
       }
 
       const passwordOk = password.length >= 8 &&
@@ -678,12 +792,16 @@ function App() {
         /[^A-Za-z0-9]/.test(password);
       if (!passwordOk) {
         throw new Error(
-          "Password must be at least 8 characters and include letters, numbers, and a special character. / 密码至少8位，并包含字母、数字和特殊字符。"
+          pickLang(
+            uiLang,
+            "Password must be at least 8 characters and include letters, numbers, and a special character.",
+            "密码至少8位，并包含字母、数字和特殊字符。"
+          )
         );
       }
 
       if (!password) {
-        throw new Error("Password is required. / 请输入密码。");
+        throw new Error(pickLang(uiLang, "Password is required.", "请输入密码。"));
       }
 
       const r = await fetch(`${API_BASE}/auth/register`, {
@@ -718,17 +836,23 @@ function App() {
     } catch (err) {
       const msg = String(err?.message || "");
       if (msg.includes("password must be at least 8 characters")) {
-        setError("Password must be at least 8 characters. / 密码至少8位。");
+        setError(pickLang(uiLang, "Password must be at least 8 characters.", "密码至少8位。"));
       } else if (msg.includes("email and password are required")) {
-        setError("Email and password are required. / 需要邮箱与密码。");
+        setError(pickLang(uiLang, "Email and password are required.", "需要邮箱与密码。"));
       } else if (msg.includes("auth is not enabled")) {
-        setError("Registration is not enabled on this server. / 此服务器尚未启用注册。");
+        setError(pickLang(uiLang, "Registration is not enabled on this server.", "此服务器尚未启用注册。"));
       } else if (msg.includes("user already exists")) {
-        setError("This account already exists. Please use the login flow. / 该账号已存在，请走登录流程。");
+        setError(
+          pickLang(
+            uiLang,
+            "This account already exists. Please use the login flow.",
+            "该账号已存在，请走登录流程。"
+          )
+        );
       } else if (msg) {
         setError(msg);
       } else {
-        setError("Registration failed. / 注册失败。");
+        setError(pickLang(uiLang, "Registration failed.", "注册失败。"));
       }
     }
   };
@@ -740,7 +864,13 @@ function App() {
       const email = String(authEmail || "").trim();
       const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
       if (!emailOk) {
-        throw new Error("Please enter a valid email address with a real domain. / 请输入有效的邮箱地址（需包含域名）。");
+        throw new Error(
+          pickLang(
+            uiLang,
+            "Please enter a valid email address with a real domain.",
+            "请输入有效的邮箱地址（需包含域名）。"
+          )
+        );
       }
 
       const r = await fetch(`${API_BASE}/auth/login`, {
@@ -764,7 +894,13 @@ function App() {
     } catch (err) {
       const msg = String(err?.message || "");
       if (msg.includes("invalid credentials")) {
-        setError("No registered account found (or wrong password). Please register. / 未注册账号或密码错误，请先注册。");
+        setError(
+          pickLang(
+            uiLang,
+            "No registered account found (or wrong password). Please register.",
+            "未注册账号或密码错误，请先注册。"
+          )
+        );
       } else {
         setError(err?.message || "Login failed");
       }
@@ -811,7 +947,7 @@ function App() {
   const startStripeCheckout = useCallback(
     async ({ pack, kind }) => {
       if (!authToken) {
-        setError("Please log in or register first. / 请先登录或注册。");
+        setError(pickLang(uiLang, "Please log in or register first.", "请先登录或注册。"));
         setPage("login");
         return;
       }
@@ -833,7 +969,7 @@ function App() {
         setError(String(e?.message || e || "Checkout failed"));
       }
     },
-    [authToken]
+    [authToken, uiLang]
   );
 
   const handleSubmit = async (e) => {
@@ -842,19 +978,23 @@ function App() {
     if (authToken) {
       if (scriptCredits === null) {
         setError(
-          "Loading your account… Please wait and try again. / 正在加载账户信息，请稍后再试。"
+          pickLang(
+            uiLang,
+            "Loading your account… Please wait and try again.",
+            "正在加载账户信息，请稍后再试。"
+          )
         );
         return;
       }
       if (scriptCredits < 1) {
-        setError(SCRIPT_CREDITS_REQUIRED_MSG);
+        setError(scriptCreditsRequiredMsg(uiLang));
         return;
       }
       const activeGenerationCount = myScripts.filter(
         (s) => s.status === "generating" || s.generating
       ).length;
       if (activeGenerationCount >= MAX_CONCURRENT_GENERATIONS) {
-        setError(CONCURRENT_GENERATIONS_CAP_MSG);
+        setError(concurrentGenerationsCapMsg(uiLang));
         return;
       }
     }
@@ -934,7 +1074,7 @@ function App() {
               "Please register and verify your email, then log in again."
           );
         } else if (bgRes.status === 429) {
-          setError(errMsg || CONCURRENT_GENERATIONS_CAP_MSG);
+          setError(errMsg || concurrentGenerationsCapMsg(uiLang));
         } else {
           setError(errMsg || "Generation failed");
         }
@@ -958,7 +1098,7 @@ function App() {
           throw new Error("Please register and verify your email, then log in again.");
         }
         if (res.status === 429) {
-          throw new Error(data.error || CONCURRENT_GENERATIONS_CAP_MSG);
+          throw new Error(data.error || concurrentGenerationsCapMsg(uiLang));
         }
         throw new Error(data.error || "Generation failed");
       }
@@ -1225,11 +1365,19 @@ function App() {
   };
 
   return (
-    <div className="page">
-      <header className="header">
-        <h1 className="title">VERTICAL INFINITE · 垂直剧本工厂</h1>
-        <p className="title-sub">Script Generator · 剧本生成器</p>
-      </header>
+    <UiLangContext.Provider value={{ uiLang, setUiLang }}>
+      <div className="page" data-ui-lang={uiLang}>
+        <UiLangSwitch />
+        <header className="header">
+          <h1 className="title">
+            <span className="bilingual-en">VERTICAL INFINITE</span>
+            <span className="bilingual-zh">垂直剧本工厂</span>
+          </h1>
+          <p className="title-sub">
+            <span className="bilingual-en">Script Generator</span>
+            <span className="bilingual-zh">剧本生成器</span>
+          </p>
+        </header>
 
       <div
         style={{
@@ -1246,7 +1394,7 @@ function App() {
           onClick={() => setPage("home")}
           style={{ borderRadius: 6 }}
         >
-          Home / 首页
+          <Bi text="Home / 首页" />
         </button>
         <button
           type="button"
@@ -1254,7 +1402,7 @@ function App() {
           onClick={() => setPage("generate")}
           style={{ borderRadius: 6 }}
         >
-          Generate / 生成
+          <Bi text="Generate / 生成" />
         </button>
         <button
           type="button"
@@ -1262,7 +1410,7 @@ function App() {
           onClick={() => setPage("pricing")}
           style={{ borderRadius: 6 }}
         >
-          Pricing / 定价
+          <Bi text="Pricing / 定价" />
         </button>
         <button
           type="button"
@@ -1270,7 +1418,7 @@ function App() {
           onClick={() => setPage("login")}
           style={{ borderRadius: 6 }}
         >
-          Login / 登录
+          <Bi text="Login / 登录" />
         </button>
         <button
           type="button"
@@ -1285,7 +1433,7 @@ function App() {
           }}
           style={{ borderRadius: 6 }}
         >
-          My Scripts / 我的剧本
+          <Bi text="My Scripts / 我的剧本" />
         </button>
         {showOwnerTab ? (
           <button
@@ -1294,7 +1442,7 @@ function App() {
             onClick={() => setPage("owner")}
             style={{ borderRadius: 6 }}
           >
-            Owner / 站长
+            <Bi text="Owner / 站长" />
           </button>
         ) : null}
       </div>
@@ -1310,10 +1458,10 @@ function App() {
               lineHeight: 1.25,
             }}
           >
-            <div style={{ color: "var(--blood-pale)" }}>
+            <div className="bilingual-en" style={{ color: "var(--blood-pale)" }}>
               GENERATE MULTIPLE PRODUCTION-READY 60-EPISODE VERTICAL SCRIPTS AT THE SAME TIME!
             </div>
-            <div style={{ marginTop: "0.5rem", opacity: 0.95 }}>
+            <div className="bilingual-zh" style={{ marginTop: "0.5rem", opacity: 0.95 }}>
               同时生成多部 60 集可投入制作的垂直剧本！
             </div>
           </div>
@@ -1323,7 +1471,7 @@ function App() {
               className="btn btn-primary"
               onClick={() => setPage("generate")}
             >
-              Get Started / 开始
+              <Bi text="Get Started / 开始" />
             </button>
           </div>
         </section>
@@ -1339,13 +1487,14 @@ function App() {
 
       {page === "pricing" && (
         <section className="script-output pricing-panel" style={{ maxWidth: 1100 }}>
-          <h2 className="pricing-title">PRICING / 定价</h2>
+          <h2 className="pricing-title">
+            <Bi text="PRICING / 定价" />
+          </h2>
           <p
             className="script-output-hint pricing-hint"
             style={{ marginTop: "-0.25rem" }}
           >
-            Full 60-episode vertical scripts · RMB pricing · Monthly plans, pay-as-you-go, then batch bundles / 完整 60 集垂直剧本 ·
-            人民币计费 · 月付档位、按需付费与批量梯度包
+            <Bi text="Full 60-episode vertical scripts · RMB pricing · Monthly plans, pay-as-you-go, then batch bundles / 完整 60 集垂直剧本 · 人民币计费 · 月付档位、按需付费与批量梯度包" />
           </p>
 
           {(() => {
@@ -1365,19 +1514,17 @@ function App() {
             return (
               <>
                 <h3 className="pricing-subtitle">
-                  {paidTier ? "Your plan & add-ons / 当前套餐与加购" : "Subscriptions & pay-as-you-go / 订阅与按需付费"}
+                  {paidTier ? (
+                    <Bi text="Your plan & add-ons / 当前套餐与加购" />
+                  ) : (
+                    <Bi text="Subscriptions & pay-as-you-go / 订阅与按需付费" />
+                  )}
                 </h3>
                 <p className="script-output-hint pricing-hint" style={{ marginBottom: "0.9rem" }}>
                   {paidTier ? (
-                    <>
-                      Buy extra script credits at your plan’s per-script rate, or save more with bundles. /
-                      按当前档位超额单价购买剧本额度，也可用下方批量包进一步节省。
-                    </>
+                    <Bi text="Buy extra script credits at your plan’s per-script rate, or save more with bundles. / 按当前档位超额单价购买剧本额度，也可用下方批量包进一步节省。" />
                   ) : (
-                    <>
-                      Monthly tiers include a script quota with lower overage rates; pay-as-you-go is ¥120 per script
-                      with no commitment. / 月付档位含额度与更低超额价；按需付费按本 ¥120，无月费约束。
-                    </>
+                    <Bi text="Monthly tiers include a script quota with lower overage rates; pay-as-you-go is ¥120 per script with no commitment. / 月付档位含额度与更低超额价；按需付费按本 ¥120，无月费约束。" />
                   )}
                 </p>
 
@@ -1386,13 +1533,22 @@ function App() {
                     <div className="pricing-payg-batch-row">
                       <div className="pricing-payg-col">
                         <article className="pricing-card">
-                          <h3 className="pricing-name">Buy Script Credit / 购买剧本额度</h3>
+                          <h3 className="pricing-name">
+                            <Bi text="Buy Script Credit / 购买剧本额度" />
+                          </h3>
                           <p className="pricing-rate">
-                            ¥{overage} <span>per script / 每本剧本</span>
+                            ¥{overage}{" "}
+                            <span>
+                              <Bi text="per script / 每本剧本" />
+                            </span>
                           </p>
                           <ul className="pricing-features">
-                            <li>Extra script credits billed per script at your tier rate / 按当前档位单本价格加购</li>
-                            <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                            <li>
+                              <Bi text="Extra script credits billed per script at your tier rate / 按当前档位单本价格加购" />
+                            </li>
+                            <li>
+                              <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                            </li>
                           </ul>
                           <div className="pricing-card-actions">
                             <button
@@ -1403,7 +1559,7 @@ function App() {
                                 void startStripeCheckout({ pack: payPack, kind: "payment" });
                               }}
                             >
-                              Buy Script Credit / 购买额度
+                              <Bi text="Buy Script Credit / 购买额度" />
                             </button>
                           </div>
                         </article>
@@ -1411,10 +1567,17 @@ function App() {
 
                       <div className="pricing-batch-col">
                         <div className="pricing-batch-section" style={{ marginTop: 0 }}>
-                          <h3 className="pricing-subtitle">Batch value pricing / 批量梯度价</h3>
+                          <h3 className="pricing-subtitle">
+                            <Bi text="Batch value pricing / 批量梯度价" />
+                          </h3>
                           <p className="pricing-batch-lead">
-                            Bundles are priced for value—the <strong>5-script pack</strong> is a product, not just a
-                            discount. / 梯度打包体现价值——<strong>5 本剧本包</strong>是独立产品，而不是“随便减点价”。
+                            <span className="bilingual-en">
+                              Bundles are priced for value—the <strong>5-script pack</strong> is a product, not just a
+                              discount.
+                            </span>
+                            <span className="bilingual-zh">
+                              梯度打包体现价值——<strong>5 本剧本包</strong>是独立产品，而不是“随便减点价”。
+                            </span>
                           </p>
                           <div className="pricing-bundle-grid">
                             {[
@@ -1424,11 +1587,18 @@ function App() {
                             ].map((b) => (
                               <div key={b.n} className="pricing-bundle-card">
                                 <div className="pricing-bundle-count">
-                                  {b.n} script{b.n > 1 ? "s" : ""} / {b.n} 本
+                                  {pickLang(
+                                    uiLang,
+                                    `${b.n} script${b.n > 1 ? "s" : ""}`,
+                                    `${b.n} 本`
+                                  )}
                                 </div>
                                 <div className="pricing-bundle-total">¥{b.total}</div>
                                 <div className="pricing-bundle-each">
-                                  ¥{b.each} <span>each / 每本</span>
+                                  ¥{b.each}{" "}
+                                  <span>
+                                    <Bi text="each / 每本" />
+                                  </span>
                                 </div>
                                 <button
                                   type="button"
@@ -1437,7 +1607,7 @@ function App() {
                                     void startStripeCheckout({ pack: `pack_${b.n}`, kind: "payment" });
                                   }}
                                 >
-                                  Purchase / 购买
+                                  <Bi text="Purchase / 购买" />
                                 </button>
                               </div>
                             ))}
@@ -1447,10 +1617,10 @@ function App() {
                     </div>
 
                     <h3 className="pricing-subtitle" style={{ marginTop: "1.75rem" }}>
-                      Monthly tiers / 月付档位
+                      <Bi text="Monthly tiers / 月付档位" />
                     </h3>
                     <p className="script-output-hint pricing-hint" style={{ marginBottom: "0.9rem" }}>
-                      Aggressive included scripts + low overage rates. / 包含剧本数更激进，超出后单价更低。
+                      <Bi text="Aggressive included scripts + low overage rates. / 包含剧本数更激进，超出后单价更低。" />
                     </p>
                   </>
                 ) : (
@@ -1458,13 +1628,22 @@ function App() {
                     <div className="pricing-payg-sub-row">
                       <div className="pricing-payg-col">
                         <article className="pricing-card">
-                          <h3 className="pricing-name">Pay-as-you-go / 按需付费</h3>
+                          <h3 className="pricing-name">
+                            <Bi text="Pay-as-you-go / 按需付费" />
+                          </h3>
                           <p className="pricing-rate">
-                            ¥120 <span>per script / 每本剧本</span>
+                            ¥120{" "}
+                            <span>
+                              <Bi text="per script / 每本剧本" />
+                            </span>
                           </p>
                           <ul className="pricing-features">
-                            <li>No monthly commitment — buy scripts as you need / 无月费，按本购买</li>
-                            <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                            <li>
+                              <Bi text="No monthly commitment — buy scripts as you need / 无月费，按本购买" />
+                            </li>
+                            <li>
+                              <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                            </li>
                           </ul>
                           <div className="pricing-card-actions">
                             <button
@@ -1475,7 +1654,7 @@ function App() {
                                 void startStripeCheckout({ pack: "payg_1", kind: "payment" });
                               }}
                             >
-                              Purchase / 购买
+                              <Bi text="Purchase / 购买" />
                             </button>
                           </div>
                         </article>
@@ -1483,18 +1662,32 @@ function App() {
                       <div className="pricing-sub-col">
                         <div className="pricing-grid pricing-grid-3 pricing-grid-tight">
                           <article className="pricing-card">
-                            <h3 className="pricing-name">Starter / 入门</h3>
+                            <h3 className="pricing-name">
+                              <Bi text="Starter / 入门" />
+                            </h3>
                             <p className="pricing-rate">
                               ¥599<span className="pricing-rate-unit">/month · 月</span>
                             </p>
                             <ul className="pricing-features">
                               <li>
-                                <strong>5 free scripts / month</strong> included / 每月含 <strong>5 本免费</strong> 剧本额度
+                                <span className="bilingual-en">
+                                  <strong>5 free scripts / month</strong> included
+                                </span>
+                                <span className="bilingual-zh">
+                                  每月含 <strong>5 本免费</strong> 剧本额度
+                                </span>
                               </li>
                               <li>
-                                <strong>¥80</strong> per script after quota / 超额后每本 <strong>¥80</strong>
+                                <span className="bilingual-en">
+                                  <strong>¥80</strong> per script after quota
+                                </span>
+                                <span className="bilingual-zh">
+                                  超额后每本 <strong>¥80</strong>
+                                </span>
                               </li>
-                              <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                              <li>
+                                <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                              </li>
                             </ul>
                             <div className="pricing-card-actions">
                               <button
@@ -1505,24 +1698,38 @@ function App() {
                                   void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
                                 }}
                               >
-                                Subscribe / 订阅
+                                <Bi text="Subscribe / 订阅" />
                               </button>
                             </div>
                           </article>
 
                           <article className="pricing-card">
-                            <h3 className="pricing-name">Professional / 专业</h3>
+                            <h3 className="pricing-name">
+                              <Bi text="Professional / 专业" />
+                            </h3>
                             <p className="pricing-rate">
                               ¥2,999<span className="pricing-rate-unit">/month · 月</span>
                             </p>
                             <ul className="pricing-features">
                               <li>
-                                <strong>20 free scripts / month</strong> included / 每月含 <strong>20 本免费</strong> 剧本额度
+                                <span className="bilingual-en">
+                                  <strong>20 free scripts / month</strong> included
+                                </span>
+                                <span className="bilingual-zh">
+                                  每月含 <strong>20 本免费</strong> 剧本额度
+                                </span>
                               </li>
                               <li>
-                                <strong>¥50</strong> per script after quota / 超额后每本 <strong>¥50</strong>
+                                <span className="bilingual-en">
+                                  <strong>¥50</strong> per script after quota
+                                </span>
+                                <span className="bilingual-zh">
+                                  超额后每本 <strong>¥50</strong>
+                                </span>
                               </li>
-                              <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                              <li>
+                                <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                              </li>
                             </ul>
                             <div className="pricing-card-actions">
                               <button
@@ -1533,24 +1740,38 @@ function App() {
                                   void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
                                 }}
                               >
-                                Subscribe / 订阅
+                                <Bi text="Subscribe / 订阅" />
                               </button>
                             </div>
                           </article>
 
                           <article className="pricing-card">
-                            <h3 className="pricing-name">Business / 商务</h3>
+                            <h3 className="pricing-name">
+                              <Bi text="Business / 商务" />
+                            </h3>
                             <p className="pricing-rate">
                               ¥9,999<span className="pricing-rate-unit">/month · 月</span>
                             </p>
                             <ul className="pricing-features">
                               <li>
-                                <strong>100 free scripts / month</strong> included / 每月含 <strong>100 本免费</strong> 剧本额度
+                                <span className="bilingual-en">
+                                  <strong>100 free scripts / month</strong> included
+                                </span>
+                                <span className="bilingual-zh">
+                                  每月含 <strong>100 本免费</strong> 剧本额度
+                                </span>
                               </li>
                               <li>
-                                <strong>¥30</strong> per script after quota / 超额后每本 <strong>¥30</strong>
+                                <span className="bilingual-en">
+                                  <strong>¥30</strong> per script after quota
+                                </span>
+                                <span className="bilingual-zh">
+                                  超额后每本 <strong>¥30</strong>
+                                </span>
                               </li>
-                              <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
+                              <li>
+                                <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                              </li>
                             </ul>
                             <div className="pricing-card-actions">
                               <button
@@ -1561,7 +1782,7 @@ function App() {
                                   void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
                                 }}
                               >
-                                Subscribe / 订阅
+                                <Bi text="Subscribe / 订阅" />
                               </button>
                             </div>
                           </article>
@@ -1570,10 +1791,17 @@ function App() {
                     </div>
 
                     <div className="pricing-batch-section pricing-batch-under" style={{ marginTop: "1.25rem" }}>
-                      <h3 className="pricing-subtitle">Batch value pricing / 批量梯度价</h3>
+                      <h3 className="pricing-subtitle">
+                        <Bi text="Batch value pricing / 批量梯度价" />
+                      </h3>
                       <p className="pricing-batch-lead">
-                        Bundles are priced for value—the <strong>5-script pack</strong> is a product, not just a discount.
-                        / 梯度打包体现价值——<strong>5 本剧本包</strong>是独立产品，而不是“随便减点价”。
+                        <span className="bilingual-en">
+                          Bundles are priced for value—the <strong>5-script pack</strong> is a product, not just a
+                          discount.
+                        </span>
+                        <span className="bilingual-zh">
+                          梯度打包体现价值——<strong>5 本剧本包</strong>是独立产品，而不是“随便减点价”。
+                        </span>
                       </p>
                       <div className="pricing-bundle-grid">
                         {[
@@ -1583,11 +1811,18 @@ function App() {
                         ].map((b) => (
                           <div key={b.n} className="pricing-bundle-card">
                             <div className="pricing-bundle-count">
-                              {b.n} script{b.n > 1 ? "s" : ""} / {b.n} 本
+                              {pickLang(
+                                uiLang,
+                                `${b.n} script${b.n > 1 ? "s" : ""}`,
+                                `${b.n} 本`
+                              )}
                             </div>
                             <div className="pricing-bundle-total">¥{b.total}</div>
                             <div className="pricing-bundle-each">
-                              ¥{b.each} <span>each / 每本</span>
+                              ¥{b.each}{" "}
+                              <span>
+                                <Bi text="each / 每本" />
+                              </span>
                             </div>
                             <button
                               type="button"
@@ -1596,7 +1831,7 @@ function App() {
                                 void startStripeCheckout({ pack: `pack_${b.n}`, kind: "payment" });
                               }}
                             >
-                              Purchase / 购买
+                              <Bi text="Purchase / 购买" />
                             </button>
                           </div>
                         ))}
@@ -1607,167 +1842,211 @@ function App() {
 
                 <div className={paidTier ? "pricing-grid pricing-grid-3" : "pricing-hidden"} style={paidTier ? undefined : { display: "none" }}>
                   <article className="pricing-card">
-              <h3 className="pricing-name">Starter / 入门</h3>
-              <p className="pricing-rate">
-                ¥599<span className="pricing-rate-unit">/month · 月</span>
-              </p>
-              <ul className="pricing-features">
-                <li>
-                  <strong>5 free scripts / month</strong> included / 每月含 <strong>5 本免费</strong> 剧本额度
-                </li>
-                <li>
-                  <strong>¥80</strong> per script after quota / 超额后每本 <strong>¥80</strong>
-                </li>
-                <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
-              </ul>
-              <div className="pricing-card-actions">
-                {authToken && mePlanTier === "starter" ? (
-                  meSubscriptionCancelAtPeriodEnd ? (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ width: "100%" }}
-                      disabled
-                    >
-                      Cancellation scheduled / 已安排周期末取消
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ width: "100%" }}
-                      onClick={() => setCancelSubModal(meStripeSubscriptionId ? "confirm" : "noStripe")}
-                    >
-                      Cancel / 取消
-                    </button>
-                  )
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    style={{ width: "100%" }}
-                    onClick={() => {
-                      void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
-                    }}
-                  >
-                    Subscribe / 订阅
-                  </button>
-                )}
-              </div>
-            </article>
+                    <h3 className="pricing-name">
+                      <Bi text="Starter / 入门" />
+                    </h3>
+                    <p className="pricing-rate">
+                      ¥599<span className="pricing-rate-unit">/month · 月</span>
+                    </p>
+                    <ul className="pricing-features">
+                      <li>
+                        <span className="bilingual-en">
+                          <strong>5 free scripts / month</strong> included
+                        </span>
+                        <span className="bilingual-zh">
+                          每月含 <strong>5 本免费</strong> 剧本额度
+                        </span>
+                      </li>
+                      <li>
+                        <span className="bilingual-en">
+                          <strong>¥80</strong> per script after quota
+                        </span>
+                        <span className="bilingual-zh">
+                          超额后每本 <strong>¥80</strong>
+                        </span>
+                      </li>
+                      <li>
+                        <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                      </li>
+                    </ul>
+                    <div className="pricing-card-actions">
+                      {authToken && mePlanTier === "starter" ? (
+                        meSubscriptionCancelAtPeriodEnd ? (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            style={{ width: "100%" }}
+                            disabled
+                          >
+                            <Bi text="Cancellation scheduled / 已安排周期末取消" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            style={{ width: "100%" }}
+                            onClick={() => setCancelSubModal(meStripeSubscriptionId ? "confirm" : "noStripe")}
+                          >
+                            <Bi text="Cancel / 取消" />
+                          </button>
+                        )
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          style={{ width: "100%" }}
+                          onClick={() => {
+                            void startStripeCheckout({ pack: "sub_starter", kind: "subscription" });
+                          }}
+                        >
+                          <Bi text="Subscribe / 订阅" />
+                        </button>
+                      )}
+                    </div>
+                  </article>
 
-            <article className="pricing-card">
-              <h3 className="pricing-name">Professional / 专业</h3>
-              <p className="pricing-rate">
-                ¥2,999<span className="pricing-rate-unit">/month · 月</span>
-              </p>
-              <ul className="pricing-features">
-                <li>
-                  <strong>20 free scripts / month</strong> included / 每月含 <strong>20 本免费</strong> 剧本额度
-                </li>
-                <li>
-                  <strong>¥50</strong> per script after quota / 超额后每本 <strong>¥50</strong>
-                </li>
-                <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
-              </ul>
-              <div className="pricing-card-actions">
-                {authToken && mePlanTier === "professional" ? (
-                  meSubscriptionCancelAtPeriodEnd ? (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ width: "100%" }}
-                      disabled
-                    >
-                      Cancellation scheduled / 已安排周期末取消
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ width: "100%" }}
-                      onClick={() => setCancelSubModal(meStripeSubscriptionId ? "confirm" : "noStripe")}
-                    >
-                      Cancel / 取消
-                    </button>
-                  )
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    style={{ width: "100%" }}
-                    onClick={() => {
-                      void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
-                    }}
-                  >
-                    Subscribe / 订阅
-                  </button>
-                )}
-              </div>
-            </article>
+                  <article className="pricing-card">
+                    <h3 className="pricing-name">
+                      <Bi text="Professional / 专业" />
+                    </h3>
+                    <p className="pricing-rate">
+                      ¥2,999<span className="pricing-rate-unit">/month · 月</span>
+                    </p>
+                    <ul className="pricing-features">
+                      <li>
+                        <span className="bilingual-en">
+                          <strong>20 free scripts / month</strong> included
+                        </span>
+                        <span className="bilingual-zh">
+                          每月含 <strong>20 本免费</strong> 剧本额度
+                        </span>
+                      </li>
+                      <li>
+                        <span className="bilingual-en">
+                          <strong>¥50</strong> per script after quota
+                        </span>
+                        <span className="bilingual-zh">
+                          超额后每本 <strong>¥50</strong>
+                        </span>
+                      </li>
+                      <li>
+                        <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                      </li>
+                    </ul>
+                    <div className="pricing-card-actions">
+                      {authToken && mePlanTier === "professional" ? (
+                        meSubscriptionCancelAtPeriodEnd ? (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            style={{ width: "100%" }}
+                            disabled
+                          >
+                            <Bi text="Cancellation scheduled / 已安排周期末取消" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            style={{ width: "100%" }}
+                            onClick={() => setCancelSubModal(meStripeSubscriptionId ? "confirm" : "noStripe")}
+                          >
+                            <Bi text="Cancel / 取消" />
+                          </button>
+                        )
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          style={{ width: "100%" }}
+                          onClick={() => {
+                            void startStripeCheckout({ pack: "sub_professional", kind: "subscription" });
+                          }}
+                        >
+                          <Bi text="Subscribe / 订阅" />
+                        </button>
+                      )}
+                    </div>
+                  </article>
 
-            <article className="pricing-card">
-              <h3 className="pricing-name">Business / 商务</h3>
-              <p className="pricing-rate">
-                ¥9,999<span className="pricing-rate-unit">/month · 月</span>
-              </p>
-              <ul className="pricing-features">
-                <li>
-                  <strong>100 free scripts / month</strong> included / 每月含 <strong>100 本免费</strong> 剧本额度
-                </li>
-                <li>
-                  <strong>¥30</strong> per script after quota / 超额后每本 <strong>¥30</strong>
-                </li>
-                <li>Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本</li>
-              </ul>
-              <div className="pricing-card-actions">
-                {authToken && mePlanTier === "business" ? (
-                  meSubscriptionCancelAtPeriodEnd ? (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ width: "100%" }}
-                      disabled
-                    >
-                      Cancellation scheduled / 已安排周期末取消
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ width: "100%" }}
-                      onClick={() => setCancelSubModal(meStripeSubscriptionId ? "confirm" : "noStripe")}
-                    >
-                      Cancel / 取消
-                    </button>
-                  )
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    style={{ width: "100%" }}
-                    onClick={() => {
-                      void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
-                    }}
-                  >
-                    Subscribe / 订阅
-                  </button>
-                )}
-              </div>
-            </article>
+                  <article className="pricing-card">
+                    <h3 className="pricing-name">
+                      <Bi text="Business / 商务" />
+                    </h3>
+                    <p className="pricing-rate">
+                      ¥9,999<span className="pricing-rate-unit">/month · 月</span>
+                    </p>
+                    <ul className="pricing-features">
+                      <li>
+                        <span className="bilingual-en">
+                          <strong>100 free scripts / month</strong> included
+                        </span>
+                        <span className="bilingual-zh">
+                          每月含 <strong>100 本免费</strong> 剧本额度
+                        </span>
+                      </li>
+                      <li>
+                        <span className="bilingual-en">
+                          <strong>¥30</strong> per script after quota
+                        </span>
+                        <span className="bilingual-zh">
+                          超额后每本 <strong>¥30</strong>
+                        </span>
+                      </li>
+                      <li>
+                        <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                      </li>
+                    </ul>
+                    <div className="pricing-card-actions">
+                      {authToken && mePlanTier === "business" ? (
+                        meSubscriptionCancelAtPeriodEnd ? (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            style={{ width: "100%" }}
+                            disabled
+                          >
+                            <Bi text="Cancellation scheduled / 已安排周期末取消" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            style={{ width: "100%" }}
+                            onClick={() => setCancelSubModal(meStripeSubscriptionId ? "confirm" : "noStripe")}
+                          >
+                            <Bi text="Cancel / 取消" />
+                          </button>
+                        )
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          style={{ width: "100%" }}
+                          onClick={() => {
+                            void startStripeCheckout({ pack: "sub_business", kind: "subscription" });
+                          }}
+                        >
+                          <Bi text="Subscribe / 订阅" />
+                        </button>
+                      )}
+                    </div>
+                  </article>
                 </div>
               </>
             );
           })()}
 
           <div className="pricing-refund-policy">
-            <h3 className="pricing-subtitle">Refund policy / 退款政策</h3>
-            <p className="pricing-refund-policy-en">
+            <h3 className="pricing-subtitle">
+              <Bi text="Refund policy / 退款政策" />
+            </h3>
+            <p className="pricing-refund-policy-en bilingual-en">
               <strong>Subscriptions:</strong> You may contact us to request a refund within{" "}
               <strong>7 days</strong> of your <strong>first</strong> subscription payment, and within{" "}
               <strong>2 days</strong> of each <strong>renewal</strong> payment after that.
             </p>
-            <p className="pricing-refund-policy-zh">
+            <p className="pricing-refund-policy-zh bilingual-zh">
               <strong>订阅：</strong>首次订阅付款后 <strong>7 天内</strong>，以及之后每次<strong>续费</strong>
               付款后 <strong>2 天内</strong>，可联系我们申请退款。
             </p>
@@ -1777,7 +2056,9 @@ function App() {
 
       {page === "scripts" && (
         <section className="script-output" style={{ maxWidth: 720 }}>
-          <h2 style={{ marginTop: 0 }}>My Scripts / 我的剧本</h2>
+          <h2 style={{ marginTop: 0 }}>
+            <Bi text="My Scripts / 我的剧本" />
+          </h2>
           {!authToken ? (
             <p style={{ opacity: 0.9 }}>
               Please log in to access your saved scripts.
@@ -1792,7 +2073,7 @@ function App() {
             </p>
           ) : myScripts.length === 0 ? (
             <p style={{ opacity: 0.9 }}>
-              No scripts saved yet. Generate your first one. / 暂无已保存剧本。先生成你的第一份剧本吧。
+              <Bi text="No scripts saved yet. Generate your first one. / 暂无已保存剧本。先生成你的第一份剧本吧。" />
             </p>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
@@ -1817,14 +2098,15 @@ function App() {
                           </button>
                         </div>
                         <div style={{ opacity: 0.95, fontSize: "0.9rem", marginTop: "0.1rem" }}>
-                          Genre / 类型: {it.genre || "N/A"}
+                          {pickLang(uiLang, "Genre", "类型")}: {it.genre || "N/A"}
                         </div>
                         <div style={{ opacity: 0.85, fontSize: "0.85rem", marginTop: "0.1rem" }}>
-                          Date / 生成时间: {created.toLocaleString()}
+                          {pickLang(uiLang, "Date", "生成时间")}: {created.toLocaleString()}
                         </div>
                         {it.status === "generating" || it.generating ? (
                           <div style={{ opacity: 0.9, fontSize: "0.85rem", marginTop: "0.35rem" }}>
-                            Generating in background / 后台生成中… {it.episodeDone ?? 0}/{it.episodeTarget ?? 60}
+                            {pickLang(uiLang, "Generating in background…", "后台生成中…")}{" "}
+                            {it.episodeDone ?? 0}/{it.episodeTarget ?? 60}
                           </div>
                         ) : null}
                         {it.status === "failed" && it.errorMessage ? (
@@ -1845,11 +2127,11 @@ function App() {
                               opacity: 0.98,
                             }}
                           >
-                            <div style={{ fontWeight: 700 }}>
+                            <div className="bilingual-en" style={{ fontWeight: 700 }}>
                               This generation experienced issues on the backend. We are actively investigating and your
                               script credit has been refunded. We apologize for the inconvenience.
                             </div>
-                            <div style={{ marginTop: "0.35rem", opacity: 0.95 }}>
+                            <div className="bilingual-zh" style={{ marginTop: "0.35rem", opacity: 0.95 }}>
                               本次生成在后台遇到问题。我们正在积极排查，且已为您退还本次消耗的剧本额度。对此给您带来的不便，我们深表歉意。
                             </div>
                           </div>
@@ -1945,19 +2227,21 @@ function App() {
           <div className="auth-card-inner">
             {!authToken && (
               <p className="auth-need-login">
-                You need to login/register to start generating scripts. / 为开始生成剧本，你需要先登录/注册。
+                <Bi text="You need to login/register to start generating scripts. / 为开始生成剧本，你需要先登录/注册。" />
               </p>
             )}
             {error && <p className="error">{error}</p>}
-            <h2 style={{ marginTop: 0 }}>Account / 账号</h2>
+            <h2 style={{ marginTop: 0 }}>
+              <Bi text="Account / 账号" />
+            </h2>
 
             {authToken ? (
               <div>
                 <p style={{ marginTop: 0, marginBottom: "0.75rem", opacity: 0.9 }}>
-                  Logged in. You can generate scripts. / 已登录。你可以开始生成剧本。
+                  <Bi text="Logged in. You can generate scripts. / 已登录。你可以开始生成剧本。" />
                 </p>
                 <button type="button" className="btn btn-secondary" onClick={handleLogout}>
-                  Log out / 退出
+                  <Bi text="Log out / 退出" />
                 </button>
               </div>
             ) : (
@@ -1966,7 +2250,9 @@ function App() {
               <>
               <form onSubmit={handleRegister} className="auth-form">
                 <label className="field">
-                  <span>Email / 邮箱</span>
+                  <span>
+                    <Bi text="Email / 邮箱" />
+                  </span>
                   <input
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
@@ -1975,7 +2261,9 @@ function App() {
                   />
                 </label>
                 <label className="field">
-                  <span>Password / 密码</span>
+                  <span>
+                    <Bi text="Password / 密码" />
+                  </span>
                   <input
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
@@ -1985,7 +2273,9 @@ function App() {
                   />
                 </label>
                 <label className="field">
-                  <span>Confirm Password / 确认密码</span>
+                  <span>
+                    <Bi text="Confirm Password / 确认密码" />
+                  </span>
                   <input
                     value={authConfirmPassword}
                     onChange={(e) => setAuthConfirmPassword(e.target.value)}
@@ -1999,11 +2289,13 @@ function App() {
                   className="btn btn-primary"
                   disabled={!authEmail || !authPassword || !authConfirmPassword}
                 >
-                  Register / 注册
+                  <Bi text="Register / 注册" />
                 </button>
               </form>
               <div className="auth-toggle">
-                <span className="auth-toggle-text">Already have an account? Log in / 已有账号？登录</span>
+                <span className="auth-toggle-text">
+                  <Bi text="Already have an account? Log in / 已有账号？登录" />
+                </span>
                 <button
                   type="button"
                   className="btn btn-secondary auth-toggle-btn"
@@ -2013,7 +2305,7 @@ function App() {
                     setAuthConfirmPassword("");
                   }}
                 >
-                  Log in / 登录
+                  <Bi text="Log in / 登录" />
                 </button>
               </div>
               </>
@@ -2024,7 +2316,9 @@ function App() {
             {authMode === "login" && (
               <form onSubmit={handleLogin} className="auth-form">
                 <label className="field">
-                  <span>Email / 邮箱</span>
+                  <span>
+                    <Bi text="Email / 邮箱" />
+                  </span>
                   <input
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
@@ -2033,7 +2327,9 @@ function App() {
                   />
                 </label>
                 <label className="field">
-                  <span>Password / 密码</span>
+                  <span>
+                    <Bi text="Password / 密码" />
+                  </span>
                   <input
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
@@ -2043,10 +2339,12 @@ function App() {
                   />
                 </label>
                 <button type="submit" className="btn btn-primary" disabled={!authEmail || !authPassword}>
-                  Log in / 登录
+                  <Bi text="Log in / 登录" />
                 </button>
                 <div className="auth-toggle">
-                  <span className="auth-toggle-text">New here? Register / 新用户？注册</span>
+                  <span className="auth-toggle-text">
+                    <Bi text="New here? Register / 新用户？注册" />
+                  </span>
                   <button
                     type="button"
                     className="btn btn-secondary auth-toggle-btn"
@@ -2056,7 +2354,7 @@ function App() {
                       setAuthConfirmPassword("");
                     }}
                   >
-                    Register / 注册
+                    <Bi text="Register / 注册" />
                   </button>
                 </div>
               </form>
@@ -2082,7 +2380,7 @@ function App() {
           {authToken ? (
             <div className="script-credits-strip" aria-live="polite">
               <span className="script-credits-label">
-                Script credits / 剧本额度
+                <Bi text="Script credits / 剧本额度" />
               </span>
               <span className="script-credits-value">
                 {scriptCredits !== null ? scriptCredits : "—"}
@@ -2091,16 +2389,16 @@ function App() {
           ) : null}
           {authToken && scriptCredits !== null && scriptCredits < 1 ? (
             <p className="script-credits-required-callout" role="alert">
-              <span className="script-credits-required-en">
+              <span className="script-credits-required-en bilingual-en">
                 Purchase credits to generate a script!
               </span>
-              <span className="script-credits-required-zh">
+              <span className="script-credits-required-zh bilingual-zh">
                 购买剧本额度后方可生成剧本！
               </span>
             </p>
           ) : null}
           <div className="generate-page-hint">
-            <p className="generate-page-hint-en">
+            <p className="generate-page-hint-en bilingual-en">
               Once your generation begins it will proceed on the backend—you do not need to keep the browser tab
               open while it runs. If you close the tab, you can reopen the page later and check progress under{" "}
               <strong>My Scripts</strong>
@@ -2109,7 +2407,7 @@ function App() {
               script and about 10 minutes to translate it. You can have up to{" "}
               <strong>5 scripts</strong> generating at the same time.
             </p>
-            <p className="generate-page-hint-zh">
+            <p className="generate-page-hint-zh bilingual-zh">
               生成开始后会由服务器在后台继续执行，
               <strong>生成过程中不必</strong>
               一直开着浏览器标签页。若已关闭标签页，可稍后重新打开页面，在
@@ -2120,12 +2418,12 @@ function App() {
             </p>
           </div>
           <div className="generate-page-bug-note" role="note">
-            <p className="generate-page-bug-note-en">
+            <p className="generate-page-bug-note-en bilingual-en">
               *There is a bug that sometimes shuffles the episode end numbers. It is especially common for the EPISODE
               60 END to actually read EPISODE 20 END. However this bug does not affect the quality or length of the
               scripts; we guarantee 60 episodes will be created with each generation.
             </p>
-            <p className="generate-page-bug-note-zh">
+            <p className="generate-page-bug-note-zh bilingual-zh">
               *已知显示问题：各集结尾处的集数编号有时会被打乱显示，尤其是第 60 集结尾可能显示为「第 20 集结尾」等。该问题
               <strong>不影响</strong>剧本质量与篇幅；我们保证每次生成均会产出完整 <strong>60 集</strong>内容。
             </p>
@@ -2141,32 +2439,38 @@ function App() {
               }
               if (scriptCredits === null) {
                 setError(
-                  "Loading your account… Please wait and try again. / 正在加载账户信息，请稍后再试。"
+                  pickLang(
+                    uiLang,
+                    "Loading your account… Please wait and try again.",
+                    "正在加载账户信息，请稍后再试。"
+                  )
                 );
                 return;
               }
               if (scriptCredits < 1) {
-                setError(SCRIPT_CREDITS_REQUIRED_MSG);
+                setError(scriptCreditsRequiredMsg(uiLang));
                 return;
               }
               const genCount = myScripts.filter(
                 (s) => s.status === "generating" || s.generating
               ).length;
               if (genCount >= MAX_CONCURRENT_GENERATIONS) {
-                setError(CONCURRENT_GENERATIONS_CAP_MSG);
+                setError(concurrentGenerationsCapMsg(uiLang));
                 return;
               }
               setModalOpen(true);
             }}
           >
-            Generate script / 生成剧本
+            <Bi text="Generate script / 生成剧本" />
           </button>
         </div>
       )}
 
       {page === "generate" && script && (
         <section className="script-output">
-          <h2>Generated script / 已生成剧本</h2>
+          <h2>
+            <Bi text="Generated script / 已生成剧本" />
+          </h2>
           <div className="script-actions">
             <button
               type="button"
@@ -2176,7 +2480,7 @@ function App() {
             >
               {downloading === "en"
                 ? "Preparing English PDF…"
-                : "Download English PDF / 下载英文 PDF"}
+                : biText(uiLang, "Download English PDF / 下载英文 PDF")}
             </button>
             <button
               type="button"
@@ -2186,7 +2490,7 @@ function App() {
             >
               {downloading === "zh"
                 ? "Preparing Chinese PDF…"
-                : "Download Chinese PDF / 下载中文 PDF"}
+                : biText(uiLang, "Download Chinese PDF / 下载中文 PDF")}
             </button>
           </div>
 
@@ -2201,7 +2505,11 @@ function App() {
                 />
               </div>
               <p className="progress-text">
-                Translating episode {progress.episode} of {progress.total} / 翻译第 {progress.episode} 集
+                {pickLang(
+                  uiLang,
+                  `Translating episode ${progress.episode} of ${progress.total}`,
+                  `翻译第 ${progress.episode} 集`
+                )}
               </p>
             </div>
           )}
@@ -2210,7 +2518,9 @@ function App() {
           </pre>
           {scriptZh ? (
             <>
-              <h3 className="script-zh-title">Simplified Chinese / 简体中文</h3>
+              <h3 className="script-zh-title">
+                <Bi text="Simplified Chinese / 简体中文" />
+              </h3>
               <pre className="script-text script-text-zh">
                 {prepareChineseScriptLikePdfInput(scriptZh)}
               </pre>
@@ -2221,11 +2531,11 @@ function App() {
 
       <footer className="footer">
         <div className="ip-note">
-          <p className="ip-note-en">
+          <p className="ip-note-en bilingual-en">
             Per our founding document, we will never claim ownership of the IP in scripts
             generated using this software. After generation, each script belongs to you, the user.
           </p>
-          <p className="ip-note-zh">
+          <p className="ip-note-zh bilingual-zh">
             本平台创始文档明确：Vertical Infinite 不会主张对通过本软件生成之剧本内容的知识产权。每一份生成后的剧本均归生成该剧本的用户所有。
           </p>
           <p className="ip-note-en" style={{ marginTop: "0.5rem" }}>
@@ -2246,12 +2556,14 @@ function App() {
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             {cancelSubModal === "noStripe" ? (
               <>
-                <h2 className="modal-title">No Stripe subscription / 无 Stripe 订阅</h2>
-                <p style={{ marginTop: 0, lineHeight: 1.55 }}>
+                <h2 className="modal-title">
+                  <Bi text="No Stripe subscription / 无 Stripe 订阅" />
+                </h2>
+                <p className="bilingual-en" style={{ marginTop: 0, lineHeight: 1.55 }}>
                   This account doesn’t have an active Stripe subscription to cancel. If you were upgraded manually for
                   testing, use the Owner tab to switch back to Free.
                 </p>
-                <p style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
+                <p className="bilingual-zh" style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
                   当前账号没有可取消的 Stripe 订阅。若这是为了测试手动升级，请在 Owner 页将档位切回免费档。
                 </p>
                 <div className="modal-actions">
@@ -2263,21 +2575,27 @@ function App() {
                       setError("");
                     }}
                   >
-                    OK / 确定
+                    <Bi text="OK / 确定" />
                   </button>
                 </div>
               </>
             ) : cancelSubModal === "confirm" ? (
               <>
-                <h2 className="modal-title">Cancel subscription? / 取消订阅？</h2>
-                <p style={{ marginTop: 0, lineHeight: 1.55 }}>
+                <h2 className="modal-title">
+                  <Bi text="Cancel subscription? / 取消订阅？" />
+                </h2>
+                <p className="bilingual-en" style={{ marginTop: 0, lineHeight: 1.55 }}>
                   Are you sure you want to cancel? Your subscription will not auto-renew, but you will keep your
                   current plan benefits until the end of the billing period you already paid for.
                 </p>
-                <p style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
+                <p className="bilingual-zh" style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
                   确定要取消吗？取消后<strong>不会自动续费</strong>；在当前已付费的计费周期结束前，您仍可继续使用当前档位权益。
                 </p>
-                {error ? <p className="error" style={{ marginTop: "0.75rem" }}>Error / 错误: {error}</p> : null}
+                {error ? (
+                  <p className="error" style={{ marginTop: "0.75rem" }}>
+                    <Bi text="Error / 错误" />: {error}
+                  </p>
+                ) : null}
                 <div className="modal-actions">
                   <button
                     type="button"
@@ -2288,7 +2606,7 @@ function App() {
                       setError("");
                     }}
                   >
-                    Back / 返回
+                    <Bi text="Back / 返回" />
                   </button>
                   <button
                     type="button"
@@ -2296,14 +2614,20 @@ function App() {
                     disabled={cancelSubLoading}
                     onClick={() => void confirmCancelSubscription()}
                   >
-                    {cancelSubLoading ? "Working… / 处理中…" : "Yes, cancel / 确认取消"}
+                    {cancelSubLoading ? (
+                      <Bi text="Working… / 处理中…" />
+                    ) : (
+                      <Bi text="Yes, cancel / 确认取消" />
+                    )}
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <h2 className="modal-title">Subscription updated / 订阅已更新</h2>
-                <p style={{ marginTop: 0, lineHeight: 1.55 }}>
+                <h2 className="modal-title">
+                  <Bi text="Subscription updated / 订阅已更新" />
+                </h2>
+                <p className="bilingual-en" style={{ marginTop: 0, lineHeight: 1.55 }}>
                   Your plan will <strong>not auto-renew</strong>. You will keep access to your subscription features
                   until the end of your current paid period
                   {cancelDonePeriodEnd || meSubscriptionPeriodEnd
@@ -2311,7 +2635,7 @@ function App() {
                     : ""}
                   .
                 </p>
-                <p style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
+                <p className="bilingual-zh" style={{ marginTop: "0.65rem", lineHeight: 1.55, opacity: 0.95 }}>
                   您的套餐<strong>到期后将不会自动续费</strong>。在当前已付费周期结束前，您仍可继续使用订阅权益
                   {cancelDonePeriodEnd || meSubscriptionPeriodEnd
                     ? `（约至 ${new Date(cancelDonePeriodEnd || meSubscriptionPeriodEnd).toLocaleString()}）`
@@ -2328,7 +2652,7 @@ function App() {
                       setError("");
                     }}
                   >
-                    OK / 确定
+                    <Bi text="OK / 确定" />
                   </button>
                 </div>
               </>
@@ -2343,11 +2667,13 @@ function App() {
           onClick={() => deletingId == null && setDeletePromptItem(null)}
         >
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">Delete script / 删除剧本</h2>
-            <p style={{ marginTop: 0, lineHeight: 1.5 }}>
+            <h2 className="modal-title">
+              <Bi text="Delete script / 删除剧本" />
+            </h2>
+            <p className="bilingual-en" style={{ marginTop: 0, lineHeight: 1.5 }}>
               Are you sure you want to delete this script?
             </p>
-            <p style={{ marginTop: "0.5rem", lineHeight: 1.5, opacity: 0.95 }}>
+            <p className="bilingual-zh" style={{ marginTop: "0.5rem", lineHeight: 1.5, opacity: 0.95 }}>
               您确定要删除此剧本吗？
             </p>
             <div className="modal-actions">
@@ -2357,7 +2683,7 @@ function App() {
                 disabled={deletingId != null}
                 onClick={() => setDeletePromptItem(null)}
               >
-                Cancel / 取消
+                <Bi text="Cancel / 取消" />
               </button>
               <button
                 type="button"
@@ -2365,7 +2691,7 @@ function App() {
                 disabled={deletingId != null}
                 onClick={() => void confirmDeleteScript()}
               >
-                Delete / 删除
+                <Bi text="Delete / 删除" />
               </button>
             </div>
           </div>
@@ -2375,7 +2701,9 @@ function App() {
       {page === "generate" && modalOpen && (
         <div className="modal-backdrop" onClick={() => !loading && setModalOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">New script / 新剧本</h2>
+            <h2 className="modal-title">
+              <Bi text="New script / 新剧本" />
+            </h2>
             {loading && (
               <>
                 {progress.total > 0 && (
@@ -2390,10 +2718,18 @@ function App() {
                     </div>
                     <p className="progress-text">
                       {progress.phase === "translating"
-                        ? `Translating episode ${progress.episode} of ${progress.total} / 翻译第 ${progress.episode} 集`
+                        ? pickLang(
+                            uiLang,
+                            `Translating episode ${progress.episode} of ${progress.total}`,
+                            `翻译第 ${progress.episode} 集`
+                          )
                         : progress.episode > 0
-                          ? `Generating episode ${progress.episode} of ${progress.total} / 生成第 ${progress.episode} 集`
-                          : "Starting… / 启动中…"}
+                          ? pickLang(
+                              uiLang,
+                              `Generating episode ${progress.episode} of ${progress.total}`,
+                              `生成第 ${progress.episode} 集`
+                            )
+                          : pickLang(uiLang, "Starting…", "启动中…")}
                     </p>
                   </div>
                 )}
@@ -2401,14 +2737,16 @@ function App() {
             )}
             <form onSubmit={handleSubmit}>
               <label className="field">
-                <span>Genre / 类型</span>
+                <span>
+                  <Bi text="Genre / 类型" />
+                </span>
                 <select
                   value={genre}
                   onChange={(e) => {
                     setGenre(e.target.value);
                   }}
                 >
-                  <option value="">— Select a genre / 请选择类型 —</option>
+                  <option value="">{biText(uiLang, "— Select a genre / 请选择类型 —")}</option>
                   {GENRES.map((g) => {
                     const labelMap = {
                       Romance: "Romance / 浪漫爱情",
@@ -2423,7 +2761,7 @@ function App() {
                       Superhero: "Superhero / 超级英雄",
                       Werewolf: "Werewolf / 狼人",
                     };
-                    const label = labelMap[g] || g;
+                    const label = biText(uiLang, labelMap[g] || g);
                     return (
                       <option key={g} value={g}>
                         {label}
@@ -2434,11 +2772,14 @@ function App() {
               </label>
               {genre && (
                 <p className="summary-hint" style={{ marginTop: "0.5rem" }}>
-                  A full 60-episode vertical script will be generated in your chosen genre. /
-                  将根据您所选类型生成完整的 60 集垂直剧本。
+                  <Bi text="A full 60-episode vertical script will be generated in your chosen genre. / 将根据您所选类型生成完整的 60 集垂直剧本。" />
                 </p>
               )}
-              {error && <p className="error">Error / 错误: {error}</p>}
+              {error && (
+                <p className="error">
+                  <Bi text="Error / 错误" />: {error}
+                </p>
+              )}
               <div className="modal-actions">
                 <button
                   type="button"
@@ -2446,7 +2787,7 @@ function App() {
                   onClick={() => !loading && setModalOpen(false)}
                   disabled={loading}
                 >
-                  Cancel / 取消
+                  <Bi text="Cancel / 取消" />
                 </button>
                 <button
                   type="submit"
@@ -2464,16 +2805,21 @@ function App() {
                 >
                   {loading
                     ? progress.total > 0
-                      ? `Episode ${progress.episode}/${progress.total} / 生成中`
-                      : "Generating… / 正在生成…"
-                    : "Generate / 生成"}
+                      ? pickLang(
+                          uiLang,
+                          `Episode ${progress.episode}/${progress.total}`,
+                          `生成中 ${progress.episode}/${progress.total}`
+                        )
+                      : pickLang(uiLang, "Generating…", "正在生成…")
+                    : biText(uiLang, "Generate / 生成")}
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </UiLangContext.Provider>
   );
 }
 
