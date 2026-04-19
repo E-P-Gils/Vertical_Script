@@ -2541,6 +2541,11 @@ function App() {
           <p className="ip-note-en" style={{ marginTop: "0.5rem" }}>
             Customer Support Contact = <strong>verticalinfinite@proton.me</strong>
           </p>
+          <p className="ip-note-en" style={{ marginTop: "0.5rem" }}>
+            <a href="/terms-and-conditions" className="footer-legal-link">
+              Terms &amp; conditions / 条款与条件（含退款说明）
+            </a>
+          </p>
         </div>
       </footer>
 

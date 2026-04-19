@@ -679,6 +679,14 @@
 .ip-note-zh {
   margin: 0.25rem 0 0;
 }
+.footer-legal-link {
+  color: var(--blood-pale);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.footer-legal-link:hover {
+  color: #fff;
+}
 .script-credits-strip {
   width: 100%;
   max-width: 720px;
