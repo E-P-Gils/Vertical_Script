@@ -1513,6 +1513,7 @@ function App() {
 
       {page === "terms" && (
         <TermsAndConditionsPanel
+          uiLang={uiLang}
           onBack={() => {
             setPage("home");
             try {
