@@ -14,6 +14,7 @@ import {
   prepareEnglishScriptLikePdfInput,
 } from "./screenplayPdf.js";
 import SecretOwnerTools from "./SecretOwnerTools.jsx";
+import { TermsAndConditionsPanel } from "./TermsAndConditions.jsx";
 import "./App.css";
 
 // If you run the backend locally, keep VITE_API_BASE unset and calls go to Vite's `/api` proxy.
@@ -261,7 +262,15 @@ function App() {
   const [cancelSubLoading, setCancelSubLoading] = useState(false);
   const [cancelDonePeriodEnd, setCancelDonePeriodEnd] = useState(null);
 
-  const [page, setPage] = useState("home"); // home | generate | pricing | login | scripts | owner
+  // home | generate | pricing | login | scripts | owner | terms
+  const [page, setPage] = useState(() => {
+    try {
+      if (new URLSearchParams(window.location.search).get("terms") === "1") return "terms";
+    } catch {
+      /* ignore */
+    }
+    return "home";
+  });
   const [myScripts, setMyScripts] = useState([]);
   const [activeScriptId, setActiveScriptId] = useState(null);
   const [deletePromptItem, setDeletePromptItem] = useState(null);
@@ -464,6 +473,19 @@ function App() {
   useEffect(() => {
     activeScriptIdRef.current = activeScriptId;
   }, [activeScriptId]);
+
+  // If /terms-and-conditions loads this SPA (rewrite), normalize URL and show terms on the main page.
+  useEffect(() => {
+    try {
+      const path = (window.location.pathname || "").replace(/\/+$/, "") || "/";
+      if (path === "/terms-and-conditions") {
+        window.history.replaceState({}, "", "/?terms=1");
+        setPage("terms");
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const scriptsCacheKey = useMemo(() => {
     const e = String(meEmail || "").trim().toLowerCase();
@@ -1364,6 +1386,16 @@ function App() {
     }
   };
 
+  const stripTermsQuery = useCallback(() => {
+    try {
+      if (new URLSearchParams(window.location.search).get("terms") === "1") {
+        window.history.replaceState({}, "", "/");
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   return (
     <UiLangContext.Provider value={{ uiLang, setUiLang }}>
       <div className="page" data-ui-lang={uiLang}>
@@ -1391,7 +1423,10 @@ function App() {
         <button
           type="button"
           className={page === "home" ? "btn btn-primary" : "btn btn-secondary"}
-          onClick={() => setPage("home")}
+          onClick={() => {
+            stripTermsQuery();
+            setPage("home");
+          }}
           style={{ borderRadius: 6 }}
         >
           <Bi text="Home / 首页" />
@@ -1399,7 +1434,10 @@ function App() {
         <button
           type="button"
           className={page === "generate" ? "btn btn-primary" : "btn btn-secondary"}
-          onClick={() => setPage("generate")}
+          onClick={() => {
+            stripTermsQuery();
+            setPage("generate");
+          }}
           style={{ borderRadius: 6 }}
         >
           <Bi text="Generate / 生成" />
@@ -1407,15 +1445,36 @@ function App() {
         <button
           type="button"
           className={page === "pricing" ? "btn btn-primary" : "btn btn-secondary"}
-          onClick={() => setPage("pricing")}
+          onClick={() => {
+            stripTermsQuery();
+            setPage("pricing");
+          }}
           style={{ borderRadius: 6 }}
         >
           <Bi text="Pricing / 定价" />
         </button>
         <button
           type="button"
+          className={page === "terms" ? "btn btn-primary" : "btn btn-secondary"}
+          onClick={() => {
+            setPage("terms");
+            try {
+              window.history.pushState({}, "", "/?terms=1");
+            } catch {
+              /* ignore */
+            }
+          }}
+          style={{ borderRadius: 6 }}
+        >
+          <Bi text="Terms / 条款" />
+        </button>
+        <button
+          type="button"
           className={page === "login" ? "btn btn-primary" : "btn btn-secondary"}
-          onClick={() => setPage("login")}
+          onClick={() => {
+            stripTermsQuery();
+            setPage("login");
+          }}
           style={{ borderRadius: 6 }}
         >
           <Bi text="Login / 登录" />
@@ -1426,9 +1485,11 @@ function App() {
           onClick={() => {
             if (!authToken) {
               setError("Please log in or register first.");
+              stripTermsQuery();
               setPage("login");
               return;
             }
+            stripTermsQuery();
             setPage("scripts");
           }}
           style={{ borderRadius: 6 }}
@@ -1439,13 +1500,29 @@ function App() {
           <button
             type="button"
             className={page === "owner" ? "btn btn-primary" : "btn btn-secondary"}
-            onClick={() => setPage("owner")}
+            onClick={() => {
+              stripTermsQuery();
+              setPage("owner");
+            }}
             style={{ borderRadius: 6 }}
           >
             <Bi text="Owner / 站长" />
           </button>
         ) : null}
       </div>
+
+      {page === "terms" && (
+        <TermsAndConditionsPanel
+          onBack={() => {
+            setPage("home");
+            try {
+              window.history.replaceState({}, "", "/");
+            } catch {
+              /* ignore */
+            }
+          }}
+        />
+      )}
 
       {page === "home" && (
         <section className="script-output page-panel page-panel-home" style={{ maxWidth: 720 }}>
