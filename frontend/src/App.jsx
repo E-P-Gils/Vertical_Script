@@ -1401,6 +1401,7 @@ function App() {
       <div className="page" data-ui-lang={uiLang}>
         <UiLangSwitch />
         <header className="header">
+          <p className="site-super-title">AI智能竖屏短剧剧本生成</p>
           <h1 className="title">
             <span className="bilingual-en">VERTICAL INFINITE</span>
             <span className="bilingual-zh">垂直剧本工厂</span>

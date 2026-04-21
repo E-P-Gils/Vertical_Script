@@ -28,6 +28,16 @@
   margin-bottom: 1rem;
 }
 
+.site-super-title {
+  margin: 0 0 0.45rem;
+  font-size: clamp(0.92rem, 2.2vw, 1.08rem);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--cream);
+  text-shadow: 0 0 10px var(--blood), 0 1px 2px var(--steel-black);
+  opacity: 0.95;
+}
+
 .title {
   font-size: clamp(1.7rem, 4.6vw, 2.5rem);
   font-weight: 700;
