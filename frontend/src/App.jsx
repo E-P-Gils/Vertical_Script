@@ -1399,8 +1399,10 @@ function App() {
   return (
     <UiLangContext.Provider value={{ uiLang, setUiLang }}>
       <div className="page" data-ui-lang={uiLang}>
-        <div className="site-global-banner">AI智能竖屏短剧剧本生成</div>
-        <UiLangSwitch />
+        <div className="site-global-banner">
+          <span className="site-global-banner-title">AI智能竖屏短剧剧本生成</span>
+          <UiLangSwitch />
+        </div>
         <header className="header">
           <h1 className="title">
             <span className="bilingual-en">VERTICAL INFINITE</span>
