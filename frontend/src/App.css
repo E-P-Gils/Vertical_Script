@@ -16,7 +16,7 @@
   min-height: 100vh;
   background: linear-gradient(180deg, var(--steel-black) 0%, var(--steel-dark) 30%, var(--blood-dark) 60%, var(--steel) 100%);
   color: var(--cream);
-  padding: 1.5rem;
+  padding: 4.25rem 1.5rem 1.5rem;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -28,14 +28,21 @@
   margin-bottom: 1rem;
 }
 
-.site-super-title {
-  margin: 0 0 0.45rem;
+.site-global-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 300;
+  padding: 0.75rem 1rem;
+  text-align: center;
   font-size: clamp(0.92rem, 2.2vw, 1.08rem);
   font-weight: 700;
   letter-spacing: 0.12em;
   color: var(--cream);
+  background: linear-gradient(180deg, rgba(26, 26, 29, 0.96) 0%, rgba(74, 21, 21, 0.92) 100%);
+  border-bottom: 1px solid var(--blood-dark);
   text-shadow: 0 0 10px var(--blood), 0 1px 2px var(--steel-black);
-  opacity: 0.95;
 }
 
 .title {
