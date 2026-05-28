@@ -113,6 +113,19 @@ const OWNER_OPS_TAB_EMAILS = (() => {
 const MAX_CONCURRENT_GENERATIONS = 5;
 
 /**
+ * Simplified pricing toggle.
+ *
+ * Set to `true` to restore the full pricing panel (PAYG, subscriptions, batch
+ * bundles). When `false`, customers only see the single ¥60 / 1 script credit
+ * offer. All prior pricing UI/logic is intentionally preserved below this flag
+ * so it can be re-enabled later without rewriting.
+ */
+const SHOW_FULL_PRICING = false;
+
+/** Stripe Price ID for the simplified "¥60 = 1 script credit" one-time purchase. */
+const SIMPLE_CREDIT_PRICE_ID = "price_1TbxRHBCKyaTr7cJ3dIiWny9";
+
+/**
  * List route omits english_text/chinese_text. Without this, only the actively polled script
  * gets bodies merged — concurrent background jobs stay empty or stuck on stale partial text.
  */
@@ -967,7 +980,7 @@ function App() {
   }, [authToken, refreshMe]);
 
   const startStripeCheckout = useCallback(
-    async ({ pack, kind }) => {
+    async ({ pack, kind, priceId }) => {
       if (!authToken) {
         setError(pickLang(uiLang, "Please log in or register first.", "请先登录或注册。"));
         setPage("login");
@@ -981,7 +994,7 @@ function App() {
             "Content-Type": "application/json",
             Authorization: `Bearer ${authToken}`,
           },
-          body: JSON.stringify({ pack, kind }),
+          body: JSON.stringify({ pack, kind, priceId }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || "Checkout failed");
@@ -1575,10 +1588,61 @@ function App() {
             className="script-output-hint pricing-hint"
             style={{ marginTop: "-0.25rem" }}
           >
-            <Bi text="Full 60-episode vertical scripts · RMB pricing · Monthly plans, pay-as-you-go, then batch bundles / 完整 60 集垂直剧本 · 人民币计费 · 月付档位、按需付费与批量梯度包" />
+            {SHOW_FULL_PRICING ? (
+              <Bi text="Full 60-episode vertical scripts · RMB pricing · Monthly plans, pay-as-you-go, then batch bundles / 完整 60 集垂直剧本 · 人民币计费 · 月付档位、按需付费与批量梯度包" />
+            ) : (
+              <Bi text="Full 60-episode vertical script · RMB pricing · One credit per generation / 完整 60 集垂直剧本 · 人民币计费 · 每次生成消耗 1 个剧本额度" />
+            )}
           </p>
 
-          {(() => {
+          {!SHOW_FULL_PRICING && (
+            <div
+              className="pricing-payg-batch-row"
+              style={{ justifyContent: "center" }}
+            >
+              <div className="pricing-payg-col" style={{ maxWidth: 420, margin: "0 auto" }}>
+                <article className="pricing-card">
+                  <h3 className="pricing-name">
+                    <Bi text="1 Script Credit / 1 个剧本额度" />
+                  </h3>
+                  <p className="pricing-rate">
+                    ¥60{" "}
+                    <span>
+                      <Bi text="per script / 每本剧本" />
+                    </span>
+                  </p>
+                  <ul className="pricing-features">
+                    <li>
+                      <Bi text="One-time purchase, no subscription / 一次性购买，无需订阅" />
+                    </li>
+                    <li>
+                      <Bi text="Full 60-episode vertical script per generation / 每次生成完整 60 集垂直剧本" />
+                    </li>
+                    <li>
+                      <Bi text="Credit added instantly after payment / 付款后立即到账" />
+                    </li>
+                  </ul>
+                  <div className="pricing-card-actions">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ width: "100%" }}
+                      onClick={() => {
+                        void startStripeCheckout({
+                          priceId: SIMPLE_CREDIT_PRICE_ID,
+                          kind: "payment",
+                        });
+                      }}
+                    >
+                      <Bi text="Buy Script Credit / 购买额度" />
+                    </button>
+                  </div>
+                </article>
+              </div>
+            </div>
+          )}
+
+          {SHOW_FULL_PRICING && (() => {
             const paidTier =
               authToken && ["starter", "professional", "business"].includes(String(mePlanTier || "").toLowerCase());
             const tier = String(mePlanTier || "").toLowerCase();
@@ -2118,20 +2182,22 @@ function App() {
             );
           })()}
 
-          <div className="pricing-refund-policy">
-            <h3 className="pricing-subtitle">
-              <Bi text="Refund policy / 退款政策" />
-            </h3>
-            <p className="pricing-refund-policy-en bilingual-en">
-              <strong>Subscriptions:</strong> You may contact us to request a refund within{" "}
-              <strong>7 days</strong> of your <strong>first</strong> subscription payment, and within{" "}
-              <strong>2 days</strong> of each <strong>renewal</strong> payment after that.
-            </p>
-            <p className="pricing-refund-policy-zh bilingual-zh">
-              <strong>订阅：</strong>首次订阅付款后 <strong>7 天内</strong>，以及之后每次<strong>续费</strong>
-              付款后 <strong>2 天内</strong>，可联系我们申请退款。
-            </p>
-          </div>
+          {SHOW_FULL_PRICING && (
+            <div className="pricing-refund-policy">
+              <h3 className="pricing-subtitle">
+                <Bi text="Refund policy / 退款政策" />
+              </h3>
+              <p className="pricing-refund-policy-en bilingual-en">
+                <strong>Subscriptions:</strong> You may contact us to request a refund within{" "}
+                <strong>7 days</strong> of your <strong>first</strong> subscription payment, and within{" "}
+                <strong>2 days</strong> of each <strong>renewal</strong> payment after that.
+              </p>
+              <p className="pricing-refund-policy-zh bilingual-zh">
+                <strong>订阅：</strong>首次订阅付款后 <strong>7 天内</strong>，以及之后每次<strong>续费</strong>
+                付款后 <strong>2 天内</strong>，可联系我们申请退款。
+              </p>
+            </div>
+          )}
         </section>
       )}
 
