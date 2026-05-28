@@ -298,6 +298,30 @@ function App() {
     }
   }, []);
 
+  const clearAuthSession = useCallback(() => {
+    setAuthToken(null);
+    setMeEmail("");
+    setScriptCredits(null);
+    setMePlanTier("free");
+    setMeStripeSubscriptionId(null);
+    setMeSubscriptionCancelAtPeriodEnd(false);
+    setMeSubscriptionPeriodEnd(null);
+    setCancelSubModal(null);
+    try {
+      localStorage.removeItem("authToken");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const handleAuthExpired = useCallback(() => {
+    clearAuthSession();
+    setError(
+      pickLang(uiLang, "Your session expired. Please log in again.", "登录已过期，请重新登录。")
+    );
+    setPage("login");
+  }, [clearAuthSession, uiLang]);
+
   /** Full script text lives on GET /scripts/:id — list route omits english_text/chinese_text. */
   const fetchScriptDetail = useCallback(async (scriptId) => {
     if (!authToken || !scriptId) return null;
@@ -463,6 +487,10 @@ function App() {
       const r = await fetch(`${API_BASE}/scripts`, {
         headers: { Authorization: `Bearer ${authToken}` },
       });
+      if (r.status === 401) {
+        handleAuthExpired();
+        return;
+      }
       if (!r.ok) return;
       const data = await r.json();
       let rows = Array.isArray(data.scripts) ? data.scripts : [];
@@ -481,7 +509,7 @@ function App() {
     } catch {
       /* ignore */
     }
-  }, [authToken, fetchScriptDetail, scheduleProgressPoll]);
+  }, [authToken, fetchScriptDetail, handleAuthExpired, scheduleProgressPoll]);
 
   useEffect(() => {
     activeScriptIdRef.current = activeScriptId;
@@ -580,6 +608,10 @@ function App() {
         const r = await fetch(`${API_BASE}/me`, {
           headers: { Authorization: `Bearer ${authToken}` },
         });
+        if (r.status === 401) {
+          if (!cancelled) handleAuthExpired();
+          return;
+        }
         if (!r.ok || cancelled) return;
         const d = await r.json().catch(() => ({}));
         if (cancelled || !d.user) return;
@@ -601,7 +633,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [authToken]);
+  }, [authToken, handleAuthExpired]);
 
   const refreshMe = useCallback(async () => {
     if (!authToken) return;
@@ -609,6 +641,10 @@ function App() {
       const r = await fetch(`${API_BASE}/me`, {
         headers: { Authorization: `Bearer ${authToken}` },
       });
+      if (r.status === 401) {
+        handleAuthExpired();
+        return;
+      }
       if (!r.ok) return;
       const d = await r.json().catch(() => ({}));
       if (!d.user) return;
@@ -626,7 +662,7 @@ function App() {
     } catch {
       /* ignore */
     }
-  }, [authToken]);
+  }, [authToken, handleAuthExpired]);
 
   const refundCreditForScript = useCallback(
     async (scriptId) => {
@@ -944,16 +980,7 @@ function App() {
 
   const handleLogout = () => {
     clearBackgroundPoll();
-    setAuthToken(null);
-    setMeEmail("");
-    setMePlanTier("free");
-    setMeStripeSubscriptionId(null);
-    setMeSubscriptionCancelAtPeriodEnd(false);
-    setMeSubscriptionPeriodEnd(null);
-    setCancelSubModal(null);
-    try {
-      localStorage.removeItem("authToken");
-    } catch {}
+    clearAuthSession();
     setPage("home");
     setModalOpen(false);
   };
@@ -997,14 +1024,21 @@ function App() {
           body: JSON.stringify({ pack, kind, priceId }),
         });
         const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || "Checkout failed");
+        if (r.status === 401) {
+          handleAuthExpired();
+          return;
+        }
+        if (!r.ok) {
+          const serverMsg = typeof d.error === "string" ? d.error.trim() : "";
+          throw new Error(serverMsg || `Checkout failed (HTTP ${r.status})`);
+        }
         if (!d.url) throw new Error("Checkout failed: missing URL");
         window.location.href = d.url;
       } catch (e) {
         setError(String(e?.message || e || "Checkout failed"));
       }
     },
-    [authToken, uiLang]
+    [authToken, handleAuthExpired, uiLang]
   );
 
   const handleSubmit = async (e) => {
@@ -1597,10 +1631,13 @@ function App() {
 
           {!SHOW_FULL_PRICING && (
             <div
-              className="pricing-payg-batch-row"
-              style={{ justifyContent: "center" }}
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                width: "100%",
+              }}
             >
-              <div className="pricing-payg-col" style={{ maxWidth: 420, margin: "0 auto" }}>
+              <div style={{ width: "100%", maxWidth: 420 }}>
                 <article className="pricing-card">
                   <h3 className="pricing-name">
                     <Bi text="1 Script Credit / 1 个剧本额度" />
@@ -1629,6 +1666,7 @@ function App() {
                       style={{ width: "100%" }}
                       onClick={() => {
                         void startStripeCheckout({
+                          pack: "payg_60",
                           priceId: SIMPLE_CREDIT_PRICE_ID,
                           kind: "payment",
                         });

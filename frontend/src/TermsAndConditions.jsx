@@ -13,15 +13,13 @@ function TermsBlocks({ uiLang }) {
         <p>
           {zh ? (
             <>
-              <strong>订阅：</strong>
-              您可在<strong>首次订阅付款后的 7 天内</strong>联系我们申请退款；对于之后的<strong>每次续费付款</strong>，您可在
-              <strong>续费后的 2 天内</strong>联系我们申请退款。
+              <strong>剧本额度：</strong>
+              所购买的剧本额度<strong>目前不支持退款</strong>。
             </>
           ) : (
             <>
-              <strong>Subscriptions:</strong> You may contact us to request a refund within{" "}
-              <strong>7 days</strong> of your first subscription payment, and within{" "}
-              <strong>2 days</strong> of each renewal payment after that.
+              <strong>Script credits:</strong> Purchased script credits are{" "}
+              <strong>currently non-refundable</strong>.
             </>
           )}
         </p>
