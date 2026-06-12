@@ -447,8 +447,10 @@ const PRIMARY_EPISODE_TEMPERATURE = Math.min(
 /**
  * Soft per-episode length budget (English body text).
  * Calibration: prior output ran ~215 EN pages / 60 eps (~3.3k chars/ep, ~920 chars/page).
- * Target ~120 EN pages (and ~95 ZH pages, which tracks EN since ZH is a 1:1 translation)
- * → ~1,650 chars/ep keeps EN ≈ 108–112 pages and ZH ≈ 95–99 pages. Tune via EPISODE_TARGET_CHARS.
+ * Regular episodes target ~1,650 chars. ESTABLISHING episodes (1–N) get a larger budget so the
+ * protagonist's world, backstory, and an electric opening have room to breathe — Phase A fixes the
+ * quality regression caused by a uniform, too-tight budget. Tune via EPISODE_TARGET_CHARS /
+ * ESTABLISHING_EPISODES / ESTABLISHING_LENGTH_MULTIPLIER.
  */
 const EPISODE_TARGET_CHARS = Math.max(
   900,
@@ -457,13 +459,16 @@ const EPISODE_TARGET_CHARS = Math.max(
 const EPISODE_HARD_MAX_CHARS = Math.round(EPISODE_TARGET_CHARS * 1.15);
 const EPISODE_TARGET_WORDS_LOW = Math.round((EPISODE_TARGET_CHARS / 6.2) * 0.9);
 const EPISODE_TARGET_WORDS_HIGH = Math.round((EPISODE_TARGET_CHARS / 6.2) * 1.1);
-const EPISODE_LENGTH_DIRECTIVE =
-  `LENGTH BUDGET (critical for vertical pacing — shorter is better):\n` +
-  `- Keep the WHOLE episode to about ${EPISODE_TARGET_WORDS_LOW}–${EPISODE_TARGET_WORDS_HIGH} words ` +
-  `(~${EPISODE_TARGET_CHARS} characters); treat ~${EPISODE_HARD_MAX_CHARS} characters as a hard maximum.\n` +
-  `- Use only 2–3 short scenes. Do NOT pad to fill space or add bonus scenes.\n` +
-  `- Every line must earn its place: cut repeated emotional beats, throat-clearing, and redundant action ` +
-  `description. Favor crisp dialogue exchanges over narration.`;
+
+/** Early episodes that establish the world + protagonist backstory get extra room. */
+const ESTABLISHING_EPISODES = Math.max(
+  0,
+  Math.min(6, parseInt(process.env.ESTABLISHING_EPISODES || "3", 10) || 3)
+);
+const ESTABLISHING_LENGTH_MULTIPLIER = Math.max(
+  1,
+  Math.min(2.5, parseFloat(process.env.ESTABLISHING_LENGTH_MULTIPLIER || "1.6") || 1.6)
+);
 
 const PRIMARY_EPISODE_MAX_TOKENS = (() => {
   const fromEnv = parseInt(process.env.PRIMARY_EPISODE_MAX_TOKENS || "", 10);
@@ -473,6 +478,77 @@ const PRIMARY_EPISODE_MAX_TOKENS = (() => {
   // ~2 chars/token for formatted screenplay text — soft cap aligned with hard char budget.
   return Math.max(768, Math.min(4096, Math.round(EPISODE_HARD_MAX_CHARS / 2)));
 })();
+
+/** Per-episode length plan: establishing episodes get a larger char budget + token cap. */
+function getEpisodeLengthPlan(ep, total) {
+  const isEstablishing = ep <= ESTABLISHING_EPISODES;
+  const mult = isEstablishing ? ESTABLISHING_LENGTH_MULTIPLIER : 1;
+  const targetChars = Math.round(EPISODE_TARGET_CHARS * mult);
+  const hardMaxChars = Math.round(targetChars * 1.15);
+  const wordsLow = Math.round((targetChars / 6.2) * 0.9);
+  const wordsHigh = Math.round((targetChars / 6.2) * 1.1);
+  const maxTokens = Math.max(
+    768,
+    Math.min(4096, Math.round(PRIMARY_EPISODE_MAX_TOKENS * mult))
+  );
+  return { ep, total, isEstablishing, targetChars, hardMaxChars, wordsLow, wordsHigh, maxTokens };
+}
+
+/**
+ * Generic pacing/quality principles (no per-episode numbers) for shared system prompts.
+ * Per-episode budgets + opening/backstory specifics are injected via the user prompt.
+ */
+const EPISODE_QUALITY_DIRECTIVE =
+  `PACING & QUALITY (vertical drama — tight but vivid, never thin):\n` +
+  `- Keep scenes lean, but NEVER sacrifice context, character clarity, or concrete grounding to save space. The audience must always know who we are with, where we are, and what just changed.\n` +
+  `- Cut only true filler and literal repetition — do NOT strip backstory, world detail, motive, or vivid specificity.\n` +
+  `- OPEN ELECTRIC: the first moment of every episode must be charged and specific (conflict, danger, desire, humiliation, or a shock). Never open on a neutral, context-free chore.\n` +
+  `- Deliver at least one CONCRETE new development each episode (a reveal, reversal, escalation, or a real shift in the relationships). Never substitute vague restated menace ("someone is watching", "the threat is closer") for an actual plot beat.`;
+
+/** Per-episode length directive (numbers tailored to establishing vs regular episodes). */
+function buildEpisodeLengthDirective(ep, total) {
+  const plan = getEpisodeLengthPlan(ep, total);
+  const lines = [
+    `LENGTH & DENSITY BUDGET (vertical pacing — tight but vivid):`,
+    `- Aim for about ${plan.wordsLow}–${plan.wordsHigh} words (~${plan.targetChars} characters); hard maximum ~${plan.hardMaxChars} characters.`,
+    `- Use ${plan.isEstablishing ? "3–4" : "2–3"} focused scenes.`,
+    `- Cut ONLY true filler: a beat already shown, or vague restated tension when nothing concrete changes. Keep all grounding, motive, and world detail.`,
+  ];
+  if (plan.isEstablishing) {
+    lines.push(
+      `- This is an ESTABLISHING episode — spend the extra room to ground the heroine's world and reveal backstory (see the OPENING and BACKSTORY requirements).`
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Per-episode electric-opening directive. */
+function buildOpeningDirective(ep, total) {
+  const isEstablishing = ep <= ESTABLISHING_EPISODES;
+  const lines = [
+    `ELECTRIC OPENING (the most important 5 seconds — do NOT open flat or context-free):`,
+    `- Drop us into a charged, specific moment with immediate stakes — conflict, danger, desire, humiliation, or a shock. NOT a neutral chore (e.g. tidying, walking, generic prep).`,
+    `- Within the first few lines the viewer must grasp WHO the heroine is in this moment and WHAT is at stake — ground us fast, no vague menace.`,
+    `- The first line of action or dialogue should hit hard enough that stopping the video feels impossible.`,
+  ];
+  if (isEstablishing) {
+    lines.push(
+      `- Because this is an early episode, the opening must also quickly convey the heroine's ordinary world and her core wound or desire so the audience bonds with her immediately.`
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Backstory mandate for establishing episodes (empty for later episodes). */
+function buildBackstoryDirective(ep) {
+  if (ep > ESTABLISHING_EPISODES) return "";
+  return [
+    `PROTAGONIST BACKSTORY (establishing episodes 1–${ESTABLISHING_EPISODES}):`,
+    `- Reveal concrete, specific backstory for the heroine through action and dialogue (never a narrated info-dump): her history, what she lost or wants, why she is in this situation, and the wound that drives her.`,
+    `- Draw directly from the PROTAGONIST STORY BIBLE and the backstory reveal ladder above when they are provided — honor any "BACKSTORY TO REVEAL THIS EPISODE" item.`,
+    `- Make her point of view and emotional stakes unmistakable so the audience is invested early.`,
+  ].join("\n");
+}
 
 /**
  * Phase 2 — soft length gate. When prompts (Phase 1) fail to keep an episode under the hard
@@ -484,6 +560,23 @@ const ENABLE_EPISODE_LENGTH_TRIM =
 const MAX_LENGTH_TRIM_ATTEMPTS = Math.max(
   1,
   Math.min(3, parseInt(process.env.MAX_LENGTH_TRIM_ATTEMPTS || "1", 10) || 1)
+);
+
+/**
+ * Phase D — Script Doctor. After a draft clears all structural/quality/repetition gates, score it
+ * against a craft rubric (hook strength, concrete escalation, voice, backstory progress). If it
+ * falls below the threshold, do ONE bounded punch-up rewrite that improves only the weak areas
+ * while preserving plot, names, format, and the cliffhanger. Off → behaves exactly as before.
+ */
+const ENABLE_SCRIPT_DOCTOR =
+  String(process.env.ENABLE_SCRIPT_DOCTOR ?? "true").trim().toLowerCase() !== "false";
+const SCRIPT_DOCTOR_MIN_SCORE = Math.max(
+  1,
+  Math.min(5, parseInt(process.env.SCRIPT_DOCTOR_MIN_SCORE || "4", 10) || 4)
+);
+const MAX_SCRIPT_DOCTOR_REWRITES = Math.max(
+  1,
+  Math.min(2, parseInt(process.env.MAX_SCRIPT_DOCTOR_REWRITES || "1", 10) || 1)
 );
 const ENABLE_TRIMMED_CONTEXT =
   String(process.env.ENABLE_TRIMMED_CONTEXT || "true").trim().toLowerCase() !== "false";
@@ -729,6 +822,20 @@ You must output a single JSON object (no other text, no markdown) with this exac
       "taboos": ["becoming main villain", "randomly disappearing with no payoff"]
     }
   ],
+  "protagonist_bible": {
+    "wound": "The defining past hurt that shaped the heroine (1 sentence).",
+    "ghost": "The specific past event or person that still haunts her (1 sentence).",
+    "secret": "Something she actively hides from the world and/or the male leads (1 sentence).",
+    "want": "Her conscious external goal this season (1 sentence) — should align with her character 'goal'.",
+    "need": "What she actually needs to learn or heal internally to become whole (1 sentence).",
+    "the_lie": "The false belief about herself or the world she must overcome by the finale (1 sentence).",
+    "voice": "How she speaks and carries herself — 2-3 concrete, specific traits (not generic adjectives).",
+    "backstory_beats": [
+      { "beat": "A concrete backstory fact or memory, revealable through action/dialogue (never narration).", "reveal_by_episode": 2 },
+      { "beat": "A deeper backstory revelation that recontextualizes who she is.", "reveal_by_episode": 8 },
+      { "beat": "The deepest secret or origin, saved for maximum impact.", "reveal_by_episode": 22 }
+    ]
+  },
   "episodes": [
     {
       "episode": 1,
@@ -742,6 +849,8 @@ You must output a single JSON object (no other text, no markdown) with this exac
       "main_conflict": "One sentence: core conflict this episode",
       "key_events": ["Event 1", "Event 2", "Event 3"],
       "twist_or_reveal": "One sentence: twist or reveal",
+      "shock_type": "reveal | reversal | betrayal | new_player | raised_stake | secret_exposed | alliance_shift | loss | ultimatum | other",
+      "shock": "One concrete sentence: the single NEW escalation or development this episode delivers (a reveal, reversal, betrayal, new player, raised stake, etc.). Must be specific and must NOT repeat any other episode's shock. NEVER vague restated menace like 'someone is watching' or 'the threat is closer'.",
       "cliffhanger_type": "emotional | plot_twist | danger | reversal",
       "cliffhanger": "One sentence: how the episode ends to hook the next",
       "hook_type": "meet_cute | humiliation | danger | secret_overheard | other",
@@ -780,6 +889,22 @@ Character role locking:
 - These roles MUST remain consistent across all episodes: do NOT turn the heroine into a villain, swap the cold/warm male leads' archetypes, or radically change professions/alignments unless the arc_phase and episode plan clearly mark a turning point.
 - If a turning point changes a character’s alignment (e.g., warm lead betrays heroine), it must be foreshadowed and then stay consistent afterward; no random flip-flopping.
 
+Protagonist Story Bible (backstory + reveal ladder) — REQUIRED:
+- You MUST include the "protagonist_bible" object. It is the emotional engine of the season: the heroine's wound, ghost, secret, want vs. need, and the_lie she believes drive every choice she makes.
+- "want" is the external goal she chases; "need" is the internal truth she must learn. The season arc is her slowly overcoming "the_lie" and moving from want toward need, culminating in the finale.
+- "backstory_beats" is a REVEAL LADDER: 3 to 5 concrete backstory beats, ordered by "reveal_by_episode" ascending. Dole backstory out gradually through action and dialogue — NEVER dump it all at once.
+  - At least one beat must land in episodes 1–3 (so the audience bonds with her early), at least one in the first third, and the deepest/origin secret should be saved for a later, high-impact episode.
+  - Every beat must connect to her wound, secret, or the_lie, and recontextualize how we see her.
+- Per-episode plans must be CONSISTENT with the bible: the heroine's emotional_focus, heroine_state, and choices should flow from her wound and the want-vs-need tension. On a backstory_beats reveal episode, the episode's twist_or_reveal or a key_event should deliver that beat.
+
+Shock Ledger (one concrete escalation per episode) — REQUIRED, genre-agnostic:
+- EVERY episode MUST have a "shock" field: one concrete, specific NEW development that moves the story forward — a reveal, reversal, betrayal, new player entering, a raised stake, a secret exposed, an alliance shift, a loss, or an ultimatum. Pick the matching "shock_type".
+- Each episode's "shock" must be UNIQUE across the entire season. Do NOT reuse the same development twice. Track them like a ledger: no two episodes deliver the same beat.
+- FORBIDDEN as a shock: vague, contentless menace such as "someone is watching", "the threat is closer than we thought", "they'll strike soon", "danger is coming", or any restated tension where nothing concrete actually changes. A shock must name WHAT changed (who did what, what was revealed, what was lost or gained).
+- Rotate "shock_type" across the season so escalations feel varied (do not deliver 3+ "reveal" episodes in a row).
+- The "shock" should be the engine of the episode's twist_or_reveal/cliffhanger — they should be consistent with each other, not three unrelated events.
+- In finale episodes, shocks should resolve or pay off existing threads (final confrontations, truths landing, choices made) rather than introducing brand-new mysteries.
+
 Per-episode structure rules (micro-structure):
 - Every episode must be planned as HOOK → CONFLICT → MINI-TWIST → CLIFFHANGER.
 - The "micro_beats" array MUST always have exactly four entries in this exact order:
@@ -808,7 +933,9 @@ const BLUEPRINT_CHUNK_CONTINUE_SYSTEM_PROMPT = `You are a season planner for fem
 Return ONE JSON object with a single top-level key: "episodes".
 
 "episodes" must be an array of episode plan objects. Each object MUST include:
-episode (number), arc_phase, title, setting_focus, emotional_focus, heroine_state, male1_state, male2_state, main_conflict, key_events (array of strings), twist_or_reveal, cliffhanger_type, cliffhanger, hook_type, conflict_type, unique_scene, micro_beats (array of exactly 4 strings).
+episode (number), arc_phase, title, setting_focus, emotional_focus, heroine_state, male1_state, male2_state, main_conflict, key_events (array of strings), twist_or_reveal, shock_type, shock, cliffhanger_type, cliffhanger, hook_type, conflict_type, unique_scene, micro_beats (array of exactly 4 strings).
+
+The "shock" field is REQUIRED on every episode: one concrete, UNIQUE new development (reveal/reversal/betrayal/new_player/raised_stake/etc.). Never reuse a shock and never use vague restated menace ("someone is watching", "the threat is closer").
 
 arc_phase: episodes 1–5 "hook", 6–20 "escalation", 21–40 "turning_point", 41–55 "endgame", 56+ "finale".
 
@@ -1136,7 +1263,7 @@ async function generateSeasonBlueprintChunked({ total, logline, genre, names, tr
     for (let attempt = 1; attempt <= 4 && !chunkOk; attempt++) {
       const userContent = isFirst
         ? buildBlueprintPrompt({ logline, names, genre, episodeCount: total, tropes }) +
-          `\n\nReturn ONE JSON object with keys: series_title, heroine, male1, male2, genre, tropes, characters (exactly 3 entries), episodes.\n` +
+          `\n\nReturn ONE JSON object with keys: series_title, heroine, male1, male2, genre, tropes, characters (exactly 3 entries), protagonist_bible, episodes.\n` +
           `CRITICAL: "episodes" MUST contain exactly ${count} objects — episode numbers ${start} through ${end} only (not the full ${total}-episode season).\n` +
           `Each episode object must follow the full per-episode schema (including micro_beats with exactly 4 strings).\n` +
           (attempt > 1
@@ -1148,7 +1275,8 @@ async function generateSeasonBlueprintChunked({ total, logline, genre, names, tr
             `[LOGLINE] ${safeStr(logline).slice(0, 1200)}`,
             "",
             `Return JSON with ONLY the key "episodes": an array of exactly ${count} objects for episodes ${start} through ${end} inclusive.`,
-            `Use the same per-episode fields as the season planner (episode, arc_phase, title, setting_focus, emotional_focus, heroine_state, male1_state, male2_state, main_conflict, key_events, twist_or_reveal, cliffhanger_type, cliffhanger, hook_type, conflict_type, unique_scene, micro_beats[4]).`,
+            `Use the same per-episode fields as the season planner (episode, arc_phase, title, setting_focus, emotional_focus, heroine_state, male1_state, male2_state, main_conflict, key_events, twist_or_reveal, shock_type, shock, cliffhanger_type, cliffhanger, hook_type, conflict_type, unique_scene, micro_beats[4]).`,
+            `The "shock" field is REQUIRED and must be a concrete, UNIQUE new development — never reused, never vague menace ("someone is watching", "the threat is closer").`,
             attempt > 1
               ? `\n(Attempt ${attempt}/4: valid JSON only; exactly ${count} episodes in order.)`
               : "",
@@ -1304,12 +1432,230 @@ async function generateSeasonBlueprintSingleShot({ total, logline, genre, names,
   throw lastError || new Error("Failed to parse season blueprint JSON");
 }
 
+// ── Shock Ledger validation + repair (Phase C) ──────────────────────────────
+// Vague, contentless "menace" that does not describe a concrete development.
+const VAGUE_SHOCK_PATTERNS = [
+  /someone\s+is\s+watching/i,
+  /being\s+watched/i,
+  /watching\s+from\s+the\s+shadows/i,
+  /the\s+threat\s+(is|grows|gets|feels|seems)\s+(closer|nearer|bigger|worse|real)/i,
+  /closer\s+than\s+(we|they|she|he)\s+(thought|realized|expected)/i,
+  /they\s*('|’)?\s*ll\s+strike/i,
+  /danger\s+(is\s+)?(coming|near|approaching|looming)/i,
+  /something\s+(is\s+)?(wrong|coming|off|amiss|brewing)/i,
+  /(a\s+)?storm\s+is\s+(coming|brewing)/i,
+  /nothing\s+(is\s+)?(as|what)\s+it\s+seems/i,
+  /trouble\s+is\s+(coming|brewing|near)/i,
+  /the\s+walls\s+(are\s+)?closing\s+in/i,
+  /time\s+is\s+running\s+out/i,
+];
+
+const SHOCK_STOPWORDS = new Set([
+  "the","a","an","and","or","but","of","to","in","on","at","for","with","her","his","she",
+  "he","they","them","is","are","was","were","be","been","being","that","this","it","as","by",
+  "from","into","about","over","more","than","thought","someone","something","when","who","whom",
+  "while","after","before","then","now","new","one","will","would","could","should","has","have",
+  "had","not","out","up","down","off","their","there","here","what","which","into","onto",
+]);
+
+function shockTokenSet(text) {
+  return new Set(
+    String(text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !SHOCK_STOPWORDS.has(w))
+  );
+}
+
+function shockJaccard(a, b) {
+  if (!a || !b || !a.size || !b.size) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/** Returns ordered list of shock-ledger problems: missing, vague, or duplicate. */
+function detectShockLedgerIssues(blueprint) {
+  const issues = [];
+  if (!blueprint || !Array.isArray(blueprint.episodes)) return issues;
+  const eps = blueprint.episodes;
+  const tokenSets = new Array(eps.length).fill(null);
+
+  for (let i = 0; i < eps.length; i++) {
+    const p = eps[i];
+    const epNum = p?.episode ?? i + 1;
+    const shock = typeof p?.shock === "string" ? p.shock.trim() : "";
+    if (!shock || shock.length < 8) {
+      issues.push({ episode: epNum, idx: i, reason: "missing", shock });
+      continue;
+    }
+    if (VAGUE_SHOCK_PATTERNS.some((re) => re.test(shock))) {
+      issues.push({ episode: epNum, idx: i, reason: "vague", shock });
+      tokenSets[i] = shockTokenSet(shock);
+      continue;
+    }
+    tokenSets[i] = shockTokenSet(shock);
+  }
+
+  const flagged = new Set(issues.map((x) => x.idx));
+  for (let i = 0; i < eps.length; i++) {
+    if (flagged.has(i)) continue;
+    const ts = tokenSets[i];
+    if (!ts) continue;
+    for (let j = 0; j < i; j++) {
+      if (!tokenSets[j]) continue;
+      if (shockJaccard(ts, tokenSets[j]) >= 0.6) {
+        issues.push({
+          episode: eps[i].episode ?? i + 1,
+          idx: i,
+          reason: "duplicate",
+          shock: eps[i].shock,
+          duplicateOf: eps[j].episode ?? j + 1,
+        });
+        flagged.add(i);
+        break;
+      }
+    }
+  }
+
+  issues.sort((a, b) => a.idx - b.idx);
+  return issues;
+}
+
+const SHOCK_REPAIR_SYSTEM_PROMPT = `You are a story editor fixing the "shock ledger" of a vertical drama season.
+Each episode must deliver ONE concrete, unique escalation (a reveal, reversal, betrayal, new player, raised stake, secret exposed, alliance shift, loss, or ultimatum).
+You will be given the full ledger of every episode's current shock, plus a list of episodes to FIX (because their shock is missing, vague, or a duplicate).
+For each episode to fix, write a NEW shock that:
+- Is concrete and specific (name what actually changes — who does what, what is revealed, what is lost or gained).
+- Is UNIQUE — different from every other shock in the ledger (including the ones you are not fixing).
+- Is consistent with that episode's arc phase, conflict, and cliffhanger context.
+- Is NEVER vague menace ("someone is watching", "the threat is closer", "danger is coming", "something is wrong").
+Output ONLY a JSON object: { "fixes": [ { "episode": <number>, "shock_type": "<type>", "shock": "<one concrete sentence>" } ] }. No prose, no markdown.`;
+
+async function repairShockLedger({ blueprint, issues, logline, genre, names }) {
+  const eps = blueprint.episodes;
+  const batch = issues.slice(0, 24);
+  if (!batch.length) return 0;
+
+  const ledger = eps
+    .map((p, i) => `Ep ${p?.episode ?? i + 1} [${p?.arc_phase || "?"}]: ${typeof p?.shock === "string" && p.shock.trim() ? p.shock.trim() : "(missing)"}`)
+    .join("\n");
+
+  const toFix = batch
+    .map((it) => {
+      const p = eps[it.idx] || {};
+      const dup = it.duplicateOf ? ` (duplicates Ep ${it.duplicateOf})` : "";
+      return `Ep ${it.episode} — problem: ${it.reason}${dup}. Context: arc=${p.arc_phase || "?"}; conflict=${safeStr(p.main_conflict)}; twist=${safeStr(p.twist_or_reveal)}; cliffhanger=${safeStr(p.cliffhanger)}.`;
+    })
+    .join("\n");
+
+  const userPrompt = [
+    `[GENRE=${String(genre || "Romance").trim() || "Romance"}]`,
+    `[HEROINE=${(names && names.heroine) || "HEROINE"}] [MALE1=${(names && names.coldCeo) || "MALE1"}] [MALE2=${(names && names.warmFriend) || "MALE2"}]`,
+    logline ? `[LOGLINE] ${safeStr(logline).slice(0, 800)}` : "",
+    "",
+    "FULL SHOCK LEDGER (every episode — your new shocks must not duplicate any of these):",
+    ledger,
+    "",
+    "EPISODES TO FIX (write a new concrete, unique shock for each):",
+    toFix,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const completion = await openaiBlueprintChatCreate({
+    model: PLANNER_MODEL,
+    messages: [
+      { role: "system", content: SHOCK_REPAIR_SYSTEM_PROMPT },
+      { role: "user", content: userPrompt },
+    ],
+    max_tokens: Math.min(4096, Math.max(800, batch.length * 130)),
+    temperature: 0.5,
+    frequency_penalty: 0.3,
+  });
+
+  const content = safeStr(completion.choices?.[0]?.message?.content).trim();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    const obj = extractFirstBalancedJsonObject(content);
+    if (obj) {
+      try {
+        parsed = JSON.parse(obj);
+      } catch {
+        parsed = null;
+      }
+    }
+  }
+  if (!parsed || !Array.isArray(parsed.fixes)) return 0;
+
+  const byEpisode = new Map();
+  for (let i = 0; i < eps.length; i++) {
+    const num = eps[i]?.episode ?? i + 1;
+    byEpisode.set(num, i);
+  }
+
+  let merged = 0;
+  for (const fix of parsed.fixes) {
+    if (!fix || typeof fix.shock !== "string" || !fix.shock.trim()) continue;
+    const idx = byEpisode.get(Number(fix.episode));
+    if (idx == null || !eps[idx]) continue;
+    eps[idx].shock = fix.shock.trim();
+    if (typeof fix.shock_type === "string" && fix.shock_type.trim()) {
+      eps[idx].shock_type = fix.shock_type.trim();
+    }
+    merged++;
+  }
+  return merged;
+}
+
+/** Validate + repair the shock ledger after generation. Degrades gracefully; never throws. */
+async function reconcileShockLedger({ blueprint, logline, genre, names }) {
+  try {
+    let issues = detectShockLedgerIssues(blueprint);
+    if (!issues.length) {
+      console.log("[shock-ledger] clean — every episode has a unique, concrete shock");
+      return { ok: true, fixed: 0, remaining: 0 };
+    }
+    const total = Array.isArray(blueprint?.episodes) ? blueprint.episodes.length : 0;
+    // If the planner ignored the field wholesale, prompts still enforce shocks at generation
+    // time — avoid a huge/expensive repair call and just log.
+    if (total > 0 && issues.filter((i) => i.reason === "missing").length > total / 2) {
+      console.warn(
+        `[shock-ledger] planner omitted shocks on >50% of episodes (${issues.length}/${total}); skipping repair, relying on per-episode prompts`
+      );
+      return { ok: true, fixed: 0, remaining: issues.length };
+    }
+
+    console.log(`[shock-ledger] ${issues.length} issue(s) detected; attempting repair`);
+    let fixedTotal = 0;
+    for (let attempt = 1; attempt <= 2 && issues.length; attempt++) {
+      const merged = await repairShockLedger({ blueprint, issues, logline, genre, names });
+      if (!merged) break;
+      fixedTotal += merged;
+      issues = detectShockLedgerIssues(blueprint);
+    }
+    if (issues.length) {
+      console.warn(`[shock-ledger] ${issues.length} issue(s) remain after repair`);
+    } else {
+      console.log(`[shock-ledger] repaired ${fixedTotal} shock(s); ledger now clean`);
+    }
+    return { ok: true, fixed: fixedTotal, remaining: issues.length };
+  } catch (e) {
+    console.warn("[shock-ledger] reconcile failed:", e?.message || e);
+    return { ok: false, fixed: 0, remaining: -1 };
+  }
+}
+
 async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tropes }) {
   const total = Math.max(1, Math.min(120, episodeCount || 60));
+  let blueprint = null;
 
   if (total > 15) {
     try {
-      return await generateSeasonBlueprintChunked({ total, logline, genre, names, tropes });
+      blueprint = await generateSeasonBlueprintChunked({ total, logline, genre, names, tropes });
     } catch (chunkErr) {
       console.warn(
         "[blueprint] chunked planner failed, falling back to single-shot:",
@@ -1320,20 +1666,26 @@ async function generateSeasonBlueprint({ episodeCount, logline, genre, names, tr
     console.log(`[blueprint] single-shot planner (${total} episodes ≤ 15)`);
   }
 
-  return await generateSeasonBlueprintSingleShot({ total, logline, genre, names, tropes });
+  if (!blueprint) {
+    blueprint = await generateSeasonBlueprintSingleShot({ total, logline, genre, names, tropes });
+  }
+
+  await reconcileShockLedger({ blueprint, logline, genre, names });
+  return blueprint;
 }
 
 const EPISODE_SUMMARY_SYSTEM_PROMPT = `You are a story planner for female-led vertical romance dramas.
 
 You will be given:
 - A short logline for the whole series.
-- A JSON object with "episodes": an array of episode plans for ONE season, each including fields like: episode, arc_phase, title, main_conflict, key_events, twist_or_reveal, cliffhanger, hook_type, conflict_type, and micro_beats.
+- A JSON object with "episodes": an array of episode plans for ONE season, each including fields like: episode, arc_phase, title, main_conflict, key_events, twist_or_reveal, shock, cliffhanger, hook_type, conflict_type, and micro_beats.
 
 Your task:
 - For EACH episode in order, write a short prose episode summary that the scriptwriter will follow beat-for-beat.
 - Each summary must:
   - Be 3–6 sentences maximum.
   - Explicitly follow the HOOK → CONFLICT → MINI-TWIST → CLIFFHANGER pattern implied by micro_beats.
+  - Clearly include the episode's SHOCK — its one concrete new development (reveal/reversal/betrayal/etc.) — as an event that actually happens.
   - Mention the heroine and at least one male lead by name where relevant.
   - Stay consistent with the "arc_phase" (hook, escalation, turning_point, endgame, finale).
 - Do NOT invent brand-new villains, conspiracies, supernatural systems, or locations that are not implied by the episode plans; focus on clarifying and stitching together what is already there.
@@ -2732,21 +3084,24 @@ async function condenseEpisodeToBudget({
   episodeNumber,
   totalEpisodes,
   attempt = 1,
+  lenPlan = null,
 }) {
+  const plan = lenPlan || getEpisodeLengthPlan(episodeNumber, totalEpisodes);
   const condensePrompt =
     `This is episode ${episodeNumber} of ${totalEpisodes} of a vertical drama. ` +
     `The draft below is TOO LONG for the vertical format. Condense it to about ` +
-    `${EPISODE_TARGET_CHARS} characters ` +
-    `(~${EPISODE_TARGET_WORDS_LOW}–${EPISODE_TARGET_WORDS_HIGH} words); ` +
-    `hard maximum ${EPISODE_HARD_MAX_CHARS} characters.\n\n` +
+    `${plan.targetChars} characters ` +
+    `(~${plan.wordsLow}–${plan.wordsHigh} words); ` +
+    `hard maximum ${plan.hardMaxChars} characters.\n\n` +
     (attempt > 1
       ? `(Attempt ${attempt}/${MAX_LENGTH_TRIM_ATTEMPTS}: the previous condense was still too long — cut harder.)\n\n`
       : "") +
     `Rules:\n` +
     `- Preserve the SAME scenes, characters, story beats, and the ending/cliffhanger.\n` +
+    `- PROTECT THE OPENING: keep the electric cold open (the first scene's charged moment, its grounding, and its first strong line) intact — trim from the middle, not the hook.\n` +
     `- Keep all main character names and their exact spellings.\n` +
-    `- Cut redundancy: trim long action description, repeated emotional beats, and filler dialogue. ` +
-    `Tighten existing lines rather than deleting plot.\n` +
+    `- Cut ONLY redundancy: trim repeated emotional beats, restated tension, and filler dialogue. ` +
+    `Do NOT delete backstory, motive, world detail, or context — tighten existing lines rather than deleting plot or grounding.\n` +
     `- Keep screenplay format: INT./EXT. headings, ALL CAPS cues on their own line, dialogue on the next line.\n` +
     `- Do NOT add "EPISODE ${episodeNumber}" / "END EPISODE ${episodeNumber}" — the pipeline adds those.\n` +
     `- Output ONLY the condensed screenplay (no notes).\n\n` +
@@ -2757,10 +3112,150 @@ async function condenseEpisodeToBudget({
       { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
       { role: "user", content: condensePrompt },
     ],
-    max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
+    max_tokens: plan.maxTokens,
     temperature: 0.3,
     frequency_penalty: 0.6,
     presence_penalty: 0.2,
+  });
+  const out = completion.choices?.[0]?.message?.content;
+  return typeof out === "string" ? out.trim() : "";
+}
+
+// ── Phase D — Script Doctor (rubric scoring + bounded punch-up) ─────────────
+const SCRIPT_DOCTOR_SYSTEM_PROMPT = `You are a sharp vertical-drama script doctor. You evaluate ONE episode draft against a craft rubric and report scores plus concrete, actionable weaknesses.
+Score each dimension 1-5 (5 = excellent, 1 = poor):
+- "hook": Does the OPENING grab instantly? Is the first moment charged, specific, and grounded (who/what/stakes clear fast), or flat/context-free?
+- "escalation": Does a concrete NEW development actually happen on screen (a reveal, reversal, betrayal, raised stake)? Penalize vague restated menace ("someone is watching", "the threat is closer") where nothing changes.
+- "voice": Are the characters' voices distinct and specific (not interchangeable)? Is the dialogue vivid rather than generic?
+- "backstory": If this episode is REQUIRED to land a backstory beat (told below), did it deliver it through action/dialogue? If no backstory is required this episode, score 5.
+- "overall": Your holistic read of whether this episode is compelling vertical drama.
+Output ONLY JSON: { "hook": n, "escalation": n, "voice": n, "backstory": n, "overall": n, "weaknesses": ["short actionable fix", ...] }.
+List weaknesses ONLY for dimensions scoring below 4; keep each under 18 words and specific. No prose, no markdown.`;
+
+const SCRIPT_DOCTOR_REWRITE_SYSTEM_PROMPT = `You are a vertical-drama script doctor performing a precise punch-up pass.
+You will receive an episode draft, the episode's plan, and a short list of weaknesses to fix.
+Rewrite the episode to fix ONLY those weaknesses while keeping everything that already works.
+Hard rules:
+- Preserve the SAME plot, scenes, characters (exact name spellings), and the ending cliffhanger. Do NOT invent a new subplot.
+- Strengthen the OPENING into an electric, specific, grounded hook if hook was weak.
+- If escalation was weak, make the episode's concrete new development land clearly on screen (no vague menace).
+- If voice was weak, sharpen distinct character voices and dialogue specificity.
+- If backstory was weak and a beat is required, deliver it through action/dialogue (never a narrated info-dump).
+- Keep screenplay format: INT./EXT. headings, ALL CAPS character cues on their own line, dialogue on the next line.
+- Do NOT add "EPISODE n" / "END EPISODE n" markers — the pipeline injects those.
+- Output ONLY the revised screenplay text (no notes, no JSON).`;
+
+function buildDoctorPlanContext(plan, bible, episodeNumber) {
+  const lines = [];
+  if (plan && typeof plan === "object") {
+    if (plan.title) lines.push(`Title: ${plan.title}`);
+    if (plan.main_conflict) lines.push(`Main conflict: ${plan.main_conflict}`);
+    if (plan.shock) lines.push(`REQUIRED shock (concrete new development): ${plan.shock}`);
+    if (plan.cliffhanger) lines.push(`Cliffhanger: ${plan.cliffhanger}`);
+    if (Array.isArray(plan.micro_beats) && plan.micro_beats[0]) {
+      lines.push(`Intended hook beat: ${plan.micro_beats[0]}`);
+    }
+  }
+  const beats = bible && Array.isArray(bible.backstory_beats) ? bible.backstory_beats : [];
+  const dueBeat = beats.find(
+    (b) => b && typeof b === "object" && Number(b.reveal_by_episode) === episodeNumber && b.beat
+  );
+  if (dueBeat) {
+    lines.push(`REQUIRED backstory beat this episode: ${dueBeat.beat}`);
+  } else {
+    lines.push(`No backstory beat is required this episode (score backstory 5 unless it actively hurts).`);
+  }
+  return lines.join("\n");
+}
+
+async function scoreEpisodeWithDoctor({ episodeText, episodeNumber, totalEpisodes, plan, bible }) {
+  const planContext = buildDoctorPlanContext(plan, bible, episodeNumber);
+  const userPrompt =
+    `Episode ${episodeNumber} of ${totalEpisodes}.\n\n` +
+    `EPISODE PLAN / REQUIREMENTS:\n${planContext}\n\n` +
+    `EPISODE DRAFT:\n${episodeText}`;
+  const completion = await openai.chat.completions.create({
+    model: PLANNER_MODEL,
+    messages: [
+      { role: "system", content: SCRIPT_DOCTOR_SYSTEM_PROMPT },
+      { role: "user", content: userPrompt },
+    ],
+    max_tokens: 400,
+    temperature: 0.2,
+  });
+  const content = safeStr(completion.choices?.[0]?.message?.content).trim();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    const obj = extractFirstBalancedJsonObject(content);
+    if (obj) {
+      try {
+        parsed = JSON.parse(obj);
+      } catch {
+        parsed = null;
+      }
+    }
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const clampScore = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(1, Math.min(5, Math.round(n)));
+  };
+  const scores = {
+    hook: clampScore(parsed.hook),
+    escalation: clampScore(parsed.escalation),
+    voice: clampScore(parsed.voice),
+    backstory: clampScore(parsed.backstory),
+    overall: clampScore(parsed.overall),
+  };
+  const dims = [scores.hook, scores.escalation, scores.voice, scores.backstory].filter(
+    (n) => n != null
+  );
+  const minDim = dims.length ? Math.min(...dims) : null;
+  const weaknesses = Array.isArray(parsed.weaknesses)
+    ? parsed.weaknesses.filter((w) => typeof w === "string" && w.trim()).map((w) => w.trim())
+    : [];
+  return { scores, minDim, weaknesses };
+}
+
+async function punchUpEpisode({
+  episodeText,
+  episodeNumber,
+  totalEpisodes,
+  weaknesses,
+  plan,
+  bible,
+  lenPlan,
+  generatorSystemPrompt = "",
+}) {
+  const planContext = buildDoctorPlanContext(plan, bible, episodeNumber);
+  const weaknessList = weaknesses.length
+    ? weaknesses.map((w, i) => `${i + 1}. ${w}`).join("\n")
+    : "Strengthen the opening hook, ensure a concrete new development lands, and sharpen distinct character voices.";
+  const budget = lenPlan || getEpisodeLengthPlan(episodeNumber, totalEpisodes);
+  const userPrompt =
+    `Episode ${episodeNumber} of ${totalEpisodes}.\n\n` +
+    `EPISODE PLAN / REQUIREMENTS:\n${planContext}\n\n` +
+    `WEAKNESSES TO FIX (fix only these; keep everything else):\n${weaknessList}\n\n` +
+    `Keep the rewrite within about ${budget.targetChars} characters (hard max ~${budget.hardMaxChars}).\n\n` +
+    `EPISODE DRAFT TO IMPROVE:\n${episodeText}`;
+  const systemPrompt = generatorSystemPrompt
+    ? SCRIPT_DOCTOR_REWRITE_SYSTEM_PROMPT +
+      "\n\n" +
+      generatorSystemPrompt.slice(EPISODE_TEXT_SYSTEM_PROMPT.length)
+    : SCRIPT_DOCTOR_REWRITE_SYSTEM_PROMPT;
+  const completion = await openai.chat.completions.create({
+    model: GENERATOR_MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    max_tokens: budget.maxTokens,
+    temperature: 0.5,
+    frequency_penalty: 0.8,
+    presence_penalty: 0.4,
   });
   const out = completion.choices?.[0]?.message?.content;
   return typeof out === "string" ? out.trim() : "";
@@ -2898,14 +3393,14 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Keep the heroine active and resilient: she faces humiliation, setbacks, and schemes, but gradually gains confidence, agency, and leverage.
 - Use screenplay-style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
 - Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
-- Keep the episode focused and SHORT, with 2–3 short scenes.
+- Keep the episode focused — use a small number of scenes; the per-episode budget in the prompt specifies how many.
 - SETTING AND VARIETY (critical): If a THIS EPISODE'S PLAN is provided in the prompt, you MUST open in the setting_focus location listed there — do not substitute a different or more familiar location. Every episode in a 60-episode series must feel like it inhabits a distinct part of the world. Do not default to the same dock, beach, or lobby opening simply because it is comfortable. The season outline pre-planned a specific setting and conflict type for each episode — treat both as hard constraints, not suggestions.
 - Every episode should have a HOOK at the beginning. For early and middle episodes (when [EPISODE] is not within the last 5 of [EPISODES]), also end on a clear hook for the next episode—but keep them emotionally driven and grounded. Opening hooks should feel like a sharp emotional moment: an awkward intimacy beat, the heroine being subtly bullied or underestimated, a charged first encounter, or a small but vivid humiliation that makes us care. Closing hooks in these episodes should be light but addictive: a promise, a tease, a jealousy beat, a sudden confession or near-confession, or the hint of danger/competition around love or status.
 - Avoid graphic violence, gore, or long slapstick brawls. Do NOT ramble or list random objects, professions, or technical details; stay tightly focused on the characters, their feelings, and the immediate scene.
 - SPECIAL RULE FOR LATE EPISODES (when [EPISODE] is within the last 5 of [EPISODES]): progressively reduce unresolved threats and begin resolving major plot lines instead of opening new ones. Any end-of-episode hook in these late episodes should feel like the last steps toward closure (emotional decisions, consequences, or final preparations), not a brand-new danger, mystery, or villain.
 - FINAL EPISODE RULE (when [EPISODE] == [EPISODES]): you MUST treat this as a true finale. Fully resolve the main external threat and the core emotional arc. End the script on safety, acceptance, or a clearly chosen future for the heroine and her relationships. Do NOT add any new threat, twist, or unseen observer in the last scene, and do NOT tease another season—no "it’s not over", "someone watches from the shadows", or similar cliffhangers.
 
-${EPISODE_LENGTH_DIRECTIVE}
+${EPISODE_QUALITY_DIRECTIVE}
 
 CONFLICT AND ESCALATION REQUIREMENTS:
 - Every episode must move at least ONE external stake forward in a concrete way (family approval/disapproval, money or contracts, company/pack politics, social reputation/public humiliation, or a rival’s scheme).
@@ -2992,8 +3487,8 @@ Return STRICT JSON only with this exact shape:
 }
 
 Rules:
-- 2 to 3 scenes only (prefer 2). Vertical episodes are short — do NOT plan 4+ scenes.
-- Keep each scene's "beats" tight (2–4 beats); the rendered episode must stay around ${EPISODE_TARGET_CHARS} characters total.
+- Scene count: for early/establishing episodes (when [EPISODE] is 1, 2, or 3) plan 3–4 scenes; otherwise plan 2–3 scenes (prefer 2–3). Vertical episodes are short — do NOT plan 5+ scenes.
+- Keep each scene's "beats" tight (2–4 beats). Match the LENGTH BUDGET given in the user prompt (establishing episodes have a larger budget than regular ones).
 - Keep continuity with provided context.
 - Keep the same three protagonist names exactly as provided.
 - No markdown, no prose outside JSON.`;
@@ -3018,7 +3513,7 @@ Rules:
   - Add a blank line after each scene heading.
   - Add a newline between distinct action beats.
 - Keep continuity with prior context.
-${EPISODE_LENGTH_DIRECTIVE}
+${EPISODE_QUALITY_DIRECTIVE}
 - Output script text only (no JSON, no notes).`;
 
 function parseEpisodePlanJson(raw, episodeNumber) {
@@ -3046,6 +3541,7 @@ async function generateEpisodeTextTwoPass({
   genre,
   generatorSystemPrompt = "",
 }) {
+  const lenPlan = getEpisodeLengthPlan(episodeNumber, totalEpisodes);
   const planCompletion = await openai.chat.completions.create({
     model: PLANNER_MODEL,
     messages: [
@@ -3069,7 +3565,9 @@ async function generateEpisodeTextTwoPass({
     )}]\n\n` +
     `CONTEXT:\n${userContent}\n\n` +
     `SCENE PLAN JSON:\n${JSON.stringify(plan, null, 2)}\n\n` +
-    EPISODE_LENGTH_DIRECTIVE;
+    buildEpisodeLengthDirective(episodeNumber, totalEpisodes) +
+    "\n\n" +
+    buildOpeningDirective(episodeNumber, totalEpisodes);
 
   // Use GENERATOR_MODEL for the render pass (primary generation, not corrective).
   // Append style guides from generatorSystemPrompt if available.
@@ -3084,7 +3582,7 @@ async function generateEpisodeTextTwoPass({
       { role: "system", content: renderSystemPrompt },
       { role: "user", content: renderPrompt },
     ],
-    max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
+    max_tokens: lenPlan.maxTokens,
     temperature: 0.45,
     frequency_penalty: 1.0,
     presence_penalty: 0.5,
@@ -3165,6 +3663,46 @@ function formatBlueprintContext(blueprint, episodeNumber) {
     lines.push("");
   }
 
+  // ── PROTAGONIST STORY BIBLE (backstory engine + reveal ladder) ─────────────
+  const bible = blueprint.protagonist_bible;
+  if (bible && typeof bible === "object") {
+    lines.push("PROTAGONIST STORY BIBLE (the heroine's emotional engine — her choices, fears, and reactions must flow from this):");
+    if (bible.wound)   lines.push(`  Wound: ${bible.wound}`);
+    if (bible.ghost)   lines.push(`  Ghost (what haunts her): ${bible.ghost}`);
+    if (bible.secret)  lines.push(`  Secret she hides: ${bible.secret}`);
+    if (bible.want)    lines.push(`  Want (external goal): ${bible.want}`);
+    if (bible.need)    lines.push(`  Need (internal truth she must learn): ${bible.need}`);
+    if (bible.the_lie) lines.push(`  The lie she believes (her arc is overcoming this): ${bible.the_lie}`);
+    if (bible.voice)   lines.push(`  Voice / how she carries herself: ${bible.voice}`);
+
+    const beats = Array.isArray(bible.backstory_beats) ? bible.backstory_beats : [];
+    if (beats.length) {
+      const dueNow = [];
+      const alreadyRevealed = [];
+      const upcoming = [];
+      for (const b of beats) {
+        if (!b || typeof b !== "object" || !b.beat) continue;
+        const by = Number(b.reveal_by_episode) || 0;
+        if (by === ep) dueNow.push(b.beat);
+        else if (by > 0 && by < ep) alreadyRevealed.push(b.beat);
+        else upcoming.push({ beat: b.beat, by });
+      }
+      if (dueNow.length) {
+        lines.push("  ► BACKSTORY TO REVEAL THIS EPISODE (deliver through action/dialogue/subtext — never a narrated info-dump):");
+        for (const b of dueNow) lines.push(`     - ${b}`);
+      }
+      if (alreadyRevealed.length) {
+        lines.push("  Backstory already established earlier (stay consistent; do NOT re-explain it at length):");
+        for (const b of alreadyRevealed) lines.push(`     - ${b}`);
+      }
+      if (upcoming.length) {
+        lines.push("  Backstory still to come (do NOT reveal yet — you may lightly foreshadow):");
+        for (const u of upcoming) lines.push(`     - (by ep ${u.by}) ${u.beat}`);
+      }
+    }
+    lines.push("");
+  }
+
   // ── PREVIOUS EPISODES SUMMARY (all past, not just last 8) ─────────────────
   if (ep > 1) {
     lines.push("PREVIOUS EPISODES — planned arc (already happened; continue from here):");
@@ -3179,6 +3717,23 @@ function formatBlueprintContext(blueprint, episodeNumber) {
       }
     }
     lines.push("");
+  }
+
+  // ── SHOCK LEDGER (escalations already spent — never repeat one) ────────────
+  if (ep > 1) {
+    const priorShocks = [];
+    for (let i = 0; i < ep - 1; i++) {
+      const p = blueprint.episodes[i];
+      const shock = p && typeof p.shock === "string" ? p.shock.trim() : "";
+      if (shock) priorShocks.push(`  Ep ${p.episode ?? i + 1}: ${shock}`);
+    }
+    if (priorShocks.length) {
+      lines.push(
+        "SHOCK LEDGER — concrete escalations already used in earlier episodes (this episode's new development must be DIFFERENT from every one of these; never reuse a beat):"
+      );
+      lines.push(...priorShocks);
+      lines.push("");
+    }
   }
 
   // ── CURRENT EPISODE PLAN ───────────────────────────────────────────────────
@@ -3198,6 +3753,10 @@ function formatBlueprintContext(blueprint, episodeNumber) {
     if (plan.key_events && plan.key_events.length)
       lines.push(`  Key events: ${plan.key_events.join("; ")}`);
     if (plan.twist_or_reveal) lines.push(`  Twist/reveal: ${plan.twist_or_reveal}`);
+    if (plan.shock)
+      lines.push(
+        `  SHOCK (REQUIRED — the ONE concrete new development this episode must deliver; it must actually happen on screen and must not repeat any prior episode's shock): ${plan.shock}`
+      );
     if (plan.cliffhanger)     lines.push(`  End on cliffhanger: ${plan.cliffhanger}`);
     if (plan.unique_scene)    lines.push(`  UNIQUE SCENE (REQUIRED — must appear, must be new, must not repeat any prior episode): ${plan.unique_scene}`);
     if (Array.isArray(plan.micro_beats) && plan.micro_beats.length === 4) {
@@ -3240,9 +3799,12 @@ function buildCollapseRescueUserPrompt({
   }
   parts.push(`[LOGLINE] ${safeStr(logline).slice(0, 500)}`);
   parts.push(
-    "Write ONE complete episode of screenplay for the episode number above. Use the cast and logline only. Named characters only. Concrete action and dialogue. No abstract prose, no philosophy monologues, no vocabulary lists, no stitched-in 'bonus' sequences or multi-act sagas. Short-form vertical drama only: 2–3 tight scenes, dialogue-forward. Use standard screenplay format: scene headings (INT./EXT.), character cues in ALL CAPS, dialogue on the following line."
+    "Write ONE complete episode of screenplay for the episode number above. Use the cast and logline only. Named characters only. Concrete action and dialogue. No abstract prose, no philosophy monologues, no vocabulary lists, no stitched-in 'bonus' sequences or multi-act sagas. Short-form vertical drama, dialogue-forward. Use standard screenplay format: scene headings (INT./EXT.), character cues in ALL CAPS, dialogue on the following line."
   );
-  parts.push(EPISODE_LENGTH_DIRECTIVE);
+  parts.push(buildEpisodeLengthDirective(ep, total));
+  parts.push(buildOpeningDirective(ep, total));
+  const rescueBackstory = buildBackstoryDirective(ep);
+  if (rescueBackstory) parts.push(rescueBackstory);
   if (blueprintContext) {
     parts.push(
       `THIS EPISODE PLAN (follow beats; stay concrete):\n${blueprintContext.slice(0, 600)}`
@@ -3647,7 +4209,14 @@ function buildEpisodePromptText({
     "Output formatting: blank line after each scene heading; each character cue (ALL CAPS name) on its own line with dialogue on the following line — never output glued cues like LUKESorry or LUKE(mocking)You."
   );
   lines.push("");
-  lines.push(EPISODE_LENGTH_DIRECTIVE);
+  lines.push(buildOpeningDirective(ep, total));
+  const epBackstory = buildBackstoryDirective(ep);
+  if (epBackstory) {
+    lines.push("");
+    lines.push(epBackstory);
+  }
+  lines.push("");
+  lines.push(buildEpisodeLengthDirective(ep, total));
 
   if (courseCorrectionBrief) {
     lines.push("");
@@ -3827,7 +4396,8 @@ async function buildCollapseSafeEpisodeFallback(params) {
     "- Character name in ALL CAPS alone on its own line, then dialogue on the next line.",
     "- Action/description: 1–2 short sentences per block.",
     "- Do NOT output episode numbers, metadata, or commentary — screenplay content only.",
-    EPISODE_LENGTH_DIRECTIVE,
+    buildEpisodeLengthDirective(episodeNumber, totalEpisodes),
+    buildOpeningDirective(episodeNumber, totalEpisodes),
   ]
     .filter(Boolean)
     .join("\n");
@@ -4686,6 +5256,8 @@ async function runSeasonGeneration(body, res, persist) {
         }
         if (narrativeResetMemo.has(ep)) narrativeResetText = narrativeResetMemo.get(ep) || "";
 
+        const lenPlan = getEpisodeLengthPlan(ep, episodeCount);
+
         const userContent = buildEpisodePromptText({
           language: body.language || "EN",
           genre,
@@ -4711,9 +5283,10 @@ async function runSeasonGeneration(body, res, persist) {
           trim_context: ENABLE_TRIMMED_CONTEXT,
           mode: ENABLE_TWO_PASS_EPISODE ? "two_pass" : "single_pass",
           primary_episode_temperature: PRIMARY_EPISODE_TEMPERATURE,
-          primary_episode_max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
-          episode_target_chars: EPISODE_TARGET_CHARS,
-          episode_hard_max_chars: EPISODE_HARD_MAX_CHARS,
+          primary_episode_max_tokens: lenPlan.maxTokens,
+          episode_target_chars: lenPlan.targetChars,
+          episode_hard_max_chars: lenPlan.hardMaxChars,
+          establishing_episode: lenPlan.isEstablishing,
         });
 
         let rawContent = "";
@@ -4756,7 +5329,7 @@ async function runSeasonGeneration(body, res, persist) {
               { role: "system", content: generatorSystemPrompt },
               { role: "user", content: userContent },
             ],
-            max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
+            max_tokens: lenPlan.maxTokens,
             temperature: PRIMARY_EPISODE_TEMPERATURE,
             frequency_penalty: 1.0,
             presence_penalty: 0.6,
@@ -4774,7 +5347,7 @@ async function runSeasonGeneration(body, res, persist) {
               `(scene headings, ALL CAPS character cues, or is too short). ` +
               `Rewrite it in correct vertical drama format — preserve all story content and dialogue, ` +
               `but fix structure: INT./EXT. scene headings, ALL CAPS character cue lines, short action lines. ` +
-              `Keep the rewrite within the vertical length budget (~${EPISODE_TARGET_CHARS} characters; 2–3 scenes). ` +
+              `Keep the rewrite within the vertical length budget (~${lenPlan.targetChars} characters; ${lenPlan.isEstablishing ? "3–4" : "2–3"} scenes). ` +
               `Do NOT add "EPISODE ${ep}" or "END EPISODE ${ep}" (or END OF EPISODE) — the pipeline injects those; start with cold open or first scene heading.\n\n` +
               `DRAFT TO FIX:\n\n${rawContent}`;
             const reshapeResp = await openai.chat.completions.create({
@@ -4783,7 +5356,7 @@ async function runSeasonGeneration(body, res, persist) {
                 { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
                 { role: "user", content: reshapePrompt },
               ],
-              max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
+              max_tokens: lenPlan.maxTokens,
               temperature: 0.3,
               frequency_penalty: 0.8,
               presence_penalty: 0.3,
@@ -5838,28 +6411,120 @@ async function runSeasonGeneration(body, res, persist) {
           }
         }
 
+        // Phase D — Script Doctor: score the clean draft against a craft rubric and, if weak,
+        // do ONE bounded punch-up that improves only the flagged areas. Runs after all
+        // structural/quality/repetition gates and before the Phase 2 length trim (so any added
+        // text is then condensed back to budget).
+        if (ENABLE_SCRIPT_DOCTOR) {
+          try {
+            const doctorPlan = blueprint?.episodes?.[ep - 1] || null;
+            const doctorBible = blueprint?.protagonist_bible || null;
+            const review = await scoreEpisodeWithDoctor({
+              episodeText,
+              episodeNumber: ep,
+              totalEpisodes: episodeCount,
+              plan: doctorPlan,
+              bible: doctorBible,
+            });
+            if (review && review.scores) {
+              sendStreamLine(res, {
+                type: "script_doctor",
+                episode: ep,
+                phase: "scored",
+                scores: review.scores,
+                min_dimension: review.minDim,
+                threshold: SCRIPT_DOCTOR_MIN_SCORE,
+              });
+              const needsWork =
+                (review.minDim != null && review.minDim < SCRIPT_DOCTOR_MIN_SCORE) ||
+                (review.scores.overall != null &&
+                  review.scores.overall < SCRIPT_DOCTOR_MIN_SCORE);
+              if (needsWork) {
+                for (let dAttempt = 1; dAttempt <= MAX_SCRIPT_DOCTOR_REWRITES; dAttempt++) {
+                  const improvedRaw = await punchUpEpisode({
+                    episodeText,
+                    episodeNumber: ep,
+                    totalEpisodes: episodeCount,
+                    weaknesses: review.weaknesses,
+                    plan: doctorPlan,
+                    bible: doctorBible,
+                    lenPlan,
+                    generatorSystemPrompt,
+                  });
+                  if (!improvedRaw) break;
+                  let candidate = finalizeEpisodeText(improvedRaw, ep, seriesNames);
+                  candidate = normalizeEpisodeCharacterNames(
+                    candidate,
+                    CHARACTER_NAME_REGISTRY_PATH
+                  );
+                  const spanRepair = targetedRepairEpisodeText(candidate, seriesNames);
+                  candidate = spanRepair.text;
+                  if (!victorAllowed && includesWord(candidate, "Victor")) {
+                    candidate = candidate.replace(/\bVictor\b/g, pickReplacementNameForVictor());
+                  }
+                  // Accept only a well-formed, non-collapsed rewrite that did not blow the budget.
+                  const candidateChars = episodeBodyCharCount(candidate);
+                  const accept =
+                    passesBasicFormatCheck(candidate) &&
+                    !hasQualityCollapse(candidate, seriesNames) &&
+                    candidateChars <= Math.round(lenPlan.hardMaxChars * 1.35);
+                  if (accept) {
+                    episodeText = candidate;
+                    sendStreamLine(res, {
+                      type: "script_doctor",
+                      episode: ep,
+                      phase: "punched_up",
+                      attempt: dAttempt,
+                      weaknesses: review.weaknesses,
+                    });
+                    break;
+                  } else {
+                    sendStreamLine(res, {
+                      type: "script_doctor",
+                      episode: ep,
+                      phase: "rewrite_rejected",
+                      attempt: dAttempt,
+                      candidate_chars: candidateChars,
+                    });
+                  }
+                }
+              }
+            }
+          } catch (doctorErr) {
+            console.warn(`Episode ${ep} script doctor failed:`, doctorErr?.message || doctorErr);
+            sendStreamLine(res, {
+              type: "script_doctor",
+              episode: ep,
+              phase: "error",
+              message: String(doctorErr?.message || doctorErr),
+            });
+          }
+        }
+
         // Phase 2 — soft length gate: condense episodes that overshoot the vertical budget.
         // Runs after all anti-repetition/quality regen so nothing downstream re-expands the text,
         // and before recap/state/persist so those reflect the trimmed episode.
         if (ENABLE_EPISODE_LENGTH_TRIM) {
           try {
             let bodyChars = episodeBodyCharCount(episodeText);
-            if (bodyChars > EPISODE_HARD_MAX_CHARS) {
+            if (bodyChars > lenPlan.hardMaxChars) {
               sendStreamLine(res, {
                 type: "length_trim",
                 episode: ep,
                 phase: "start",
                 chars: bodyChars,
-                target_chars: EPISODE_TARGET_CHARS,
-                hard_max_chars: EPISODE_HARD_MAX_CHARS,
+                target_chars: lenPlan.targetChars,
+                hard_max_chars: lenPlan.hardMaxChars,
+                establishing_episode: lenPlan.isEstablishing,
               });
               for (let attempt = 1; attempt <= MAX_LENGTH_TRIM_ATTEMPTS; attempt++) {
-                if (bodyChars <= EPISODE_HARD_MAX_CHARS) break;
+                if (bodyChars <= lenPlan.hardMaxChars) break;
                 const condensed = await condenseEpisodeToBudget({
                   episodeText,
                   episodeNumber: ep,
                   totalEpisodes: episodeCount,
                   attempt,
+                  lenPlan,
                 });
                 if (!condensed) break;
                 let candidate = finalizeEpisodeText(condensed, ep, seriesNames);
@@ -5895,7 +6560,7 @@ async function runSeasonGeneration(body, res, persist) {
                   break;
                 }
               }
-              if (bodyChars > EPISODE_HARD_MAX_CHARS) {
+              if (bodyChars > lenPlan.hardMaxChars) {
                 sendStreamLine(res, {
                   type: "length_trim",
                   episode: ep,
