@@ -443,10 +443,118 @@ const PRIMARY_EPISODE_TEMPERATURE = Math.min(
   0.7,
   Math.max(0.1, parseFloat(process.env.PRIMARY_EPISODE_TEMPERATURE || "0.6") || 0.6)
 );
-const PRIMARY_EPISODE_MAX_TOKENS = Math.max(
-  1024,
-  Math.min(4096, parseInt(process.env.PRIMARY_EPISODE_MAX_TOKENS || "2048", 10) || 2048)
+/**
+ * Soft per-episode length budget (English body text).
+ * Calibration: ~1650 chars/ep × 60 ≈ ~108–112 EN pages (~120 page target).
+ * Establishing episodes (1–N) get extra room so openings/backstory aren't stripped.
+ * Tune via EPISODE_TARGET_CHARS / ESTABLISHING_EPISODES / ESTABLISHING_LENGTH_MULTIPLIER.
+ */
+const EPISODE_TARGET_CHARS = Math.max(
+  900,
+  Math.min(6000, parseInt(process.env.EPISODE_TARGET_CHARS || "1650", 10) || 1650)
 );
+const EPISODE_HARD_MAX_CHARS = Math.round(EPISODE_TARGET_CHARS * 1.15);
+const EPISODE_TARGET_WORDS_LOW = Math.round((EPISODE_TARGET_CHARS / 6.2) * 0.9);
+const EPISODE_TARGET_WORDS_HIGH = Math.round((EPISODE_TARGET_CHARS / 6.2) * 1.1);
+
+/** Early episodes that establish world + protagonist backstory get extra room. */
+const ESTABLISHING_EPISODES = Math.max(
+  0,
+  Math.min(6, parseInt(process.env.ESTABLISHING_EPISODES || "3", 10) || 3)
+);
+const ESTABLISHING_LENGTH_MULTIPLIER = Math.max(
+  1,
+  Math.min(2.5, parseFloat(process.env.ESTABLISHING_LENGTH_MULTIPLIER || "1.6") || 1.6)
+);
+
+const PRIMARY_EPISODE_MAX_TOKENS = (() => {
+  const fromEnv = parseInt(process.env.PRIMARY_EPISODE_MAX_TOKENS || "", 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return Math.max(768, Math.min(4096, fromEnv));
+  }
+  return Math.max(768, Math.min(4096, Math.round(EPISODE_HARD_MAX_CHARS / 2)));
+})();
+
+/** Per-episode length plan: establishing episodes get a larger char budget + token cap. */
+function getEpisodeLengthPlan(ep, total) {
+  const isEstablishing = ep <= ESTABLISHING_EPISODES;
+  const mult = isEstablishing ? ESTABLISHING_LENGTH_MULTIPLIER : 1;
+  const targetChars = Math.round(EPISODE_TARGET_CHARS * mult);
+  const hardMaxChars = Math.round(targetChars * 1.15);
+  const wordsLow = Math.round((targetChars / 6.2) * 0.9);
+  const wordsHigh = Math.round((targetChars / 6.2) * 1.1);
+  const maxTokens = Math.max(
+    768,
+    Math.min(4096, Math.round(PRIMARY_EPISODE_MAX_TOKENS * mult))
+  );
+  return { ep, total, isEstablishing, targetChars, hardMaxChars, wordsLow, wordsHigh, maxTokens };
+}
+
+/**
+ * Generic pacing/quality principles for shared system prompts.
+ * Per-episode budgets + opening/backstory specifics are injected via the user prompt.
+ */
+const EPISODE_QUALITY_DIRECTIVE =
+  `PACING & QUALITY (vertical drama — tight but vivid, never thin):\n` +
+  `- Keep scenes lean, but NEVER sacrifice context, character clarity, or concrete grounding to save space. The audience must always know who we are with, where we are, and what just changed.\n` +
+  `- Cut only true filler and literal repetition — do NOT strip backstory, world detail, motive, or vivid specificity.\n` +
+  `- OPEN ELECTRIC: the first moment of every episode must be charged and specific (conflict, danger, desire, humiliation, or a shock). Never open on a neutral, context-free chore.\n` +
+  `- Deliver at least one CONCRETE new development each episode (a reveal, reversal, escalation, or a real shift in the relationships). Never substitute vague restated menace for an actual plot beat.`;
+
+/** Per-episode length directive (numbers tailored to establishing vs regular episodes). */
+function buildEpisodeLengthDirective(ep, total) {
+  const plan = getEpisodeLengthPlan(ep, total);
+  const lines = [
+    `LENGTH & DENSITY BUDGET (vertical pacing — tight but vivid):`,
+    `- Aim for about ${plan.wordsLow}–${plan.wordsHigh} words (~${plan.targetChars} characters); hard maximum ~${plan.hardMaxChars} characters.`,
+    `- Use ${plan.isEstablishing ? "3–4" : "2–3"} focused scenes.`,
+    `- Cut ONLY true filler: a beat already shown, or vague restated tension when nothing concrete changes. Keep all grounding, motive, and world detail.`,
+  ];
+  if (plan.isEstablishing) {
+    lines.push(
+      `- This is an ESTABLISHING episode — spend the extra room to ground the heroine's world and reveal backstory (see the OPENING and BACKSTORY requirements).`
+    );
+  }
+  return lines.join("\n");
+}
+
+function buildOpeningDirective(ep, total) {
+  const isEstablishing = ep <= ESTABLISHING_EPISODES;
+  const lines = [
+    `ELECTRIC OPENING (the most important 5 seconds — do NOT open flat or context-free):`,
+    `- Drop us into a charged, specific moment with immediate stakes — conflict, danger, desire, humiliation, or a shock. NOT a neutral chore (e.g. tidying, walking, generic prep).`,
+    `- Within the first few lines the viewer must grasp WHO the heroine is in this moment and WHAT is at stake — ground us fast, no vague menace.`,
+    `- The first line of action or dialogue should hit hard enough that stopping the video feels impossible.`,
+  ];
+  if (isEstablishing) {
+    lines.push(
+      `- Because this is an early episode, the opening must also quickly convey the heroine's ordinary world and her core wound or desire so the audience bonds with her immediately.`
+    );
+  }
+  return lines.join("\n");
+}
+
+function buildBackstoryDirective(ep) {
+  if (ep > ESTABLISHING_EPISODES) return "";
+  return [
+    `PROTAGONIST BACKSTORY (establishing episodes 1–${ESTABLISHING_EPISODES}):`,
+    `- Reveal concrete, specific backstory for the heroine through action and dialogue (never a narrated info-dump): her history, what she lost or wants, why she is in this situation, and the wound that drives her.`,
+    `- Make her point of view and emotional stakes unmistakable so the audience is invested early.`,
+  ].join("\n");
+}
+
+/**
+ * Phase 2 — soft length gate. When prompts fail to keep an episode under the hard
+ * char budget, condense with a bounded rewrite before recap/persist. Distinct from the
+ * runaway collapse gate (EPISODE_MAX_CHARS ~24k): this targets normal-but-overlong episodes.
+ */
+const ENABLE_EPISODE_LENGTH_TRIM =
+  String(process.env.ENABLE_EPISODE_LENGTH_TRIM ?? "true").trim().toLowerCase() !== "false";
+const MAX_LENGTH_TRIM_ATTEMPTS = Math.max(
+  1,
+  Math.min(3, parseInt(process.env.MAX_LENGTH_TRIM_ATTEMPTS || "1", 10) || 1)
+);
+
 const ENABLE_TRIMMED_CONTEXT =
   String(process.env.ENABLE_TRIMMED_CONTEXT || "true").trim().toLowerCase() !== "false";
 const CONTEXT_TAIL_LINES = Math.max(
@@ -977,7 +1085,8 @@ async function generateVdramaStyleGuide({ logline, names, genre }) {
     `- ${male2}: describe his speech pattern, warmth level, how he contrasts with ${male1}\n\n` +
     `DIALOGUE RHYTHM: Describe the overall pacing — short punchy exchanges vs longer speeches, ` +
     `how tension is built through dialogue, typical line length.\n\n` +
-    `SCENE PACING: How scenes open and close, typical scene length, when to cut vs linger.\n\n` +
+    `SCENE PACING: How scenes open and close, typical scene length, when to cut vs linger. ` +
+    `Target ~${EPISODE_TARGET_WORDS_LOW}–${EPISODE_TARGET_WORDS_HIGH} words (~${EPISODE_TARGET_CHARS} characters) per episode for a 60-episode season (~120 pages total) — but NEVER sacrifice context, backstory, or grounding to hit the number; cut only true filler.\n\n` +
     `EMOTIONAL BEATS: The dominant emotional textures of this specific story — ` +
     `what feelings should recur, what the audience should feel at the end of each episode.\n\n` +
     `FORMAT RULES (non-negotiable for vertical drama):\n` +
@@ -1023,7 +1132,8 @@ async function generateGenreStyleNotes({ genre, logline }) {
     `STAKES & CONFLICT: What kinds of conflict drive this genre forward? ` +
     `What should the audience fear losing, and what should they want the heroine to gain?\n\n` +
     `PACING CONVENTIONS: How fast should this genre move? ` +
-    `Where should episodes slow down (intimacy, revelation) vs accelerate (danger, betrayal)?\n\n` +
+    `Where should episodes slow down (intimacy, revelation, world/backstory) vs accelerate (danger, betrayal)? ` +
+    `Target ~${EPISODE_TARGET_CHARS} characters per episode (~120 pages for 60 episodes) — protect vivid specificity and character clarity; cut only redundancy.\n\n` +
     `WHAT TO AVOID: List 4–5 clichés or lazy patterns specific to ${genre} drama ` +
     `that the writer must actively avoid — be specific (e.g. "don't resolve every threat with a fistfight", ` +
     `"don't repeat the same rescue-from-danger beat more than twice").\n\n` +
@@ -2577,6 +2687,56 @@ function finalizeEpisodeText(text, episodeNumber, names = null) {
     .trim()}\n\nEND EPISODE ${episodeNumber}`;
 }
 
+/** Character count of episode body text (excludes EPISODE n / END EPISODE n wrappers). */
+function episodeBodyCharCount(episodeText) {
+  const t = safeStr(episodeText).trim();
+  const m = t.match(/^EPISODE\s+\d+\s*\n([\s\S]*?)\n\s*END\s+EPISODE\s+\d+\s*$/i);
+  if (m) return m[1].trim().length;
+  return t.replace(/^EPISODE\s+\d+\s*/i, "").replace(/\s*END\s+EPISODE\s+\d+\s*$/i, "").trim().length;
+}
+
+async function condenseEpisodeToBudget({
+  episodeText,
+  episodeNumber,
+  totalEpisodes,
+  attempt = 1,
+  lenPlan = null,
+}) {
+  const plan = lenPlan || getEpisodeLengthPlan(episodeNumber, totalEpisodes);
+  const condensePrompt =
+    `This is episode ${episodeNumber} of ${totalEpisodes} of a vertical drama. ` +
+    `The draft below is TOO LONG for the vertical format. Condense it to about ` +
+    `${plan.targetChars} characters ` +
+    `(~${plan.wordsLow}–${plan.wordsHigh} words); ` +
+    `hard maximum ${plan.hardMaxChars} characters.\n\n` +
+    (attempt > 1
+      ? `(Attempt ${attempt}/${MAX_LENGTH_TRIM_ATTEMPTS}: the previous condense was still too long — cut harder.)\n\n`
+      : "") +
+    `Rules:\n` +
+    `- Preserve the SAME scenes, characters, story beats, and the ending/cliffhanger.\n` +
+    `- PROTECT THE OPENING: keep the electric cold open (the first scene's charged moment, its grounding, and its first strong line) intact — trim from the middle, not the hook.\n` +
+    `- Keep all main character names and their exact spellings.\n` +
+    `- Cut ONLY redundancy: trim repeated emotional beats, restated tension, and filler dialogue. ` +
+    `Do NOT delete backstory, motive, world detail, or context — tighten existing lines rather than deleting plot or grounding.\n` +
+    `- Keep screenplay format: INT./EXT. headings, ALL CAPS cues on their own line, dialogue on the next line.\n` +
+    `- Do NOT add "EPISODE ${episodeNumber}" / "END EPISODE ${episodeNumber}" — the pipeline adds those.\n` +
+    `- Output ONLY the condensed screenplay (no notes).\n\n` +
+    `DRAFT TO CONDENSE:\n\n${episodeText}`;
+  const completion = await openai.chat.completions.create({
+    model: FINETUNED_MODEL,
+    messages: [
+      { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
+      { role: "user", content: condensePrompt },
+    ],
+    max_tokens: plan.maxTokens,
+    temperature: 0.3,
+    frequency_penalty: 0.6,
+    presence_penalty: 0.2,
+  });
+  const out = completion.choices?.[0]?.message?.content;
+  return typeof out === "string" ? out.trim() : "";
+}
+
 function splitScenesForAnchorValidation(text) {
   const lines = safeStr(text).split(/\r?\n/);
   const scenes = [];
@@ -2806,12 +2966,14 @@ You must write ONE EPISODE of a short-form / vertical drama script with these ru
 - Keep the heroine active and resilient: she faces humiliation, setbacks, and schemes, but gradually gains confidence, agency, and leverage.
 - Use screenplay-style scene headings like "INT. LOCATION - DAY" or "EXT. LOCATION - NIGHT".
 - Mix vivid action lines and natural dialogue (CHARACTER NAME in caps, then their lines).
-- Keep the episode focused, with 2–5 short scenes.
+- Keep the episode focused — use a small number of scenes; the per-episode budget in the prompt specifies how many.
 - SETTING AND VARIETY (critical): If a THIS EPISODE'S PLAN is provided in the prompt, you MUST open in the setting_focus location listed there — do not substitute a different or more familiar location. Every episode in a 60-episode series must feel like it inhabits a distinct part of the world. Do not default to the same dock, beach, or lobby opening simply because it is comfortable. The season outline pre-planned a specific setting and conflict type for each episode — treat both as hard constraints, not suggestions.
 - Every episode should have a HOOK at the beginning. For early and middle episodes (when [EPISODE] is not within the last 5 of [EPISODES]), also end on a clear hook for the next episode—but keep them emotionally driven and grounded. Opening hooks should feel like a sharp emotional moment: an awkward intimacy beat, the heroine being subtly bullied or underestimated, a charged first encounter, or a small but vivid humiliation that makes us care. Closing hooks in these episodes should be light but addictive: a promise, a tease, a jealousy beat, a sudden confession or near-confession, or the hint of danger/competition around love or status.
 - Avoid graphic violence, gore, or long slapstick brawls. Do NOT ramble or list random objects, professions, or technical details; stay tightly focused on the characters, their feelings, and the immediate scene.
 - SPECIAL RULE FOR LATE EPISODES (when [EPISODE] is within the last 5 of [EPISODES]): progressively reduce unresolved threats and begin resolving major plot lines instead of opening new ones. Any end-of-episode hook in these late episodes should feel like the last steps toward closure (emotional decisions, consequences, or final preparations), not a brand-new danger, mystery, or villain.
 - FINAL EPISODE RULE (when [EPISODE] == [EPISODES]): you MUST treat this as a true finale. Fully resolve the main external threat and the core emotional arc. End the script on safety, acceptance, or a clearly chosen future for the heroine and her relationships. Do NOT add any new threat, twist, or unseen observer in the last scene, and do NOT tease another season—no "it’s not over", "someone watches from the shadows", or similar cliffhangers.
+
+${EPISODE_QUALITY_DIRECTIVE}
 
 CONFLICT AND ESCALATION REQUIREMENTS:
 - Every episode must move at least ONE external stake forward in a concrete way (family approval/disapproval, money or contracts, company/pack politics, social reputation/public humiliation, or a rival’s scheme).
@@ -2898,7 +3060,8 @@ Return STRICT JSON only with this exact shape:
 }
 
 Rules:
-- 2 to 5 scenes only.
+- Scene count: for early/establishing episodes (when [EPISODE] is 1, 2, or 3) plan 3–4 scenes; otherwise plan 2–3 scenes (prefer 2–3). Do NOT plan 5+ scenes.
+- Keep each scene's "beats" tight (2–4 beats). Match the LENGTH BUDGET given in the user prompt (establishing episodes have a larger budget than regular ones).
 - Keep continuity with provided context.
 - Keep the same three protagonist names exactly as provided.
 - No markdown, no prose outside JSON.`;
@@ -2923,6 +3086,7 @@ Rules:
   - Add a blank line after each scene heading.
   - Add a newline between distinct action beats.
 - Keep continuity with prior context.
+${EPISODE_QUALITY_DIRECTIVE}
 - Output script text only (no JSON, no notes).`;
 
 function parseEpisodePlanJson(raw, episodeNumber) {
@@ -2950,6 +3114,7 @@ async function generateEpisodeTextTwoPass({
   genre,
   generatorSystemPrompt = "",
 }) {
+  const lenPlan = getEpisodeLengthPlan(episodeNumber, totalEpisodes);
   const planCompletion = await openai.chat.completions.create({
     model: PLANNER_MODEL,
     messages: [
@@ -2972,7 +3137,10 @@ async function generateEpisodeTextTwoPass({
       names?.warmFriend
     )}]\n\n` +
     `CONTEXT:\n${userContent}\n\n` +
-    `SCENE PLAN JSON:\n${JSON.stringify(plan, null, 2)}`;
+    `SCENE PLAN JSON:\n${JSON.stringify(plan, null, 2)}\n\n` +
+    buildEpisodeLengthDirective(episodeNumber, totalEpisodes) +
+    "\n\n" +
+    buildOpeningDirective(episodeNumber, totalEpisodes);
 
   // Use GENERATOR_MODEL for the render pass (primary generation, not corrective).
   // Append style guides from generatorSystemPrompt if available.
@@ -2987,7 +3155,7 @@ async function generateEpisodeTextTwoPass({
       { role: "system", content: renderSystemPrompt },
       { role: "user", content: renderPrompt },
     ],
-    max_tokens: 2048,
+    max_tokens: lenPlan.maxTokens,
     temperature: 0.45,
     frequency_penalty: 1.0,
     presence_penalty: 0.5,
@@ -3143,8 +3311,12 @@ function buildCollapseRescueUserPrompt({
   }
   parts.push(`[LOGLINE] ${safeStr(logline).slice(0, 500)}`);
   parts.push(
-    "Write ONE complete episode of screenplay for the episode number above. Use the cast and logline only. Named characters only. Concrete action and dialogue. No abstract prose, no philosophy monologues, no vocabulary lists, no stitched-in 'bonus' sequences or multi-act sagas. Short-form vertical drama only: about 2–5 tight scenes (roughly 80–200 substantive lines total, dialogue-forward). Use standard screenplay format: scene headings (INT./EXT.), character cues in ALL CAPS, dialogue on the following line."
+    "Write ONE complete episode of screenplay for the episode number above. Use the cast and logline only. Named characters only. Concrete action and dialogue. No abstract prose, no philosophy monologues, no vocabulary lists, no stitched-in 'bonus' sequences or multi-act sagas. Short-form vertical drama, dialogue-forward. Use standard screenplay format: scene headings (INT./EXT.), character cues in ALL CAPS, dialogue on the following line."
   );
+  parts.push(buildEpisodeLengthDirective(ep, total));
+  parts.push(buildOpeningDirective(ep, total));
+  const rescueBackstory = buildBackstoryDirective(ep);
+  if (rescueBackstory) parts.push(rescueBackstory);
   if (blueprintContext) {
     parts.push(
       `THIS EPISODE PLAN (follow beats; stay concrete):\n${blueprintContext.slice(0, 600)}`
@@ -3548,6 +3720,15 @@ function buildEpisodePromptText({
   lines.push(
     "Output formatting: blank line after each scene heading; each character cue (ALL CAPS name) on its own line with dialogue on the following line — never output glued cues like LUKESorry or LUKE(mocking)You."
   );
+  lines.push("");
+  lines.push(buildOpeningDirective(ep, total));
+  const epBackstory = buildBackstoryDirective(ep);
+  if (epBackstory) {
+    lines.push("");
+    lines.push(epBackstory);
+  }
+  lines.push("");
+  lines.push(buildEpisodeLengthDirective(ep, total));
 
   if (courseCorrectionBrief) {
     lines.push("");
@@ -3722,11 +3903,13 @@ async function buildCollapseSafeEpisodeFallback(params) {
     summary ? `Episode summary: ${summary}` : "",
     endingInstruction,
     "",
-    "Write a SHORT but COMPLETE screenplay episode (2–3 scenes). Rules:",
+    "Write a complete screenplay episode (dialogue-forward). Rules:",
     "- Use INT./EXT. scene headings (e.g. INT. LOCATION - DAY).",
     "- Character name in ALL CAPS alone on its own line, then dialogue on the next line.",
     "- Action/description: 1–2 short sentences per block.",
     "- Do NOT output episode numbers, metadata, or commentary — screenplay content only.",
+    buildEpisodeLengthDirective(episodeNumber, totalEpisodes),
+    buildOpeningDirective(episodeNumber, totalEpisodes),
   ]
     .filter(Boolean)
     .join("\n");
@@ -4585,6 +4768,8 @@ async function runSeasonGeneration(body, res, persist) {
         }
         if (narrativeResetMemo.has(ep)) narrativeResetText = narrativeResetMemo.get(ep) || "";
 
+        const lenPlan = getEpisodeLengthPlan(ep, episodeCount);
+
         const userContent = buildEpisodePromptText({
           language: body.language || "EN",
           genre,
@@ -4610,7 +4795,10 @@ async function runSeasonGeneration(body, res, persist) {
           trim_context: ENABLE_TRIMMED_CONTEXT,
           mode: ENABLE_TWO_PASS_EPISODE ? "two_pass" : "single_pass",
           primary_episode_temperature: PRIMARY_EPISODE_TEMPERATURE,
-          primary_episode_max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
+          primary_episode_max_tokens: lenPlan.maxTokens,
+          episode_target_chars: lenPlan.targetChars,
+          episode_hard_max_chars: lenPlan.hardMaxChars,
+          establishing_episode: lenPlan.isEstablishing,
         });
 
         let rawContent = "";
@@ -4653,7 +4841,7 @@ async function runSeasonGeneration(body, res, persist) {
               { role: "system", content: generatorSystemPrompt },
               { role: "user", content: userContent },
             ],
-            max_tokens: PRIMARY_EPISODE_MAX_TOKENS,
+            max_tokens: lenPlan.maxTokens,
             temperature: PRIMARY_EPISODE_TEMPERATURE,
             frequency_penalty: 1.0,
             presence_penalty: 0.6,
@@ -4671,6 +4859,7 @@ async function runSeasonGeneration(body, res, persist) {
               `(scene headings, ALL CAPS character cues, or is too short). ` +
               `Rewrite it in correct vertical drama format — preserve all story content and dialogue, ` +
               `but fix structure: INT./EXT. scene headings, ALL CAPS character cue lines, short action lines. ` +
+              `Keep the rewrite within the vertical length budget (~${lenPlan.targetChars} characters; ${lenPlan.isEstablishing ? "3–4" : "2–3"} scenes). ` +
               `Do NOT add "EPISODE ${ep}" or "END EPISODE ${ep}" (or END OF EPISODE) — the pipeline injects those; start with cold open or first scene heading.\n\n` +
               `DRAFT TO FIX:\n\n${rawContent}`;
             const reshapeResp = await openai.chat.completions.create({
@@ -4679,7 +4868,7 @@ async function runSeasonGeneration(body, res, persist) {
                 { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
                 { role: "user", content: reshapePrompt },
               ],
-              max_tokens: 2048,
+              max_tokens: lenPlan.maxTokens,
               temperature: 0.3,
               frequency_penalty: 0.8,
               presence_penalty: 0.3,
@@ -5731,6 +5920,83 @@ async function runSeasonGeneration(body, res, persist) {
                 message: String(dupHealErr?.message || dupHealErr),
               });
             }
+          }
+        }
+
+        // Phase 2 — soft length gate: condense episodes that overshoot the vertical budget.
+        // Runs after all quality/repetition gates and before recap/persist.
+        if (ENABLE_EPISODE_LENGTH_TRIM) {
+          try {
+            let bodyChars = episodeBodyCharCount(episodeText);
+            if (bodyChars > lenPlan.hardMaxChars) {
+              sendStreamLine(res, {
+                type: "length_trim",
+                episode: ep,
+                phase: "start",
+                chars: bodyChars,
+                target_chars: lenPlan.targetChars,
+                hard_max_chars: lenPlan.hardMaxChars,
+                establishing_episode: lenPlan.isEstablishing,
+              });
+              for (let attempt = 1; attempt <= MAX_LENGTH_TRIM_ATTEMPTS; attempt++) {
+                if (bodyChars <= lenPlan.hardMaxChars) break;
+                const condensed = await condenseEpisodeToBudget({
+                  episodeText,
+                  episodeNumber: ep,
+                  totalEpisodes: episodeCount,
+                  attempt,
+                  lenPlan,
+                });
+                if (!condensed) break;
+                let candidate = finalizeEpisodeText(condensed, ep, seriesNames);
+                const candidateChars = episodeBodyCharCount(candidate);
+                const validForm =
+                  passesBasicFormatCheck(candidate) &&
+                  !hasQualityCollapse(candidate, seriesNames);
+                if (validForm && candidateChars < bodyChars) {
+                  candidate = normalizeEpisodeCharacterNames(
+                    candidate,
+                    CHARACTER_NAME_REGISTRY_PATH
+                  );
+                  const spanRepair = targetedRepairEpisodeText(candidate, seriesNames);
+                  episodeText = spanRepair.text;
+                  bodyChars = episodeBodyCharCount(episodeText);
+                  sendStreamLine(res, {
+                    type: "length_trim",
+                    episode: ep,
+                    phase: "applied",
+                    attempt,
+                    chars: bodyChars,
+                  });
+                } else {
+                  sendStreamLine(res, {
+                    type: "length_trim",
+                    episode: ep,
+                    phase: "rejected",
+                    attempt,
+                    candidate_chars: candidateChars,
+                    valid_form: validForm,
+                  });
+                  break;
+                }
+              }
+              if (bodyChars > lenPlan.hardMaxChars) {
+                sendStreamLine(res, {
+                  type: "length_trim",
+                  episode: ep,
+                  phase: "exhausted",
+                  chars: bodyChars,
+                });
+              }
+            }
+          } catch (trimErr) {
+            console.warn(`Episode ${ep} length trim failed:`, trimErr?.message || trimErr);
+            sendStreamLine(res, {
+              type: "length_trim",
+              episode: ep,
+              phase: "error",
+              message: String(trimErr?.message || trimErr),
+            });
           }
         }
 
