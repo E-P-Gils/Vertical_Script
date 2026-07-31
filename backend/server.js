@@ -418,11 +418,27 @@ app.post("/vsinfinite/stripe/create-checkout-session", requireAuth, async (req, 
 });
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const MOONSHOT_API_KEY = String(process.env.MOONSHOT_API_KEY || "").trim();
+const KIMI_BASE_URL = String(
+  process.env.OPENAI_BASE_URL_KIMI || process.env.MOONSHOT_BASE_URL || "https://api.moonshot.ai/v1"
+).trim();
+/** Kimi K3 always thinks; low keeps 60-ep runs affordable. */
+const KIMI_REASONING_EFFORT = String(process.env.KIMI_REASONING_EFFORT || "low")
+  .trim()
+  .toLowerCase();
+const VALID_KIMI_REASONING = new Set(["low", "high", "max"]);
+
+/**
+ * Hybrid model routing:
+ * - PLANNER + GENERATOR → Kimi K3 when MOONSHOT_API_KEY is set (longform / continuity)
+ * - FINETUNED → stays on OpenAI (vertical format specialist)
+ * - Embeddings → always OpenAI
+ */
 const FINETUNED_MODEL =
   process.env.OPENAI_FINETUNED_MODEL ||
   "ft:gpt-4.1-mini-2025-04-14:personal:vertical-genre:DJdSjUra";
 const PLANNER_MODEL =
-  process.env.OPENAI_PLANNER_MODEL || "gpt-4.1-mini";
+  process.env.OPENAI_PLANNER_MODEL || (MOONSHOT_API_KEY ? "kimi-k3" : "gpt-4.1-mini");
 const RECAP_MODEL =
   process.env.OPENAI_RECAP_MODEL || PLANNER_MODEL;
 /** Model for EN→ZH screenplay translation (defaults to planner; not the fine-tuned writer). */
@@ -432,7 +448,7 @@ const TRANSLATION_MODEL =
 /** General-purpose generator model — used for main episode generation instead of the fine-tuned
  *  model to avoid overfitting loops. Fine-tuned model acts as style advisor and corrective passer. */
 const GENERATOR_MODEL =
-  process.env.OPENAI_GENERATOR_MODEL || "gpt-4.1";
+  process.env.OPENAI_GENERATOR_MODEL || (MOONSHOT_API_KEY ? "kimi-k3" : "gpt-4.1");
 
 const NAME_VALIDATION_MODEL =
   process.env.OPENAI_NAME_VALIDATION_MODEL || PLANNER_MODEL;
@@ -608,13 +624,101 @@ if (!OPENAI_API_KEY) {
   // Do not hard-exit: allow the server to start for auth + other non-OpenAI routes.
   // Endpoints that call OpenAI will fail later with a clear error.
 }
+if (!MOONSHOT_API_KEY && /^kimi/i.test(String(GENERATOR_MODEL) + String(PLANNER_MODEL))) {
+  console.error(
+    "PLANNER/GENERATOR are set to Kimi but MOONSHOT_API_KEY is missing — those calls will fail."
+  );
+}
 
+/** OpenAI client: fine-tuned vertical model + embeddings (and any gpt-* / ft:* models). */
 const openai = new OpenAI({
   apiKey: OPENAI_API_KEY || "",
   // Allow slower responses on free Render / high latency routes
   timeout: 600_000, // 10 minutes in milliseconds
   maxRetries: 2,
 });
+
+/** Moonshot / Kimi client: planner + main generator when models are kimi-*. */
+const kimi = MOONSHOT_API_KEY
+  ? new OpenAI({
+      apiKey: MOONSHOT_API_KEY,
+      baseURL: KIMI_BASE_URL,
+      timeout: 600_000,
+      maxRetries: 2,
+    })
+  : null;
+
+function isKimiModel(model) {
+  const m = String(model || "").trim().toLowerCase();
+  return m.startsWith("kimi") || m.includes("moonshot");
+}
+
+function clientForModel(model) {
+  if (isKimiModel(model)) {
+    if (!kimi) {
+      throw new Error(
+        `Model "${model}" requires MOONSHOT_API_KEY (Moonshot/Kimi), but it is not configured.`
+      );
+    }
+    return kimi;
+  }
+  return openai;
+}
+
+/**
+ * Kimi K3 rejects or ignores OpenAI sampling knobs (temperature, penalties, etc.).
+ * Strip them and map max_tokens → max_completion_tokens; attach reasoning_effort.
+ */
+function sanitizeChatBodyForProvider(body) {
+  const model = body?.model;
+  if (!isKimiModel(model)) return body;
+
+  const {
+    temperature,
+    top_p,
+    presence_penalty,
+    frequency_penalty,
+    n,
+    max_tokens,
+    max_completion_tokens,
+    reasoning_effort,
+    ...rest
+  } = body;
+  void temperature;
+  void top_p;
+  void presence_penalty;
+  void frequency_penalty;
+  void n;
+
+  const effort = VALID_KIMI_REASONING.has(String(reasoning_effort || "").toLowerCase())
+    ? String(reasoning_effort).toLowerCase()
+    : VALID_KIMI_REASONING.has(KIMI_REASONING_EFFORT)
+      ? KIMI_REASONING_EFFORT
+      : "low";
+
+  const out = { ...rest, model, reasoning_effort: effort };
+  const tokenCap = max_completion_tokens ?? max_tokens;
+  if (tokenCap != null) out.max_completion_tokens = tokenCap;
+  return out;
+}
+
+/** Provider-aware chat completions: routes kimi-* → Moonshot, everything else → OpenAI. */
+async function chatCompletionsCreate(body) {
+  const model = body?.model;
+  const client = clientForModel(model);
+  return client.chat.completions.create(sanitizeChatBodyForProvider(body));
+}
+
+if (kimi) {
+  console.log(
+    `[hybrid] Kimi client ready (${KIMI_BASE_URL}); planner=${PLANNER_MODEL} generator=${GENERATOR_MODEL} finetuned=${FINETUNED_MODEL} reasoning=${KIMI_REASONING_EFFORT}`
+  );
+} else {
+  console.log(
+    `[hybrid] Kimi disabled (no MOONSHOT_API_KEY); planner=${PLANNER_MODEL} generator=${GENERATOR_MODEL} finetuned=${FINETUNED_MODEL}`
+  );
+}
+
 const DYNAMIC_MERGE_PATTERNS = loadDynamicMergePatterns(DYNAMIC_MERGE_PATTERNS_PATH);
 if (DYNAMIC_MERGE_PATTERNS.length) {
   console.log(
@@ -667,7 +771,7 @@ async function normalizeGenreLogline({ rawLogline, genre, names }) {
     male2: names?.warmFriend || null,
     premise: clean,
   };
-  const completion = await openai.chat.completions.create({
+  const completion = await chatCompletionsCreate({
     model: PLANNER_MODEL,
     messages: [
       { role: "system", content: GENRE_LOGLINE_NORMALIZER_SYSTEM_PROMPT },
@@ -1098,7 +1202,7 @@ async function generateVdramaStyleGuide({ logline, names, genre }) {
     `Output only the five sections above. No preamble or closing remarks.`;
 
   try {
-    const resp = await openai.chat.completions.create({
+    const resp = await chatCompletionsCreate({
       model: FINETUNED_MODEL,
       max_tokens: 700,
       temperature: 0.4,
@@ -1140,7 +1244,7 @@ async function generateGenreStyleNotes({ genre, logline }) {
     `Output only the four sections. No preamble or closing remarks.`;
 
   try {
-    const resp = await openai.chat.completions.create({
+    const resp = await chatCompletionsCreate({
       model: PLANNER_MODEL,
       max_tokens: 500,
       temperature: 0.5,
@@ -1175,11 +1279,11 @@ function normalizeBlueprintEpisodeChunk(eps, start, end) {
 async function openaiBlueprintChatCreate(body) {
   const withJson = { ...body, response_format: { type: "json_object" } };
   try {
-    return await openai.chat.completions.create(withJson);
+    return await chatCompletionsCreate(withJson);
   } catch (err) {
     const msg = String(err?.message || err);
     if (/response_format|json_object|unsupported|json mode/i.test(msg)) {
-      return await openai.chat.completions.create(body);
+      return await chatCompletionsCreate(body);
     }
     throw err;
   }
@@ -1454,7 +1558,7 @@ async function generateEpisodeSummaries({ blueprint, logline, genre }) {
   };
   const userContent = JSON.stringify(payload);
 
-  const completion = await openai.chat.completions.create({
+  const completion = await chatCompletionsCreate({
     model: PLANNER_MODEL,
     messages: [
       { role: "system", content: EPISODE_SUMMARY_SYSTEM_PROMPT },
@@ -1497,7 +1601,7 @@ async function summarizeEpisode({ episodeNumber, text }) {
   const clean = safeStr(text);
   if (!clean) return null;
 
-  const completion = await openai.chat.completions.create({
+  const completion = await chatCompletionsCreate({
     model: RECAP_MODEL,
     messages: [
       { role: "system", content: RECAP_SYSTEM_PROMPT },
@@ -1526,7 +1630,7 @@ async function summarizeEpisode({ episodeNumber, text }) {
 async function summarizeEpisodeState({ episodeNumber, text }) {
   const clean = safeStr(text);
   if (!clean) return null;
-  const completion = await openai.chat.completions.create({
+  const completion = await chatCompletionsCreate({
     model: RECAP_MODEL,
     messages: [
       { role: "system", content: EPISODE_STATE_SYSTEM_PROMPT },
@@ -1562,7 +1666,7 @@ async function buildFullNarrativeReset(episodeRecaps, names, logline, episodeNum
     : [];
   if (!recaps.length) return "";
   const recapText = recaps.map((r) => `Ep ${r.episode}: ${safeStr(r.recap)}`).join("\n");
-  const completion = await openai.chat.completions.create({
+  const completion = await chatCompletionsCreate({
     model: RECAP_MODEL,
     messages: [
       { role: "system", content: NARRATIVE_RESET_SYSTEM_PROMPT },
@@ -2290,7 +2394,7 @@ async function validateMainTrioNameConsistencyWithLLM({
   const cueLines = extractAllCapsCueLines(episodeText);
   const payload = cueLines.slice(0, 120); // cap to avoid token bloat
 
-  const validation = await openai.chat.completions.create({
+  const validation = await chatCompletionsCreate({
     model: NAME_VALIDATION_MODEL,
     messages: [
       { role: "system", content: NAME_CONSISTENCY_VALIDATION_SYSTEM_PROMPT },
@@ -2722,7 +2826,7 @@ async function condenseEpisodeToBudget({
     `- Do NOT add "EPISODE ${episodeNumber}" / "END EPISODE ${episodeNumber}" — the pipeline adds those.\n` +
     `- Output ONLY the condensed screenplay (no notes).\n\n` +
     `DRAFT TO CONDENSE:\n\n${episodeText}`;
-  const completion = await openai.chat.completions.create({
+  const completion = await chatCompletionsCreate({
     model: FINETUNED_MODEL,
     messages: [
       { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
@@ -2819,7 +2923,7 @@ async function rewriteEpisodeForAnchors({
     "- Keep screenplay formatting and continuity; do not output lists or abstract vocabulary runs.\n\n" +
     "Current draft to fix:\n\n" +
     episodeText;
-  const completion = await openai.chat.completions.create({
+  const completion = await chatCompletionsCreate({
     model: FINETUNED_MODEL,
     messages: [
       { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
@@ -2908,7 +3012,7 @@ async function translateEpisodeScriptToChinese(episodeNumber, totalEpisodes, eng
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const completion = await openai.chat.completions.create({
+      const completion = await chatCompletionsCreate({
         model: TRANSLATION_MODEL,
         messages: [
           { role: "system", content: SCRIPT_TRANSLATION_SYSTEM_PROMPT },
@@ -3115,7 +3219,7 @@ async function generateEpisodeTextTwoPass({
   generatorSystemPrompt = "",
 }) {
   const lenPlan = getEpisodeLengthPlan(episodeNumber, totalEpisodes);
-  const planCompletion = await openai.chat.completions.create({
+  const planCompletion = await chatCompletionsCreate({
     model: PLANNER_MODEL,
     messages: [
       { role: "system", content: EPISODE_PLAN_SYSTEM_PROMPT },
@@ -3149,7 +3253,7 @@ async function generateEpisodeTextTwoPass({
       generatorSystemPrompt.slice(EPISODE_TEXT_SYSTEM_PROMPT.length)
     : EPISODE_RENDER_FROM_PLAN_SYSTEM_PROMPT;
 
-  const renderCompletion = await openai.chat.completions.create({
+  const renderCompletion = await chatCompletionsCreate({
     model: GENERATOR_MODEL,
     messages: [
       { role: "system", content: renderSystemPrompt },
@@ -3370,7 +3474,7 @@ async function runMidBatchReview({
     `Be concrete and specific. Do not be vague. Output only the four sections, no preamble.`;
 
   try {
-    const resp = await openai.chat.completions.create({
+    const resp = await chatCompletionsCreate({
       model: PLANNER_MODEL,
       max_tokens: 600,
       temperature: 0.7,
@@ -3915,7 +4019,7 @@ async function buildCollapseSafeEpisodeFallback(params) {
     .join("\n");
 
   try {
-    const resp = await openai.chat.completions.create({
+    const resp = await chatCompletionsCreate({
       model: PLANNER_MODEL,
       max_tokens: 900,
       temperature: 0.72,
@@ -4835,7 +4939,7 @@ async function runSeasonGeneration(body, res, persist) {
           }
         }
         if (!rawContent) {
-          const completion = await openai.chat.completions.create({
+          const completion = await chatCompletionsCreate({
             model: GENERATOR_MODEL,
             messages: [
               { role: "system", content: generatorSystemPrompt },
@@ -4862,7 +4966,7 @@ async function runSeasonGeneration(body, res, persist) {
               `Keep the rewrite within the vertical length budget (~${lenPlan.targetChars} characters; ${lenPlan.isEstablishing ? "3–4" : "2–3"} scenes). ` +
               `Do NOT add "EPISODE ${ep}" or "END EPISODE ${ep}" (or END OF EPISODE) — the pipeline injects those; start with cold open or first scene heading.\n\n` +
               `DRAFT TO FIX:\n\n${rawContent}`;
-            const reshapeResp = await openai.chat.completions.create({
+            const reshapeResp = await chatCompletionsCreate({
               model: FINETUNED_MODEL,
               messages: [
                 { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
@@ -4928,7 +5032,7 @@ async function runSeasonGeneration(body, res, persist) {
               const retryContent = userContent + retryHint;
               const temp = Math.max(0.35, 1.0 - (attempt - 1) * 0.28);
               try {
-                const retry = await openai.chat.completions.create({
+                const retry = await chatCompletionsCreate({
                   model: FINETUNED_MODEL,
                   messages: [
                     { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
@@ -5054,7 +5158,7 @@ async function runSeasonGeneration(body, res, persist) {
               attempt >= MAX_MERGED_WORD_REGEN_ATTEMPTS
                 ? generatorSystemPrompt
                 : EPISODE_TEXT_SYSTEM_PROMPT;
-            const retry = await openai.chat.completions.create({
+            const retry = await chatCompletionsCreate({
               model,
               messages: [
                 { role: "system", content: sys },
@@ -5161,7 +5265,7 @@ async function runSeasonGeneration(body, res, persist) {
                 pAttempt >= MAX_PLOT_CONTRACT_REGEN_ATTEMPTS
                   ? generatorSystemPrompt
                   : EPISODE_TEXT_SYSTEM_PROMPT;
-              const retry = await openai.chat.completions.create({
+              const retry = await chatCompletionsCreate({
                 model,
                 messages: [
                   { role: "system", content: sys },
@@ -5260,7 +5364,7 @@ async function runSeasonGeneration(body, res, persist) {
               names: seriesNames,
               blueprint,
             });
-            const retry = await openai.chat.completions.create({
+            const retry = await chatCompletionsCreate({
               model: PLANNER_MODEL,
               messages: [
                 { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
@@ -5446,7 +5550,7 @@ async function runSeasonGeneration(body, res, persist) {
             let lastFailedFp = newFp;
             try {
               for (let attempt = 1; attempt <= 2 && !structuralAccepted; attempt++) {
-                const structuralRetry = await openai.chat.completions.create({
+                const structuralRetry = await chatCompletionsCreate({
                   model: attempt === 1 ? FINETUNED_MODEL : GENERATOR_MODEL,
                   messages: [
                     {
@@ -5557,7 +5661,7 @@ async function runSeasonGeneration(body, res, persist) {
                 `  4. The rest of the episode after the opening scene may remain largely intact.`;
               try {
                 const useGen = attempt >= MAX_BLUEPRINT_SETTING_REGEN_ATTEMPTS;
-                const blueprintRetry = await openai.chat.completions.create({
+                const blueprintRetry = await chatCompletionsCreate({
                   model: useGen ? GENERATOR_MODEL : FINETUNED_MODEL,
                   messages: [
                     {
@@ -5622,7 +5726,7 @@ async function runSeasonGeneration(body, res, persist) {
             `Rewrite the episode and rename ANY character named "Victor" to "${replacement}" (and adjust dialogue/action accordingly). ` +
             `Do NOT introduce any new protagonists. Keep the heroine and the two male leads as the core cast. Do not change their names.`;
           try {
-            const retry = await openai.chat.completions.create({
+            const retry = await chatCompletionsCreate({
               model: FINETUNED_MODEL,
               messages: [
                 { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
@@ -5683,7 +5787,7 @@ async function runSeasonGeneration(body, res, persist) {
         // Final-episode pass: lightly edit the ending away from cliffhangers into true resolution.
         if (ep === episodeCount && typeof episodeText === "string" && episodeText.trim()) {
           try {
-            const edit = await openai.chat.completions.create({
+            const edit = await chatCompletionsCreate({
               model: PLANNER_MODEL,
               messages: [
                 { role: "system", content: ENDING_EDIT_SYSTEM_PROMPT },
@@ -5766,7 +5870,7 @@ async function runSeasonGeneration(body, res, persist) {
                 "Your early scenes read as the same situation and emotional beat as that episode, even with different wording. " +
                 "Rewrite the COMPLETE episode: change setting, sensory details, conflict frame, and dialogue moves while advancing the plot and keeping the same main cast names.";
               try {
-                const embResp = await openai.chat.completions.create({
+                const embResp = await chatCompletionsCreate({
                   model: GENERATOR_MODEL,
                   messages: [
                     { role: "system", content: generatorSystemPrompt },
@@ -5859,7 +5963,7 @@ async function runSeasonGeneration(body, res, persist) {
               "Keep continuity (same tagged main cast, story moves forward, no reset) but do not echo the paired episode’s shape or lines.";
             let healed = false;
             try {
-              const healResp = await openai.chat.completions.create({
+              const healResp = await chatCompletionsCreate({
                 model: FINETUNED_MODEL,
                 messages: [
                   { role: "system", content: EPISODE_TEXT_SYSTEM_PROMPT },
