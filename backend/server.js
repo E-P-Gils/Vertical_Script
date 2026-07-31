@@ -1289,12 +1289,39 @@ async function openaiBlueprintChatCreate(body) {
   }
 }
 
+/**
+ * Kimi always spends completion budget on reasoning. Blueprint JSON needs headroom +
+ * smaller chunks so content isn't truncated mid-object. Hybrid routing unchanged —
+ * only PLANNER_MODEL budgets/chunk sizes adjust when the planner is kimi-*.
+ */
+function blueprintChunkSpanForPlanner() {
+  if (!isKimiModel(PLANNER_MODEL)) return 8;
+  const fromEnv = parseInt(process.env.KIMI_BLUEPRINT_CHUNK_SPAN || "4", 10);
+  return Math.max(2, Math.min(6, Number.isFinite(fromEnv) ? fromEnv : 4));
+}
+
+function blueprintChunkMaxTokens(count) {
+  if (isKimiModel(PLANNER_MODEL)) {
+    // ~2.5k completion tokens/ep leaves room for thinking + full episode objects.
+    return Math.min(65536, Math.max(16384, count * 2500));
+  }
+  return Math.min(16384, Math.max(4096, count * 520));
+}
+
+function blueprintSingleShotMaxTokens(total) {
+  if (isKimiModel(PLANNER_MODEL)) {
+    return Math.min(131072, Math.max(32768, total * 800));
+  }
+  return Math.min(16384, Math.max(8192, total * 150));
+}
+
 async function generateSeasonBlueprintChunked({ total, logline, genre, names, tropes }) {
   // Smaller chunks = smaller JSON per response = fewer parse failures from the planner model.
-  const chunkSpan = 8;
+  const chunkSpan = blueprintChunkSpanForPlanner();
   const numChunks = Math.ceil(total / chunkSpan);
   console.log(
-    `[blueprint] chunked planner v2: ${total} episodes → ${numChunks} chunk(s) of up to ${chunkSpan} episodes`
+    `[blueprint] chunked planner v2: ${total} episodes → ${numChunks} chunk(s) of up to ${chunkSpan} episodes` +
+      (isKimiModel(PLANNER_MODEL) ? " (Kimi: smaller chunks + higher completion budget)" : "")
   );
   let blueprint = null;
 
@@ -1313,8 +1340,9 @@ async function generateSeasonBlueprintChunked({ total, logline, genre, names, tr
           `\n\nReturn ONE JSON object with keys: series_title, heroine, male1, male2, genre, tropes, characters (exactly 3 entries), episodes.\n` +
           `CRITICAL: "episodes" MUST contain exactly ${count} objects — episode numbers ${start} through ${end} only (not the full ${total}-episode season).\n` +
           `Each episode object must follow the full per-episode schema (including micro_beats with exactly 4 strings).\n` +
+          `Keep every string field concise (one short sentence) so the JSON completes fully.\n` +
           (attempt > 1
-            ? `\n(Attempt ${attempt}/4: reply was invalid or wrong length. Valid JSON only; exactly ${count} episodes.)`
+            ? `\n(Attempt ${attempt}/4: previous reply was truncated or invalid. Valid complete JSON only; exactly ${count} episodes; shorter field text.)`
             : "")
         : [
             `[CONTINUE SAME SERIES] [GENRE=${String(genre || "Romance").trim() || "Romance"}] [TOTAL_EPISODES=${total}]`,
@@ -1323,14 +1351,15 @@ async function generateSeasonBlueprintChunked({ total, logline, genre, names, tr
             "",
             `Return JSON with ONLY the key "episodes": an array of exactly ${count} objects for episodes ${start} through ${end} inclusive.`,
             `Use the same per-episode fields as the season planner (episode, arc_phase, title, setting_focus, emotional_focus, heroine_state, male1_state, male2_state, main_conflict, key_events, twist_or_reveal, cliffhanger_type, cliffhanger, hook_type, conflict_type, unique_scene, micro_beats[4]).`,
+            `Keep every string field concise (one short sentence) so the JSON completes fully.`,
             attempt > 1
-              ? `\n(Attempt ${attempt}/4: valid JSON only; exactly ${count} episodes in order.)`
+              ? `\n(Attempt ${attempt}/4: previous reply was truncated or invalid. Valid complete JSON only; exactly ${count} episodes; shorter field text.)`
               : "",
           ]
             .filter(Boolean)
             .join("\n");
 
-      const maxTok = Math.min(16384, Math.max(4096, count * 520));
+      const maxTok = blueprintChunkMaxTokens(count);
 
       try {
         const completion = await openaiBlueprintChatCreate({
@@ -1416,13 +1445,13 @@ async function generateSeasonBlueprintSingleShot({ total, logline, genre, names,
     episodeCount: total,
     tropes,
   });
-  const blueprintMaxTokens = Math.min(16384, Math.max(8192, total * 150));
+  const blueprintMaxTokens = blueprintSingleShotMaxTokens(total);
   let lastError = /** @type {Error | null} */ (null);
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     const retryHint =
       attempt > 1
-        ? `\n\nRetry ${attempt}/3: Invalid JSON or wrong episode count. ONE JSON object only. "episodes" must have exactly ${total} entries.`
+        ? `\n\nRetry ${attempt}/3: Invalid JSON, truncated, or wrong episode count. ONE complete JSON object only. "episodes" must have exactly ${total} entries. Keep string fields concise.`
         : "";
 
     try {
@@ -6467,8 +6496,11 @@ const start = async () => {
   }
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Using model: ${FINETUNED_MODEL}`);
-    console.log("Blueprint: chunked planner v2 (8 eps/chunk) + single-shot fallback; log tag [blueprint]");
+    console.log(
+      `[hybrid] startup: planner=${PLANNER_MODEL} generator=${GENERATOR_MODEL} finetuned=${FINETUNED_MODEL}` +
+        (kimi ? ` kimi=${KIMI_BASE_URL} reasoning=${KIMI_REASONING_EFFORT}` : " kimi=off")
+    );
+    console.log("Blueprint: chunked planner v2 + single-shot fallback; log tag [blueprint]");
   });
 };
 start();
