@@ -278,6 +278,15 @@ function getPublicBaseUrl(req) {
 
 /** Create a Stripe Checkout Session and return { url }. */
 app.post("/vsinfinite/stripe/create-checkout-session", requireAuth, async (req, res) => {
+  // Self-serve purchase paused while pricing/costs are finalized. Credits via Owner tab only.
+  const purchasesEnabled =
+    String(process.env.ENABLE_CREDIT_PURCHASE || "false").trim().toLowerCase() === "true";
+  if (!purchasesEnabled) {
+    return res.status(503).json({
+      error:
+        "Self-serve purchase is coming soon. / 自助购买即将推出。",
+    });
+  }
   if (!isJwtAuthEnabled()) {
     return res.status(503).json({ error: "JWT auth is not enabled on this server." });
   }
@@ -4153,7 +4162,7 @@ function pickReplacementNameForVictor() {
 }
 
 const SCRIPT_CREDITS_REQUIRED_ERROR =
-  "Purchase credits to generate a script! / 购买剧本额度后方可生成剧本！";
+  "You need script credits to generate. Self-serve purchase is coming soon — credits are granted by the site owner for now. / 生成剧本需要额度。自助购买即将推出——目前请由站点管理员在后台发放额度。";
 
 const CONCURRENT_GENERATIONS_CAP_ERROR = `You already have ${MAX_CONCURRENT_GENERATIONS_PER_USER} scripts generating. Wait for one to finish or check My Scripts. / 您已有 ${MAX_CONCURRENT_GENERATIONS_PER_USER} 个剧本正在生成，请等待完成或在「我的剧本」中查看。`;
 

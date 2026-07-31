@@ -53,8 +53,8 @@ function Bi({ text }) {
 function scriptCreditsRequiredMsg(lang) {
   return pickLang(
     lang,
-    "Purchase credits to generate a script!",
-    "购买剧本额度后方可生成剧本！"
+    "You need script credits to generate. Self-serve purchase is coming soon — credits are granted by the site owner for now.",
+    "生成剧本需要额度。自助购买即将推出——目前请由站点管理员在后台发放额度。"
   );
 }
 
@@ -111,6 +111,13 @@ const OWNER_OPS_TAB_EMAILS = (() => {
 
 /** Must match backend `scriptsStore.js` MAX_CONCURRENT_GENERATIONS_PER_USER. */
 const MAX_CONCURRENT_GENERATIONS = 5;
+
+/**
+ * Self-serve credit purchase (Stripe). Off while pricing/costs are being finalized.
+ * Generation still requires script_credits (granted via Owner tab).
+ * Set to `true` to restore Buy buttons + checkout.
+ */
+const ENABLE_CREDIT_PURCHASE = false;
 
 /**
  * Simplified pricing toggle.
@@ -1008,6 +1015,16 @@ function App() {
 
   const startStripeCheckout = useCallback(
     async ({ pack, kind, priceId }) => {
+      if (!ENABLE_CREDIT_PURCHASE) {
+        setError(
+          pickLang(
+            uiLang,
+            "Self-serve purchase is coming soon.",
+            "自助购买即将推出。"
+          )
+        );
+        return;
+      }
       if (!authToken) {
         setError(pickLang(uiLang, "Please log in or register first.", "请先登录或注册。"));
         setPage("login");
@@ -1622,14 +1639,58 @@ function App() {
             className="script-output-hint pricing-hint"
             style={{ marginTop: "-0.25rem" }}
           >
-            {SHOW_FULL_PRICING ? (
+            {!ENABLE_CREDIT_PURCHASE ? (
+              <Bi text="Self-serve purchase is paused while we finalize pricing and model costs. / 自助购买暂未开放，我们正在确定定价与模型成本。" />
+            ) : SHOW_FULL_PRICING ? (
               <Bi text="Full 60-episode vertical scripts · RMB pricing · Monthly plans, pay-as-you-go, then batch bundles / 完整 60 集垂直剧本 · 人民币计费 · 月付档位、按需付费与批量梯度包" />
             ) : (
               <Bi text="Full 60-episode vertical script · RMB pricing · One credit per generation / 完整 60 集垂直剧本 · 人民币计费 · 每次生成消耗 1 个剧本额度" />
             )}
           </p>
 
-          {!SHOW_FULL_PRICING && (
+          {!ENABLE_CREDIT_PURCHASE && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                width: "100%",
+              }}
+            >
+              <div style={{ width: "100%", maxWidth: 480 }}>
+                <article className="pricing-card">
+                  <h3 className="pricing-name">
+                    <Bi text="Coming soon / 即将推出" />
+                  </h3>
+                  <p className="pricing-rate" style={{ fontSize: "1.35rem" }}>
+                    <Bi text="Credit purchase / 额度购买" />
+                  </p>
+                  <ul className="pricing-features">
+                    <li>
+                      <Bi text="Self-serve checkout is temporarily unavailable / 自助付款暂时不可用" />
+                    </li>
+                    <li>
+                      <Bi text="Script generation still requires credits / 生成剧本仍需额度" />
+                    </li>
+                    <li>
+                      <Bi text="Credits can be granted by the site owner for now / 目前可由站点管理员发放额度" />
+                    </li>
+                  </ul>
+                  <div className="pricing-card-actions">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: "100%" }}
+                      disabled
+                    >
+                      <Bi text="Coming soon / 即将推出" />
+                    </button>
+                  </div>
+                </article>
+              </div>
+            </div>
+          )}
+
+          {ENABLE_CREDIT_PURCHASE && !SHOW_FULL_PRICING && (
             <div
               style={{
                 display: "flex",
@@ -1680,7 +1741,7 @@ function App() {
             </div>
           )}
 
-          {SHOW_FULL_PRICING && (() => {
+          {ENABLE_CREDIT_PURCHASE && SHOW_FULL_PRICING && (() => {
             const paidTier =
               authToken && ["starter", "professional", "business"].includes(String(mePlanTier || "").toLowerCase());
             const tier = String(mePlanTier || "").toLowerCase();
@@ -2220,7 +2281,7 @@ function App() {
             );
           })()}
 
-          {SHOW_FULL_PRICING && (
+          {ENABLE_CREDIT_PURCHASE && SHOW_FULL_PRICING && (
             <div className="pricing-refund-policy">
               <h3 className="pricing-subtitle">
                 <Bi text="Refund policy / 退款政策" />
@@ -2575,10 +2636,11 @@ function App() {
           {authToken && scriptCredits !== null && scriptCredits < 1 ? (
             <p className="script-credits-required-callout" role="alert">
               <span className="script-credits-required-en bilingual-en">
-                Purchase credits to generate a script!
+                You need script credits to generate. Self-serve purchase is coming soon —
+                credits are granted by the site owner for now.
               </span>
               <span className="script-credits-required-zh bilingual-zh">
-                购买剧本额度后方可生成剧本！
+                生成剧本需要额度。自助购买即将推出——目前请由站点管理员在后台发放额度。
               </span>
             </p>
           ) : null}
